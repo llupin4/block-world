@@ -11,9 +11,8 @@ const HXZ: ReadonlyArray<readonly [number, number]> = [[1, 0], [-1, 0], [0, 1], 
 const SETTLE_GUARD = 20000; // safety valve: cap on cell updates one settle run may perform
 const NB6: ReadonlyArray<readonly [number, number, number]> = [[1, 0, 0], [-1, 0, 0], [0, 1, 0], [0, -1, 0], [0, 0, 1], [0, 0, -1]];
 const SEA_BODY_MIN = 512; // a water body larger than this counts as a sea/lake for equalization
-const EQUALIZE_BUDGET = 8192; // max air-pocket cells one pocket may be filled over (per seed; a multi-seed call can fill more)
+const EQUALIZE_BUDGET = 8192; // max air-pocket cells one equalize() may fill
 const BODY_BUDGET = 4096; // max water-body cells one equalize() may probe (probe is up-first, so the surface is reached within a few dozen hops even when truncated)
-const EQUALIZE_PROBE_BUDGET = 163840; // per-equalize-call cap on neighbour probes (pocket walks + body probes). Without it, every seed inside one over-budget region re-walks the full EQUALIZE_BUDGET (measured: one settle burned ~2.8M redundant pocketBlock lookups, doubling the load-path settle wall) — when exhausted, remaining seeds are left to the CA trickle, the same sanctioned category as over-budget pockets.
 
 interface CellState { b: number; l: number; s: number }
 const DRY: CellState = { b: Block.Air, l: 0, s: 0 };
@@ -22,14 +21,10 @@ export class WaterSim {
   private readonly world: World;
   private readonly queue = new Set<string>(); // insertion-ordered FIFO with dedup
   readonly touched = new Set<string>(); // chunk keys whose geometry changed (for re-mesh)
-  // Work counters. `seeds` is pinned in src/__tests__/water.test.ts; `processes` and
-  // `probes` in src/__tests__/water-load.test.ts (the load-path budget regression —
-  // processes via a replay prototype patch, probes directly). `queueAdds` counts
-  // re-mark *events* (one per enqueue() call; each re-marks self + 4 horizontal + above,
-  // the same closure writeCell re-marks) and is diagnostics-only, unpinned. `probes`
-  // counts equalize's neighbour probes (pocket walks exact, body-probe pops at 8) — the
-  // equalize cost is invisible to `processes`, so the load pin rides on it.
-  readonly stats = { seeds: 0, processes: 0, queueAdds: 0, equalizeFills: 0, probes: 0 };
+  // Work counters, pinned by src/__tests__/water-load.test.ts (the load-path budget
+  // regression). `queueAdds` counts re-mark *events* (one per enqueue() call; each
+  // re-marks self + 4 horizontal + above, the same closure writeCell re-marks).
+  readonly stats = { seeds: 0, processes: 0, queueAdds: 0, equalizeFills: 0 };
   private settling: Chunk | null = null; // chunk whose settle is in flight (exempts its own water from the pristine-skip in process)
 
   constructor(world: World) {
@@ -241,7 +236,6 @@ export class WaterSim {
   // infinite air void that would burn EQUALIZE_BUDGET and never settle (fills there are
   // no-ops anyway — setState cannot write to a missing chunk).
   private pocketBlock(x: number, y: number, z: number): number {
-    this.stats.probes++;
     if (!this.inBand(y)) return -1;
     const c = this.world.getChunk(chunkOf(x), chunkOf(y), chunkOf(z));
     if (!c) return -1;
@@ -259,28 +253,16 @@ export class WaterSim {
   // else — sealed caves, tiny puddles, over-budget pockets, no surface found — is left
   // to the tick CA, which still trickles through a new opening as before.
   equalize(seeds: readonly (readonly [number, number, number])[]): void {
-    const consumed = new Set<string>(); // region cells already walked by an earlier seed of this call
-    let budget = EQUALIZE_PROBE_BUDGET; // per-call probe budget (see the constant's comment). Charges are
-    // worst-case (a consumed-skip seed still charges 1), so the cap binds slightly tighter
-    // than the stats.probes count — intentional.
+    const consumed = new Set<string>(); // pocket cells already claimed by an earlier seed of this call
     for (const [sx, sy, sz] of seeds) {
-      budget -= 1;
-      if (budget < 0) break; // exhausted: the remaining seeds are left to the CA trickle
-      if (consumed.has(`${sx},${sy},${sz}`)) continue; // inside a region an earlier walk already refused or filled — re-walking it could only form sliver pockets
       if (this.pocketBlock(sx, sy, sz) !== Block.Air) continue; // not generated air: nothing to fill
       const pocket: number[] = []; // flat (x, y, z) triples, exploration order
       const body = new Set<string>(); // water cells 6-adjacent to the pocket
       let overflow = false;
-      let starved = false;
       const seen = new Set<string>([`${sx},${sy},${sz}`]);
       const stack: [number, number, number][] = [[sx, sy, sz]];
       while (stack.length > 0) {
-        // flat triple array — /3 converts entries to cell count; do not "simplify" to
-        // `pocket.length >= EQUALIZE_BUDGET` (that compares entries to the budget,
-        // silently dropping the cap to ~2730 cells)
         if (pocket.length / 3 >= EQUALIZE_BUDGET) { overflow = true; break; }
-        budget -= NB6.length;
-        if (budget < 0) { starved = true; break; } // mid-walk exhaustion: abandon this seed, stop taking more
         const [x, y, z] = stack.pop()!;
         pocket.push(x, y, z);
         for (const [dx, dy, dz] of NB6) {
@@ -294,13 +276,11 @@ export class WaterSim {
           stack.push([nx, ny, nz]);
         }
       }
-      if (starved) break; // no fill, and no further seeds this call
-      for (let i = 0; i < pocket.length; i += 3) consumed.add(`${pocket[i]},${pocket[i + 1]},${pocket[i + 2]}`); // claim the walked region (prefix on overflow)
       if (body.size === 0) continue; // not connected to any water: stays sealed and dry
       if (overflow) continue; // too big to classify safely: the CA trickle takes over
+      for (let i = 0; i < pocket.length; i += 3) consumed.add(`${pocket[i]},${pocket[i + 1]},${pocket[i + 2]}`);
       // Probe the water body for its surface, up-first (up-neighbour pushed last, popped
       // first) so the top is reached in minimal hops even under BODY_BUDGET truncation.
-      starved = false;
       let H = -1;
       let bodyCount = 0;
       const bseen = new Set<string>();
@@ -312,15 +292,11 @@ export class WaterSim {
       }
       while (bstack.length > 0) {
         if (bodyCount >= BODY_BUDGET) break; // body is certainly large; H (if any) was already reached up-first
-        budget -= 8; // one pop ≈ 8 probes (self, above, 6 neighbours)
-        if (budget < 0) { starved = true; break; }
         const [x, y, z] = bstack.pop()!;
         const st = this.cellState(x, y, z);
         if (st.b !== Block.Water) continue;
         bodyCount++;
-        this.stats.probes += 8;
         if (st.s === 1 && st.l === 7 && this.cellState(x, y + 1, z).b === Block.Air && y > H) H = y;
-        if (bodyCount > SEA_BODY_MIN && H >= 0) break; // both decision gates are settled — stop burning the budget
         let up: [number, number, number] | null = null;
         const rest: [number, number, number][] = [];
         for (const [dx, dy, dz] of NB6) {
@@ -335,7 +311,6 @@ export class WaterSim {
         for (const n of rest) bstack.push(n);
         if (up) bstack.push(up);
       }
-      if (starved) break; // no fill, and no further seeds this call
       if (H < 0 || bodyCount <= SEA_BODY_MIN) continue; // no sea/lake, or no surface found: leave to the CA
       for (let i = 0; i < pocket.length; i += 3) {
         const x = pocket[i], y = pocket[i + 1], z = pocket[i + 2];

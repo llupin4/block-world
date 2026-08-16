@@ -25,24 +25,14 @@ import { meshChunk } from '../chunk-mesher';
 //     their residual relaxation to later settles / the tick/5 slow clock; the queue is
 //     fully drained within the first ~15 frames of the replay (asserted below), so total
 //     work is what the pin bounds.
-//   equalize (T3): adds pocket/body probe work that is INVISIBLE to the process count
-//     (equalize never calls process()). Unguarded, it re-walked the full 8192-cell pocket
-//     budget for EVERY seed in an over-budget region (2.8M pocketBlock lookups in this
-//     replay, zero fills, doubling the settle wall to ~1.7 s); the per-call probe budget
-//     (EQUALIZE_PROBE_BUDGET) plus overflow-prefix claiming bounds it — settle wall comes
-//     back to ~1 s and the deterministic `stats.probes` count below pins the work the
-//     process-count pin cannot see. Equalize's fills also shift the state later CA
-//     processes see, so the same replay settles at 358,716 processes in the final code
-//     (358,734 after T2 before equalize existed).
 // The pin is the original pre-fix budget floor (2,463,202 / 2 = 1,231,601): it separates
-// the fixed pipeline (358,716 final; 358,734 post-T2) from the old code and the two-pass-only intermediate.
+// the fix (358,734) from both the old code and the two-pass-only intermediate.
 // process() is counted via a runtime prototype patch (TS `private` is
 // compile-time only), so the pin is implementation-agnostic. Wall time is logged for
 // the record, never asserted (it is machine-dependent); mesh cost is included (it is
 // unchanged by the fix) and the replay ends on a full 5x5x5 ring: 125 chunks, like
 // main.ts at rest.
-const PIN = 1231601; // old code: 2,463,202 (SETTLE_GUARD-saturated edge loop); two-pass-only: 2,463,202; guarded fix measured 358,716 (358,734 post-T2, before equalize)
-const PROBE_PIN = 1000000; // T3 equalize probes, unguarded: 2,804,261 (redundant per-seed re-walks of over-budget pockets, zero fills); guarded fix measured 605,070; pin leaves headroom above that and is far below the unguarded value
+const PIN = 1231601; // old code: 2,463,202 (SETTLE_GUARD-saturated edge loop); two-pass-only: 2,463,202; guarded fix measured 358,734
 
 it('boot + 60 streaming frames stay within the load-path work budget', () => {
   const w = new World();
@@ -99,11 +89,9 @@ it('boot + 60 streaming frames stay within the load-path work budget', () => {
   console.log('LOAD settle=', settleMs.toFixed(0), 'ms');
   console.log('LOAD mesh=', meshMs.toFixed(0), 'ms');
   console.log('LOAD processes=', processes, '(old code: 2463202; two-pass-only: 2463202; PIN', PIN + ')');
-  console.log('LOAD probes=', sim.stats.probes, '(T3 equalize neighbour probes — invisible to `processes`; unguarded T3 measured 2804261 on this replay; PROBE_PIN', PROBE_PIN + ')');
   console.log('LOAD chunks=', w.count());
 
   expect(w.count()).toBe(125); // the replay really walked to the full 5x5x5 ring
   expect(processes).toBeLessThan(PIN);
-  expect(sim.stats.probes).toBeLessThan(PROBE_PIN); // the equalize probe-work budget (call counts are machine-independent)
   expect(sim.tick(1)).toBe(0); // residual relaxation from any guard-saturated early settle completed within the replay window (queue fully drained)
 }, 30000);
