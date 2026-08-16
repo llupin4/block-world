@@ -259,8 +259,9 @@ window.addEventListener('keydown', (e) => {
   keys.add(e.code);
   if (e.repeat) return;
   if (e.code === 'KeyF') player.fly = !player.fly; // fly toggle
-  if (e.code === 'KeyN') player.noclip = !player.noclip; // noclip toggle (T13 adds KeyC here)
+  if (e.code === 'KeyN') player.noclip = !player.noclip; // noclip toggle
   if (e.code === 'KeyE') togglePalette(); // creative palette: open (unlock) / close (re-lock)
+  if (e.code === 'KeyC') setWireframe(!wireframeOn); // wireframe (PROJECT.md §14: chunk-edge bugs)
   const d = e.code.startsWith('Digit') ? e.code.slice(5) : e.code.startsWith('Numpad') ? e.code.slice(6) : '';
   if (d >= '1' && d <= '9') hotbar.select(Number(d) - 1); // 1-9 / numpad 1-9 selects a slot
 });
@@ -485,14 +486,24 @@ function syncWaterFx(): void {
 }
 
 // === debug ===
-// T13: C = chunk-wireframe / AO demo scene (F fly / N noclip toggles live in the T7 input section).
+
+// PROJECT.md §14 trap #1: chunk-boundary bugs. A global wireframe pass makes seams,
+// missing/duplicate faces, and stray geometry visible at a glance. The two mesher
+// materials are shared by every chunk mesh, so two flags flip the whole world
+// (per-chunk box outlines are a post-POC nicety).
+let wireframeOn = false;
+function setWireframe(on: boolean): void {
+  wireframeOn = on;
+  matOpaque.wireframe = on;
+  matTrans.wireframe = on;
+}
 
 // === loop ===
 
 const STEP = 1 / 60;
 const hint = document.getElementById('hint')!;
 hint.textContent =
-  'block-world T12 — click to lock · WASD move · SPACE jump/swim · F fly · SHIFT sink/fly-down · N noclip · E palette · 1-9/wheel select · LMB break · RMB place · ESC release · world streams in around you';
+  'block-world — click to lock · WASD move · SPACE jump/swim · F fly · SHIFT sink/fly-down · N noclip · C wireframe · E palette · 1-9/wheel select · LMB break · RMB place · world streams in around you · ESC release';
 
 let last = performance.now();
 let acc = 0;
