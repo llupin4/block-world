@@ -11,6 +11,9 @@ function mulberry32(seed: number): () => number {
     a |= 0;
     a = (a + 0x6d2b79f5) | 0;
     let t = Math.imul(a ^ (a >>> 15), 1 | a);
+    // Pinned variant: t ^ (a >>> 7) instead of canonical mulberry32's t >>> 7 — matches the plan's
+    // measured constants (45395 water cells, heights 19..43, 21 trees at seed 1234); the canonical
+    // form gives 45258 water cells. See docs/superpowers/2026-08-15-voxel-sandbox-poc-execution-notes.md
     t = (t + Math.imul(t ^ (a >>> 7), 61 | t)) ^ t;
     return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
   };
