@@ -359,4 +359,97 @@ describe('water sim', () => {
     expect(sim.cellState(5, 14, 5).b).toBe(Block.Water); // sea intact
     assertInvariants(w);
   });
+
+  // --- equalize decision-gate pins (each gate is provably NOT fillable by the CA trickle
+  // within a settle alone, so the pins below discriminate equalize from the trickle): ---
+
+  it('a pocket touching only a small body (<= SEA_BODY_MIN) is left unfilled by equalize, even with a real surface found', () => {
+    // 1 chunk. Body: water x0..6 y1..9 z0..7 (504 cells, just under SEA_BODY_MIN=512), with
+    // an exposed surface (shaft x0..6 y10..15 z0..3 open above, so H=9 is found). Wall x7
+    // (stone, full height) seals the body from the pocket: air x8..15 y1..11 z0..7 (704).
+    const w = makeWorld([[0, 0, 0]]);
+    for (let x = 0; x < 16; x++) for (let z = 0; z < 16; z++) {
+      w.setBlock(x, 0, z, Block.Stone); // floor
+      for (let y = 1; y <= 15; y++) {
+        let b = Block.Stone;
+        if (x <= 6 && y >= 1 && y <= 9 && z <= 7) b = Block.Water; // the small body
+        else if (x >= 8 && y >= 1 && y <= 11 && z <= 7) b = Block.Air; // the pocket
+        else if (x <= 6 && y >= 10 && z <= 3) b = Block.Air; // the shaft (gives the body its surface)
+        w.setBlock(x, y, z, b);
+      }
+    }
+    const sim = new WaterSim(w);
+    sim.settle(0, 0, 0); // body settles to (7,1) sources; pocket stays sealed-dry behind the wall
+    expect(countWaterAt(w, 8, 15, 0, 7, 1, 11)).toBe(0);
+    w.setBlock(7, 6, 4, Block.Air); // break the wall between body and pocket
+    sim.edit(7, 6, 4, Block.Air); // equalize must REFUSE: reachable body is 504 <= 512 (H=9 IS found — only the body-min gate stops the fill)
+    expect(sim.stats.equalizeFills).toBe(0);
+    expect(countWaterAt(w, 8, 15, 0, 7, 1, 11)).toBe(0); // no tick() has run: the trickle cannot have flooded it yet
+    expect(countWater(w)).toBe(504); // the body is untouched
+    assertInvariants(w);
+  });
+
+  it('an over-budget pocket (> EQUALIZE_BUDGET) is left to the trickle: equalize fills nothing of it', () => {
+    // 8 chunks, x0..63 z0..31 y0..15. Sea x0..15 over a stone seafloor (y13) at y14..15
+    // (1024 > 512 cells, surface up in the missing space). A stone slab x16..63 y13..15
+    // seals the pocket x16..63 y1..12 (18,432 air cells, > 8192 budget) from the sea.
+    // The pocket is stone-sealed, so within any settle the trickle cannot touch it — the
+    // ONLY thing that could fill it is an (mistakenly unbounded) equalize fill. After
+    // settling, punch one slab cell and edit: equalize runs at edit time, before any tick
+    // has trickled water in, so the pocket is still one intact 18k region. `equalizeFills
+    // == 0` and the pocket staying dry are the pin for the overflow gate (twin: the
+    // oceanCaveW edit test, where a 6145 in-budget pocket fills instantly).
+    const w = makeWorld([[0, 0, 0], [0, 0, 1], [1, 0, 0], [1, 0, 1], [2, 0, 0], [2, 0, 1], [3, 0, 0], [3, 0, 1]]);
+    for (let x = 0; x < 64; x++) for (let z = 0; z < 32; z++) {
+      w.setBlock(x, 0, z, Block.Stone); // floor
+      for (let y = 1; y <= 15; y++) {
+        let b = Block.Air;
+        if (x <= 15 && y === 13) b = Block.Stone; // seafloor under the sea region
+        else if (x <= 15 && y >= 14) b = Block.Water; // the sea
+        else if (x >= 16 && y >= 13) b = Block.Stone; // slab sealing the pocket from the sea
+        w.setBlock(x, y, z, b);
+      }
+    }
+    const sim = new WaterSim(w);
+    for (const [cx, cz] of [[0, 0], [0, 1], [1, 0], [1, 1], [2, 0], [2, 1], [3, 0], [3, 1]]) sim.settle(cx, 0, cz);
+    expect(sim.stats.equalizeFills).toBe(0); // sealed: nothing connected to a body
+    w.setBlock(40, 13, 16, Block.Air); // punch the slab
+    sim.edit(40, 13, 16, Block.Air); // NO tick() anywhere: equalize sees the intact 18k pocket
+    expect(sim.stats.equalizeFills).toBe(0); // the overflow gate: too big to classify, left to the trickle
+    expect(countWaterAt(w, 16, 63, 0, 31, 1, 12)).toBe(0); // the pocket is still dry — the fill never happened
+    expect(countWater(w)).toBe(1024); // the sea is untouched (nothing processed since the edit)
+    assertInvariants(w);
+  });
+
+  it('equalize fills a pocket up to the body surface and keeps its air above the surface', () => {
+    // 2x2 chunks, x0..31 z0..15, y-bands 0..15 and 16..31. Sea x0..31 z4..11 y13..15 on a
+    // STONE seafloor (y1..12 z4..11) so it cannot sink; open sky (air) z4..11 y16..31 above
+    // it gives the surface H=15 (sky is above-water: excluded from seeding, never a pocket).
+    // Air band y1..12 under the slab (z0..3 + z12..15); stone slab y13..18 elsewhere, with
+    // a tunnel x24..31 z12..15 y13..15 and a gallery x24..31 z12..15 y16..18 (96 cells)
+    // ABOVE the sea level. Pocket = z12..15 band (1536) + tunnel (96) + gallery (96) =
+    // 1728, one 6-connected region touching the sea (768 > 512): equalize must fill band +
+    // tunnel (y<=15) but keep the gallery (y16..18 > 15) as air. The z0..3 band is sealed
+    // from all water and stays dry. The tunnel is only reachable from the sea by spread,
+    // so the count also pins that equalize/the trickle converge it fully.
+    const w = makeWorld([[0, 0, 0], [1, 0, 0], [0, 1, 0], [1, 1, 0]]);
+    for (let x = 0; x < 32; x++) for (let z = 0; z < 16; z++) {
+      w.setBlock(x, 0, z, Block.Stone); // floor
+      for (let y = 1; y <= 31; y++) {
+        let b = Block.Stone;
+        if (y >= 1 && y <= 12 && (z <= 3 || z >= 12)) b = Block.Air; // band under the slab
+        else if (y >= 13 && y <= 15 && z >= 4 && z <= 11) b = Block.Water; // sea on a stone seafloor
+        else if ((y >= 13 && y <= 15 && x >= 24 && z >= 12) || (y >= 16 && y <= 18 && x >= 24 && z >= 12)) b = Block.Air; // tunnel + gallery
+        else if (y >= 16 && z >= 4 && z <= 11) b = Block.Air; // sky above the open sea
+        w.setBlock(x, y, z, b);
+      }
+    }
+    const sim = new WaterSim(w);
+    sim.settle(0, 0, 0); sim.settle(1, 0, 0); sim.settle(0, 1, 0); sim.settle(1, 1, 0);
+    expect(countWater(w)).toBe(2400); // sea 768 + z12..15 band 1536 + tunnel 96 — the 96 gallery cells (and the 1536 sealed z0..3 band) stay air
+    expect(sim.cellState(26, 16, 12).b).toBe(Block.Air); // above the surface H=15: the pocket keeps its air
+    expect(sim.cellState(26, 13, 12).b).toBe(Block.Water); // the tunnel flooded (sea spread / equalize)
+    expect(sim.cellState(5, 1, 1).b).toBe(Block.Air); // the sealed z0..3 band stays dry (no water neighbour at all)
+    assertInvariants(w);
+  });
 });
