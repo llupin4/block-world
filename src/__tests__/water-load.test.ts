@@ -31,15 +31,17 @@ import { meshChunk } from '../chunk-mesher';
 //     replay, zero fills, doubling the settle wall to ~1.7 s); the per-call probe budget
 //     (EQUALIZE_PROBE_BUDGET) plus overflow-prefix claiming bounds it — settle wall comes
 //     back to ~1 s and the deterministic `stats.probes` count below pins the work the
-//     process-count pin cannot see.
+//     process-count pin cannot see. Equalize's fills also shift the state later CA
+//     processes see, so the same replay settles at 358,716 processes in the final code
+//     (358,734 after T2 before equalize existed).
 // The pin is the original pre-fix budget floor (2,463,202 / 2 = 1,231,601): it separates
-// the fix (358,734) from both the old code and the two-pass-only intermediate.
+// the fixed pipeline (358,716 final; 358,734 post-T2) from the old code and the two-pass-only intermediate.
 // process() is counted via a runtime prototype patch (TS `private` is
 // compile-time only), so the pin is implementation-agnostic. Wall time is logged for
 // the record, never asserted (it is machine-dependent); mesh cost is included (it is
 // unchanged by the fix) and the replay ends on a full 5x5x5 ring: 125 chunks, like
 // main.ts at rest.
-const PIN = 1231601; // old code: 2,463,202 (SETTLE_GUARD-saturated edge loop); two-pass-only: 2,463,202; guarded fix measured 358,734
+const PIN = 1231601; // old code: 2,463,202 (SETTLE_GUARD-saturated edge loop); two-pass-only: 2,463,202; guarded fix measured 358,716 (358,734 post-T2, before equalize)
 const PROBE_PIN = 1000000; // T3 equalize probes, unguarded: 2,804,261 (redundant per-seed re-walks of over-budget pockets, zero fills); guarded fix measured 605,070; pin leaves headroom above that and is far below the unguarded value
 
 it('boot + 60 streaming frames stay within the load-path work budget', () => {

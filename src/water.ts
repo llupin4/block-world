@@ -22,11 +22,13 @@ export class WaterSim {
   private readonly world: World;
   private readonly queue = new Set<string>(); // insertion-ordered FIFO with dedup
   readonly touched = new Set<string>(); // chunk keys whose geometry changed (for re-mesh)
-  // Work counters, pinned by src/__tests__/water-load.test.ts (the load-path budget
-  // regression). `queueAdds` counts re-mark *events* (one per enqueue() call; each
-  // re-marks self + 4 horizontal + above, the same closure writeCell re-marks). `probes`
+  // Work counters. `seeds` is pinned in src/__tests__/water.test.ts; `processes` and
+  // `probes` in src/__tests__/water-load.test.ts (the load-path budget regression —
+  // processes via a replay prototype patch, probes directly). `queueAdds` counts
+  // re-mark *events* (one per enqueue() call; each re-marks self + 4 horizontal + above,
+  // the same closure writeCell re-marks) and is diagnostics-only, unpinned. `probes`
   // counts equalize's neighbour probes (pocket walks exact, body-probe pops at 8) — the
-  // equalize cost is invisible to `processes`, so the load pin rides on this.
+  // equalize cost is invisible to `processes`, so the load pin rides on it.
   readonly stats = { seeds: 0, processes: 0, queueAdds: 0, equalizeFills: 0, probes: 0 };
   private settling: Chunk | null = null; // chunk whose settle is in flight (exempts its own water from the pristine-skip in process)
 
@@ -112,10 +114,10 @@ export class WaterSim {
           if (c.blocks[localIndex(lx, ly, lz)] !== Block.Water) continue;
           const wx = bx + lx, wy = by + ly, wz = bz + lz;
           if (this.cellState(wx, wy - 1, wz).b === Block.Air) { this.enqueue(wx, wy, wz); continue; }
-        for (const [dx, dz] of HXZ) {
-          const m = this.cellState(wx + dx, wy, wz + dz);
-          if (m.b === Block.Air || (m.b === Block.Water && m.s === 0 && m.l >= 1 && m.l < 6)) { this.enqueue(wx, wy, wz); break; }
-        }
+          for (const [dx, dz] of HXZ) {
+            const m = this.cellState(wx + dx, wy, wz + dz);
+            if (m.b === Block.Air || (m.b === Block.Water && m.s === 0 && m.l >= 1 && m.l < 6)) { this.enqueue(wx, wy, wz); break; }
+          }
         }
   }
 
