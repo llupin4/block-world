@@ -98,6 +98,10 @@ export class World {
     return this.chunks.delete(chunkKey(cx, cy, cz));
   }
 
+  *allChunks(): IterableIterator<Chunk> {
+    yield* this.chunks.values();
+  }
+
   clear(): void {
     this.chunks.clear();
   }
