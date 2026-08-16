@@ -390,66 +390,74 @@ describe('water sim', () => {
   });
 
   it('an over-budget pocket (> EQUALIZE_BUDGET) is left to the trickle: equalize fills nothing of it', () => {
-    // 8 chunks, x0..63 z0..31 y0..15. Sea x0..15 over a stone seafloor (y13) at y14..15
-    // (1024 > 512 cells, surface up in the missing space). A stone slab x16..63 y13..15
-    // seals the pocket x16..63 y1..12 (18,432 air cells, > 8192 budget) from the sea.
-    // The pocket is stone-sealed, so within any settle the trickle cannot touch it — the
-    // ONLY thing that could fill it is an (mistakenly unbounded) equalize fill. After
-    // settling, punch one slab cell and edit: equalize runs at edit time, before any tick
-    // has trickled water in, so the pocket is still one intact 18k region. `equalizeFills
-    // == 0` and the pocket staying dry are the pin for the overflow gate (twin: the
-    // oceanCaveW edit test, where a 6145 in-budget pocket fills instantly).
+    // 8 chunks, x0..63 z0..31 y0..15. Sea x0..15 over its y13 row at y14..15 (1024 > 512
+    // cells, surface up in the missing space, seafloor row y13 stone x0..15). Everything
+    // else in y1..12 is ONE air region across the full width (x0..63 = 24,576 cells >
+    // 8192 budget — the x=15/16 boundary is open in y1..12); only the y13 row (seafloor
+    // under the sea, slab x16..63) separates it from the sea. Nothing is 6-connected to
+    // water, so settle-time equalize has no seeds and the region stays dry. Then punch
+    // (8,13,16) — under the sea, above the region — and edit: the seed is 6-adjacent to
+    // the sea, whose body probe reaches the whole sea (1024 > 512, surface H=15), so the
+    // ONLY gate left to refuse the fill is the overflow budget (24,577 > 8192). No
+    // tick() runs, so the trickle cannot act —
+    // `equalizeFills == 0` + the region still dry pin the overflow gate exactly (twin:
+    // the oceanCaveW edit test, where an in-budget pocket fills instantly).
     const w = makeWorld([[0, 0, 0], [0, 0, 1], [1, 0, 0], [1, 0, 1], [2, 0, 0], [2, 0, 1], [3, 0, 0], [3, 0, 1]]);
     for (let x = 0; x < 64; x++) for (let z = 0; z < 32; z++) {
       w.setBlock(x, 0, z, Block.Stone); // floor
       for (let y = 1; y <= 15; y++) {
         let b = Block.Air;
-        if (x <= 15 && y === 13) b = Block.Stone; // seafloor under the sea region
+        if (x <= 15 && y === 13) b = Block.Stone; // seafloor row under the sea
         else if (x <= 15 && y >= 14) b = Block.Water; // the sea
-        else if (x >= 16 && y >= 13) b = Block.Stone; // slab sealing the pocket from the sea
+        else if (x >= 16 && y >= 13) b = Block.Stone; // slab row separating the region from the sea
         w.setBlock(x, y, z, b);
       }
     }
     const sim = new WaterSim(w);
     for (const [cx, cz] of [[0, 0], [0, 1], [1, 0], [1, 1], [2, 0], [2, 1], [3, 0], [3, 1]]) sim.settle(cx, 0, cz);
-    expect(sim.stats.equalizeFills).toBe(0); // sealed: nothing connected to a body
-    w.setBlock(40, 13, 16, Block.Air); // punch the slab
-    sim.edit(40, 13, 16, Block.Air); // NO tick() anywhere: equalize sees the intact 18k pocket
-    expect(sim.stats.equalizeFills).toBe(0); // the overflow gate: too big to classify, left to the trickle
-    expect(countWaterAt(w, 16, 63, 0, 31, 1, 12)).toBe(0); // the pocket is still dry — the fill never happened
+    expect(sim.stats.equalizeFills).toBe(0); // nothing 6-connected to water: no seeds at all
+    w.setBlock(8, 13, 16, Block.Air); // punch the seafloor row under the sea
+    sim.edit(8, 13, 16, Block.Air); // NO tick() anywhere: the 24k region is still intact, and only the overflow gate can refuse it
+    expect(sim.stats.equalizeFills).toBe(0); // the overflow gate: 24,577 > 8192, refused before any body-fill decision
+    expect(countWaterAt(w, 0, 63, 0, 31, 1, 12)).toBe(0); // the whole region is still dry — the fill never happened
     expect(countWater(w)).toBe(1024); // the sea is untouched (nothing processed since the edit)
     assertInvariants(w);
   });
 
   it('equalize fills a pocket up to the body surface and keeps its air above the surface', () => {
-    // 2x2 chunks, x0..31 z0..15, y-bands 0..15 and 16..31. Sea x0..31 z4..11 y13..15 on a
-    // STONE seafloor (y1..12 z4..11) so it cannot sink; open sky (air) z4..11 y16..31 above
-    // it gives the surface H=15 (sky is above-water: excluded from seeding, never a pocket).
-    // Air band y1..12 under the slab (z0..3 + z12..15); stone slab y13..18 elsewhere, with
-    // a tunnel x24..31 z12..15 y13..15 and a gallery x24..31 z12..15 y16..18 (96 cells)
-    // ABOVE the sea level. Pocket = z12..15 band (1536) + tunnel (96) + gallery (96) =
-    // 1728, one 6-connected region touching the sea (768 > 512): equalize must fill band +
-    // tunnel (y<=15) but keep the gallery (y16..18 > 15) as air. The z0..3 band is sealed
-    // from all water and stays dry. The tunnel is only reachable from the sea by spread,
-    // so the count also pins that equalize/the trickle converge it fully.
+    // 2x2 chunks, x0..31 z0..15 (no voids outside), y-bands 0..15 and 16..31.
+    // SEA: x0..31 z0..7 y14..15 on a stone seafloor (z0..7 y1..13), open sky above.
+    // Because a settled 2-row column grades down (top row l<7), only level-7 sources
+    // define a surface — here the PIPE row (all x, y13, z7..11: water-connected to the
+    // sea's underside, supported on the seafloor at z7) defines H=13, not the sea top.
+    // The pipe crosses under a tall CHIMNEY (x0..31 z8..11, air above it) whose air is
+    // ONE in-budget pocket (B: chimney y14..31 + sky y16..31 = 6400 cells <= 8192; its
+    // sub-H section A y1..12 is separated by the pipe row). Every cell of that pocket is
+    // ABOVE H=13, so equalize's above-H rule is what keeps the whole pocket dry: with
+    // the rule disabled the ENTIRE pocket fills (measured: count 5449 -> 11076, states
+    // flip to (7,1)) — pinning the rule. The CA alone raises water only to its own
+    // levels (section A floods from the pipe's fall; pipe/sky columns rise ~7).
     const w = makeWorld([[0, 0, 0], [1, 0, 0], [0, 1, 0], [1, 1, 0]]);
     for (let x = 0; x < 32; x++) for (let z = 0; z < 16; z++) {
       w.setBlock(x, 0, z, Block.Stone); // floor
       for (let y = 1; y <= 31; y++) {
         let b = Block.Stone;
-        if (y >= 1 && y <= 12 && (z <= 3 || z >= 12)) b = Block.Air; // band under the slab
-        else if (y >= 13 && y <= 15 && z >= 4 && z <= 11) b = Block.Water; // sea on a stone seafloor
-        else if ((y >= 13 && y <= 15 && x >= 24 && z >= 12) || (y >= 16 && y <= 18 && x >= 24 && z >= 12)) b = Block.Air; // tunnel + gallery
-        else if (y >= 16 && z >= 4 && z <= 11) b = Block.Air; // sky above the open sea
+        if (z >= 8 && z <= 11 && y <= 13) b = Block.Air;          // chimney section A (y1..13)
+        else if (y === 13 && z >= 7) b = Block.Water;             // the pipe (under seafloor edge + chimney)
+        else if (y >= 14 && y <= 15 && z <= 7) b = Block.Water;   // the sea
+        else if (z >= 8 && z <= 11) b = Block.Air;                // chimney section B (y14..31)
+        else if (z <= 7) b = Block.Air;                           // sky above the open sea
         w.setBlock(x, y, z, b);
       }
     }
     const sim = new WaterSim(w);
     sim.settle(0, 0, 0); sim.settle(1, 0, 0); sim.settle(0, 1, 0); sim.settle(1, 1, 0);
-    expect(countWater(w)).toBe(2400); // sea 768 + z12..15 band 1536 + tunnel 96 — the 96 gallery cells (and the 1536 sealed z0..3 band) stay air
-    expect(sim.cellState(26, 16, 12).b).toBe(Block.Air); // above the surface H=15: the pocket keeps its air
-    expect(sim.cellState(26, 13, 12).b).toBe(Block.Water); // the tunnel flooded (sea spread / equalize)
-    expect(sim.cellState(5, 1, 1).b).toBe(Block.Air); // the sealed z0..3 band stays dry (no water neighbour at all)
+    expect(countWater(w)).toBe(5449); // sea 1024 + pipe + the CA-raised columns — the B+sky pocket (all > H=13) stays air via the above-H rule
+    expect(sim.cellState(5, 25, 4).b).toBe(Block.Air); // sky: a disabled above-H rule fills it (measured -> (7,1))
+    expect(sim.cellState(5, 21, 8).b).toBe(Block.Air); // chimney above the pipe rise-top: a disabled above-H rule fills it
+    expect(sim.cellState(5, 14, 9).b).toBe(Block.Air); // the pocket's lowest cell, at y=14 > H=13: unfilled only because of the above-H rule
+    expect(sim.cellState(5, 1, 9).b).toBe(Block.Water); // section A flooded from the pipe's fall to the floor
+    expect(sim.cellState(5, 1, 14).b).toBe(Block.Stone); // the z12..15 slab stays sealed
     assertInvariants(w);
   });
 });

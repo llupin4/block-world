@@ -258,7 +258,9 @@ export class WaterSim {
   // to the tick CA, which still trickles through a new opening as before.
   equalize(seeds: readonly (readonly [number, number, number])[]): void {
     const consumed = new Set<string>(); // region cells already walked by an earlier seed of this call
-    let budget = EQUALIZE_PROBE_BUDGET; // per-call probe budget (see the constant's comment)
+    let budget = EQUALIZE_PROBE_BUDGET; // per-call probe budget (see the constant's comment). Charges are
+    // worst-case (a consumed-skip seed still charges 1), so the cap binds slightly tighter
+    // than the stats.probes count — intentional.
     for (const [sx, sy, sz] of seeds) {
       budget -= 1;
       if (budget < 0) break; // exhausted: the remaining seeds are left to the CA trickle
@@ -272,7 +274,8 @@ export class WaterSim {
       const stack: [number, number, number][] = [[sx, sy, sz]];
       while (stack.length > 0) {
         // flat triple array — /3 converts entries to cell count; do not "simplify" to
-        // `pocket.length >= EQUALIZE_BUDGET` (that would silently triple the budget)
+        // `pocket.length >= EQUALIZE_BUDGET` (that compares entries to the budget,
+        // silently dropping the cap to ~2730 cells)
         if (pocket.length / 3 >= EQUALIZE_BUDGET) { overflow = true; break; }
         budget -= NB6.length;
         if (budget < 0) { starved = true; break; } // mid-walk exhaustion: abandon this seed, stop taking more
