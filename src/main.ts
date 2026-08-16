@@ -1,7 +1,7 @@
 import * as THREE from 'three';
-import { Block } from './blocks';
-import { World, chunkKey, chunkOf, localIndex, CHUNK_SIZE, WORLD_Y_MAX, WORLD_Y_MIN, type VoxelBuffer } from './world';
-import { SEA_LEVEL } from './terrain';
+import { Block, isOpaque } from './blocks';
+import { World, chunkKey, chunkOf, CHUNK_SIZE, WORLD_Y_MAX, WORLD_Y_MIN, type VoxelBuffer } from './world';
+import { TERRAIN_SEED, TerrainGen, generateRegion } from './terrain';
 import { meshChunk } from './chunk-mesher';
 import { Player, EYE, type MoveInput } from './player';
 import { raycastVoxel, REACH, type RayHit } from './raycast';
@@ -19,8 +19,7 @@ const scene = new THREE.Scene();
 const BG_AIR = 0x87ceeb; // T12 reuses this (air/underwater background + fog swap)
 scene.background = new THREE.Color(BG_AIR);
 const camera = new THREE.PerspectiveCamera(70, 1, 0.1, 512);
-// reserved for T7's player: one above the center chunk's ground top (surface y=40)
-const SPAWN = new THREE.Vector3(30.5, 41, 19.5);
+// SPAWN is computed in world-state, after the terrain exists (scan of a measured column).
 
 function onResize() {
   camera.aspect = window.innerWidth / window.innerHeight;
@@ -155,57 +154,22 @@ const matTrans = new THREE.MeshBasicMaterial({
 
 const world = new World();
 
-/** Synthetic M1 plateau: 3x3 x 3-high chunk band, per-chunk plateau height h = 38..41. */
-function demoFill(w: World): void {
-  for (let cx = 0; cx <= 2; cx++)
-    for (let cz = 0; cz <= 2; cz++) {
-      const h = SEA_LEVEL + 6 + ((cx * 5 + cz * 9 + 32) % 4);
-      for (let cy = 0; cy <= 2; cy++) {
-        const ch = w.ensureChunk(cx, cy, cz);
-        const by = cy * 16;
-        for (let lz = 0; lz < 16; lz++)
-          for (let lx = 0; lx < 16; lx++)
-            for (let wy = by; wy < by + 16; wy++) {
-              if (wy > h) continue; // leave Air (new chunks are zeroed)
-              const b: number = wy === h ? (h < SEA_LEVEL + 1 ? Block.Sand : Block.Grass)
-                : wy < h - 2 ? Block.Stone
-                : Block.Dirt;
-              ch.blocks[localIndex(lx, wy - by, lz)] = b;
-            }
-      }
-    }
+// The T4 suite pins this exact region (seed 1234, chunks 0..4 x/z and y): 45395 water cells,
+// surface heights 19..43, 21 trees — so what renders is what the tests describe.
+const gen = new TerrainGen(TERRAIN_SEED);
+generateRegion(world, gen, 0, 0, 4, 4);
 
-  // Hand-placed features: top band of the center chunk only (world x/z 16..31, y 32..47).
-  const c = w.ensureChunk(1, 2, 1);
-  const h = SEA_LEVEL + 6 + ((1 * 5 + 1 * 9 + 32) % 4); // = 40, same expression as above
-  const setL = (lx: number, ly: number, lz: number, b: number, airOnly = false) => {
-    if (lx < 0 || lx >= 16 || ly < 0 || ly >= 16 || lz < 0 || lz >= 16) return;
-    const i = localIndex(lx, ly, lz);
-    if (airOnly && c.blocks[i] !== Block.Air) return;
-    c.blocks[i] = b;
-  };
-  for (let lz = 11; lz <= 14; lz++) // 4x4 pool: sand floor, water column flush with terrain
-    for (let lx = 11; lx <= 14; lx++) {
-      setL(lx, h - 35, lz, Block.Sand);
-      for (let ly = h - 34; ly <= h - 32; ly++) setL(lx, ly, lz, Block.Water);
-    }
-  for (let lz = 0; lz <= 3; lz++) // sand patch in the chunk's south-west corner
-    for (let lx = 0; lx <= 3; lx++) setL(lx, h - 32, lz, Block.Sand);
-  for (let t = 0; t <= 2; t++) setL(5, h + t - 32, 5, Block.Wood); // 3-tall tree trunk
-  for (let dz = -1; dz <= 1; dz++)
-    for (let dx = -1; dx <= 1; dx++) {
-      if (Math.abs(dx) === 1 && Math.abs(dz) === 1) continue;
-      setL(5 + dx, h + 3 - 32, 5 + dz, Block.Leaves, true);
-    }
-  setL(5, h + 4 - 32, 5, Block.Leaves, true); // single top leaf
-  for (let lz = 5; lz <= 7; lz++) // 3x3 plank deck
-    for (let lx = 10; lx <= 12; lx++) setL(lx, h - 32, lz, Block.Planks);
-  for (const lx of [13, 14]) // glass tower on the pool edge — written AFTER the pool
-    for (const lz of [10, 11]) // so glass wins where their surface cells overlap (lz=11)
-      for (let ly = h - 32; ly <= h - 30; ly++) setL(lx, ly, lz, Block.Glass);
-}
-
-demoFill(world);
+// Spawn on MEASURED ground. Plan deviation (recorded): the plan's probe reported (33,41) as a
+// grass shelf at surface y=33, but under the T4-pinned generator that column is a sea-basin
+// cell (sand at y=30, water to y=32) in neither PRNG variant — the plan's T9 probe must have
+// used a different scratch setup. (6,46) is the nearest clean grass column to the intended
+// point in the rendered world: surface y=33, no tree in the column, and the sea starts 3 m
+// east (toward the spawn's +x facing). The scan still drops from the top of the band (79)
+// to the surface voxel; for an open-sea column the player would land on the sand floor and swim up.
+const sx = 6, sz = 46;
+let sy = 79;
+while (sy >= 0 && !isOpaque(world.getBlock(sx, sy, sz))) sy--;
+const SPAWN = new THREE.Vector3(sx + 0.5, sy + 1, sz + 0.5);
 
 // === chunks-meshing ===
 
@@ -243,17 +207,18 @@ function rebuildChunkMesh(cx: number, cy: number, cz: number): void {
 }
 // (T8 remeshes around edits via remeshAround; T10 reuses this for streaming loads/unloads.)
 
-// M1: static build of the whole demo band (T10 replaces this with streaming).
-for (let cx = 0; cx <= 2; cx++)
-  for (let cz = 0; cz <= 2; cz++)
-    for (let cy = 0; cy <= 2; cy++) rebuildChunkMesh(cx, cy, cz);
+// M4: static build of the initial 5x5x5 terrain band (one-shot, ~1 s at load;
+// T10 replaces this with streaming loads/unloads around the player).
+for (let cx = 0; cx <= 4; cx++)
+  for (let cz = 0; cz <= 4; cz++)
+    for (let cy = 0; cy <= 4; cy++) rebuildChunkMesh(cx, cy, cz);
 
 // === camera ===
 
 // Camera = the player's eyes (feet + EYE). Rotation order YXZ: yaw first, then pitch.
 const player = new Player((x, y, z) => world.getBlock(x, y, z));
 player.place(SPAWN);
-player.yaw = Math.PI; // face south, toward the deck/pool features
+player.yaw = -Math.PI / 2; // face +x (east), at the sea — the shoreline starts ~6 m from spawn
 camera.rotation.order = 'YXZ';
 
 function syncCamera(): void {
@@ -407,7 +372,7 @@ function updateHitbox(): void {
 const STEP = 1 / 60;
 const hint = document.getElementById('hint')!;
 hint.textContent =
-  'block-world T8 — click to lock · LMB break · RMB place (planks) · F fly · N noclip · ESC release';
+  'block-world T9 — click to lock · WASD move · SPACE jump/swim · F fly · SHIFT sink/fly-down · N noclip · LMB break · RMB place (planks) · ESC release';
 
 let last = performance.now();
 let acc = 0;
@@ -421,6 +386,7 @@ function frame(now: number): void {
     acc -= STEP;
     player.update(STEP, readMove());
     // T10: streaming.update(world, pcx, pcz, pcy)
+    if (player.pos.y < WORLD_Y_MIN) player.place(SPAWN); // fell out of the world (open cave / dug-away floor)
   }
   syncCamera();
   updateHitbox();
