@@ -9,6 +9,10 @@ import { World, chunkOf, chunkKey, localIndex, WORLD_Y_MIN, WORLD_Y_MAX, type Ch
 
 const HXZ: ReadonlyArray<readonly [number, number]> = [[1, 0], [-1, 0], [0, 1], [0, -1]];
 const SETTLE_GUARD = 20000; // safety valve: cap on cell updates one settle run may perform
+const NB6: ReadonlyArray<readonly [number, number, number]> = [[1, 0, 0], [-1, 0, 0], [0, 1, 0], [0, -1, 0], [0, 0, 1], [0, 0, -1]];
+const SEA_BODY_MIN = 512; // a water body larger than this counts as a sea/lake for equalization
+const EQUALIZE_BUDGET = 8192; // max air-pocket cells one equalize() may fill
+const BODY_BUDGET = 4096; // max water-body cells one equalize() may probe (probe is up-first, so the surface is reached within a few dozen hops even when truncated)
 
 interface CellState { b: number; l: number; s: number }
 const DRY: CellState = { b: Block.Air, l: 0, s: 0 };
@@ -222,8 +226,124 @@ export class WaterSim {
       guard++;
     }
     this.settling = null;
+    this.equalizeAfterSettle(c);
     c.settled = true;
     return this.touched;
+  }
+
+  // The generated world's block at a cell, or -1 (impassable wall) for missing chunks /
+  // out-of-band cells. Pocket searches must never walk into ungenerated space: it is an
+  // infinite air void that would burn EQUALIZE_BUDGET and never settle (fills there are
+  // no-ops anyway — setState cannot write to a missing chunk).
+  private pocketBlock(x: number, y: number, z: number): number {
+    if (!this.inBand(y)) return -1;
+    const c = this.world.getChunk(chunkOf(x), chunkOf(y), chunkOf(z));
+    if (!c) return -1;
+    return c.blocks[localIndex(x - c.cx * 16, y - c.cy * 16, z - c.cz * 16)];
+  }
+
+  // Bulk-fill air pockets that became connected to a large water body (sea/lake), up to
+  // that body's surface level — connected vessels. Called from settle (seeds = generated
+  // air cells below/next to the chunk's water) and edit (seed = the broken cell).
+  // A pocket is filled only when: it fits in EQUALIZE_BUDGET (else the probe is incomplete
+  // and the classification unsafe), the touching water body has more than SEA_BODY_MIN
+  // cells, and a surface level H (a level-7 source cell with air above) was found during
+  // the up-first body probe. Pockets above H keep their air; filled cells become level-7
+  // sources and are re-marked (neighbouring water may have regained feed). Everything
+  // else — sealed caves, tiny puddles, over-budget pockets, no surface found — is left
+  // to the tick CA, which still trickles through a new opening as before.
+  equalize(seeds: readonly (readonly [number, number, number])[]): void {
+    const consumed = new Set<string>(); // pocket cells already claimed by an earlier seed of this call
+    for (const [sx, sy, sz] of seeds) {
+      if (this.pocketBlock(sx, sy, sz) !== Block.Air) continue; // not generated air: nothing to fill
+      const pocket: number[] = []; // flat (x, y, z) triples, exploration order
+      const body = new Set<string>(); // water cells 6-adjacent to the pocket
+      let overflow = false;
+      const seen = new Set<string>([`${sx},${sy},${sz}`]);
+      const stack: [number, number, number][] = [[sx, sy, sz]];
+      while (stack.length > 0) {
+        if (pocket.length / 3 >= EQUALIZE_BUDGET) { overflow = true; break; }
+        const [x, y, z] = stack.pop()!;
+        pocket.push(x, y, z);
+        for (const [dx, dy, dz] of NB6) {
+          const nx = x + dx, ny = y + dy, nz = z + dz;
+          const nb = this.pocketBlock(nx, ny, nz);
+          if (nb === Block.Water) { body.add(`${nx},${ny},${nz}`); continue; }
+          if (nb !== Block.Air) continue; // solid or wall: pocket boundary
+          const key = `${nx},${ny},${nz}`;
+          if (seen.has(key) || consumed.has(key)) continue;
+          seen.add(key);
+          stack.push([nx, ny, nz]);
+        }
+      }
+      if (body.size === 0) continue; // not connected to any water: stays sealed and dry
+      if (overflow) continue; // too big to classify safely: the CA trickle takes over
+      for (let i = 0; i < pocket.length; i += 3) consumed.add(`${pocket[i]},${pocket[i + 1]},${pocket[i + 2]}`);
+      // Probe the water body for its surface, up-first (up-neighbour pushed last, popped
+      // first) so the top is reached in minimal hops even under BODY_BUDGET truncation.
+      let H = -1;
+      let bodyCount = 0;
+      const bseen = new Set<string>();
+      const bstack: [number, number, number][] = [];
+      for (const key of body) {
+        const p = key.split(',');
+        bseen.add(key);
+        bstack.push([Number(p[0]), Number(p[1]), Number(p[2])]);
+      }
+      while (bstack.length > 0) {
+        if (bodyCount >= BODY_BUDGET) break; // body is certainly large; H (if any) was already reached up-first
+        const [x, y, z] = bstack.pop()!;
+        const st = this.cellState(x, y, z);
+        if (st.b !== Block.Water) continue;
+        bodyCount++;
+        if (st.s === 1 && st.l === 7 && this.cellState(x, y + 1, z).b === Block.Air && y > H) H = y;
+        let up: [number, number, number] | null = null;
+        const rest: [number, number, number][] = [];
+        for (const [dx, dy, dz] of NB6) {
+          const nx = x + dx, ny = y + dy, nz = z + dz;
+          if (this.cellState(nx, ny, nz).b !== Block.Water) continue;
+          const key = `${nx},${ny},${nz}`;
+          if (bseen.has(key)) continue;
+          bseen.add(key);
+          if (dy === 1) up = [nx, ny, nz];
+          else rest.push([nx, ny, nz]);
+        }
+        for (const n of rest) bstack.push(n);
+        if (up) bstack.push(up);
+      }
+      if (H < 0 || bodyCount <= SEA_BODY_MIN) continue; // no sea/lake, or no surface found: leave to the CA
+      for (let i = 0; i < pocket.length; i += 3) {
+        const x = pocket[i], y = pocket[i + 1], z = pocket[i + 2];
+        if (y > H) continue; // the pocket keeps its air above the body's surface
+        this.setState(x, y, z, 7, 1, Block.Water);
+        this.stats.equalizeFills++;
+        this.enqueue(x, y, z);
+      }
+    }
+  }
+
+  // Settle-time equalization seeds: every GENERATED air cell 6-adjacent to the settling
+  // chunk's water, EXCLUDING its above-neighbours — the air above a water surface is the
+  // sky, connected forever, never a newly opened pocket, and searching it would burn the
+  // pocket budget on every sea-chunk settle. (The edit() path seeds the broken cell
+  // itself in all six directions; the same guards there make sky pockets no-ops too.)
+  private equalizeAfterSettle(c: Chunk): void {
+    const bx = c.cx * 16, by = c.cy * 16, bz = c.cz * 16;
+    const seeds = new Map<string, [number, number, number]>();
+    for (let lx = 0; lx < 16; lx++)
+      for (let ly = 0; ly < 16; ly++)
+        for (let lz = 0; lz < 16; lz++) {
+          if (c.blocks[localIndex(lx, ly, lz)] !== Block.Water) continue;
+          const wx = bx + lx, wy = by + ly, wz = bz + lz;
+          for (const [dx, dy, dz] of NB6) {
+            if (dy === 1) continue; // no above-neighbours (see method comment)
+            const x = wx + dx, y = wy + dy, z = wz + dz;
+            if (!this.inBand(y)) continue;
+            if (this.cellState(x, y, z).b !== Block.Air) continue;
+            seeds.set(`${x},${y},${z}`, [x, y, z]);
+          }
+        }
+    if (seeds.size > 0) this.equalize([...seeds.values()]);
   }
 
   // A player edit (break = Air, place = new block). main.ts has already written the
@@ -245,5 +365,10 @@ export class WaterSim {
     this.queue.add(`${wx},${wy},${wz}`);
     for (const [dx, dz] of HXZ) this.queue.add(`${wx + dx},${wy},${wz + dz}`);
     this.queue.add(`${wx},${wy + 1},${wz}`);
+    if (block === Block.Air) {
+      // A break may have connected a sealed pocket to a large water body (punching a
+      // cave floor under the ocean): equalize now so the column fills instantly.
+      this.equalize([[wx, wy, wz]]);
+    }
   }
 }
