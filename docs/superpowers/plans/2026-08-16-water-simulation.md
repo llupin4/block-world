@@ -4,7 +4,7 @@
 
 **Goal:** Make all water dynamic (generated ocean and player-placed water share one sim): water falls one cell/tick, re-promotes to an immortal source on solid support (a rule typical of voxel engines), spreads to a level-1 front at Manhattan radius 6, drains only when it falls out of the world, and settles on chunk load so freshly loaded chunks show caves already flooded. Separately, fix terrain so underwater caves carve **air** (not a solid water blob) and then flood physically from openings.
 
-**Architecture:** One new pure-TS module `src/water.ts` (`WaterSim`, mirroring how `streaming.ts` is tested in node). Flow state — `wlevel` (`Uint8Array`, 0 dry / 1..7 water, 7 full) and `wsource` (`Uint8Array`, 0/1) — rides in each `Chunk` alongside `blocks` (added in `src/world.ts`), so it streams with the chunk: a missing neighbour chunk reads as dry and is not a spread escape; a falling cell whose destination is out-of-band/missing is destroyed. A global insertion-ordered `Set<string>` queue (key `${wx},${wy},${wz}`) is the dirty-cell set; `tick(budget)` processes at most `budget` cells, `settle(cx,cy,cz)` seeds a chunk's worldgen water as level-7 sources and relaxes to a fixpoint (guarded, idempotent via a per-chunk `settled` flag), and `edit(x,y,z,block)` is the entry point for player edits (placed Water = a level-7 source; any other block clears the cell's water state). `src/main.ts` wires it: construct after boot-world gen, settle each `rebuilt` chunk inside `tickStreaming`, run `sim.tick(200)` every 5th frame (slow water clock per PROJECT.md §9), call `sim.edit(...)` after the two `onMouseDown` `setBlock` sites, and re-mesh any chunk the sim touched. `src/terrain.ts` carves caves to `Block.Air`; the exact water-count pin in `terrain.test.ts` is re-measured and re-pinned. Levels affect dynamics only, never the mesher (all water is still a full transparent block). No changes to `blocks.ts`, `chunk-mesher.ts`, `raycast.ts`, `player.ts`, `ui.ts`, or `streaming.ts`.
+**Architecture:** One new pure-TS module `src/water.ts` (`WaterSim`, mirroring how `streaming.ts` is tested in node). Flow state — `wlevel` (`Uint8Array`, 0 dry / 1..7 water, 7 full) and `wsource` (`Uint8Array`, 0/1) — rides in each `Chunk` alongside `blocks` (added in `src/world.ts`), so it streams with the chunk: a missing neighbour chunk reads as dry and is not a spread escape; a falling cell whose destination is out-of-band/missing is destroyed. A global insertion-ordered `Set<string>` queue (key `${wx},${wy},${wz}`) is the dirty-cell set; `tick(budget)` processes at most `budget` cells, `settle(cx,cy,cz)` seeds a chunk's worldgen water as level-7 sources and relaxes to a fixpoint (guarded, idempotent via a per-chunk `settled` flag; it never re-levels or dries a loaded-unsettled neighbour's unseeded worldgen water, so the order in which chunks settle is irrelevant), and `edit(x,y,z,block)` is the entry point for player edits (placed Water = a level-7 source; any other block clears the cell's water state). `src/main.ts` wires it: construct after boot-world gen, settle each `rebuilt` chunk inside `tickStreaming`, run `sim.tick(200)` every 5th frame (slow water clock per PROJECT.md §9), call `sim.edit(...)` after the two `onMouseDown` `setBlock` sites, and re-mesh any chunk the sim touched. `src/terrain.ts` carves caves to `Block.Air`; the exact water-count pin in `terrain.test.ts` is re-measured and re-pinned. Levels affect dynamics only, never the mesher (all water is still a full transparent block). No changes to `blocks.ts`, `chunk-mesher.ts`, `raycast.ts`, `player.ts`, `ui.ts`, or `streaming.ts`.
 
 **Tech Stack:** TypeScript + Vite + vitest (unchanged). Commands: `npm test` (vitest run), `npm run build` (tsc --noEmit + vite build), `npm run dev` (manual pass). TS is strict. The world band the sim treats as in-band is `WORLD_Y_MIN = -32 .. WORLD_Y_MAX - 1` (y -32..63); terrain is generated for `cy 0..4` only, and the top `cy=4` chunk (y 64..79) sits *above* `WORLD_Y_MAX` — it contains no water (sea surface ≤ 32, everything above air), so the sim's in-band guard never rejects live water; boot-gen still fills that chunk and the spawn scan reads it, which is fine because `World.getBlock` performs no band check, only `WaterSim.cellState` does.
 
@@ -17,6 +17,9 @@
 - Sealed 3×3 pool → **9** level-7 sources; `tick(1) === 0` (fixpoint, immortal); breaking the centre refills as a promoted source.
 - Chunk-seam spread: a source on chunk 0's +X face spreads into loaded chunk 1 at level **6** and back into chunk 0 at level **6**.
 - Settle is idempotent: a second `settle` on a settled chunk is a no-op (gradient + count 85 preserved).
+- Load-path settle with no prior edit (region `0..3`): worldgen water is preserved exactly — **322 → 322**. That region is land-dominated (322 sea-pocket cells total; its caves are not within relaxation reach of those pockets), so the load path must lose nothing — the regression being *eating* (the unguarded sim measured 319, i.e. 3 cells starved to Air).
+- Handcrafted 2×2 ocean + a sea-facing cave, settling exactly one of the four chunks: the loaded-unsettled neighbours' water is never eaten and their cave Air is flooded from the settled chunk — right column **7488 → 7632**, and `block(17,3,13)` becomes Water.
+- Settle-order invariance: a 1×2 ocean slab settled in either chunk order converges to the same final count (**7680**, the full slab preserved).
 - Terrain re-pin after cave→Air: exact water count in the `-2..2` region drops **45395 → 24936** (each carved underwater-cave cell leaves `blocks` as Air, not Water).
 - Cave-carve assertion sample (`water.test.ts`, region `0..3`): **1284** carved cells are present and Air.
 
@@ -146,14 +149,15 @@ Also update the file's pinned-PRNG comment (lines 14–16), which cites the old 
     t = (t + Math.imul(t ^ (a >>> 7), 61 | t)) ^ t;
 ```
 
-Change only the `45395 water cells` reference in that comment to `24936 water cells (post cave→Air; was 45395)`:
+Update that comment: re-pin the water-cell figure to the post-carve value and drop the now-stale canonical-form figure (its count also changes with the carve, so it was not re-measured post cave→Air):
 
-```ts
-    // Pinned variant: t ^ (a >>> 7) instead of canonical mulberry32's t >>> 7 — matches the plan's
-    // measured constants (24936 water cells post cave→Air, was 45395; heights 19..43, 21 trees at
-    // seed 1234); the canonical form gives 45258. See docs/superpowers/2026-08-15-voxel-sandbox-poc-execution-notes.md
-    t = (t + Math.imul(t ^ (a >>> 7), 61 | t)) ^ t;
-```
+ ```ts
+     // Pinned variant: t ^ (a >>> 7) instead of canonical mulberry32's t >>> 7 — matches the plan's
+     // measured constants (24936 water cells post cave→Air, was 45395; heights 19..43, 21 trees at
+     // seed 1234). The canonical form's 45258 water-cell figure predates the cave→Air change and
+     // was not re-measured after it. See docs/superpowers/2026-08-15-voxel-sandbox-poc-execution-notes.md
+     t = (t + Math.imul(t ^ (a >>> 7), 61 | t)) ^ t;
+ ```
 
 - [ ] **Step 2: Re-pin the exact water count in the test**
 
@@ -186,7 +190,7 @@ Expected: all 6 terrain tests pass. The exact-count test passes at **24936**. If
 In `docs/superpowers/2026-08-15-voxel-sandbox-poc-execution-notes.md`, the D2 row cites the old constant. Find the table cell containing `the plan's measured constants (45395 water cells, heights 19..43, 21 trees, seed 1234) are reproduced **only** by the variant; canonical gives 45258.` and append a post-note to it:
 
 ```
- …canonical gives 45258. (2026-08-16: the cave carve now produces Air, so the seeded water count re-pins to **24936** in `terrain.test.ts`; the PRNG variant and all other constants are unchanged.)
+ …canonical gives 45258. (2026-08-16: the cave carve now produces Air, so the seeded water count re-pins to **24936** in `terrain.test.ts`; the PRNG variant and the height/tree constants are unchanged. The 45258 canonical-form figure above predates the cave→Air change and was not re-measured after it.)
 ```
 
 - [ ] **Step 5: Typecheck + full suite + commit**
@@ -207,7 +211,7 @@ git commit -m "fix: carve underwater caves to air (not a water blob); re-pin ter
 - Create: `src/__tests__/water.test.ts`
 - Create: `src/water.ts`
 
-Write the test first (it fails because `../water` doesn't exist), then the implementation until it is green. The test drives `World` + `WaterSim` in node, exactly like `streaming.test.ts`. Invariants asserted throughout: `block == Water  ⇔  wlevel >= 1 || wsource == 1`. The final test in the file re-checks the terrain cave→Air carve (Task 2) as an integration assertion that the sim's flooding input is air.
+Write the test first (it fails because `../water` doesn't exist), then the implementation until it is green. The test drives `World` + `WaterSim` in node, exactly like `streaming.test.ts`. Invariant asserted throughout, once the world is *at rest*: `block == Water  ⇔  wlevel >= 1 || wsource == 1`. Caveat: the invariant is transiently violated by a loaded-unsettled chunk's unseeded worldgen water (level 0 / no source until its own `settle` seeds it) — so the two handcrafted neighbour tests settle only some chunks and assert water counts / cell states instead of `assertInvariants`. The final test in the file re-checks the terrain cave→Air carve (Task 2) as an integration assertion that the sim's flooding input is air.
 
 - [ ] **Step 1: Write the test file (fails — `water.ts` not present yet)**
 
@@ -233,6 +237,15 @@ function slab(w: World, b: number, x0: number, x1: number, y: number, z0: number
 function countWater(w: World): number {
   let n = 0;
   for (const c of w.allChunks()) for (let i = 0; i < c.blocks.length; i++) if (c.blocks[i] === Block.Water) n++;
+  return n;
+}
+
+// Water count over an explicit world-coordinate box (neighbour-test probe helper).
+function countWaterAt(w: World, x0: number, x1: number, z0: number, z1: number, y0: number, y1: number): number {
+  let n = 0;
+  for (let x = x0; x <= x1; x++)
+    for (let z = z0; z <= z1; z++)
+      for (let y = y0; y <= y1; y++) if (w.getBlock(x, y, z) === Block.Water) n++;
   return n;
 }
 
@@ -397,6 +410,66 @@ describe('water sim', () => {
     assertInvariants(w);
   });
 
+  it('settle runs with no prior edit (the load path): settled generated sea is preserved — no worldgen water is eaten by sequential per-chunk settling', () => {
+    const gen = new TerrainGen(TERRAIN_SEED);
+    const w = new World();
+    generateRegion(w, gen, 0, 3, 0, 3); // 4x4 chunk columns: land-dominated, small sea pockets, unconnected carved caves
+    const sim = new WaterSim(w);
+    const before = countWater(w);
+    for (const c of w.allChunks()) sim.settle(c.cx, c.cy, c.cz); // tickStreaming's settle loop — no edit() anywhere
+    drain(sim);
+    const after = countWater(w);
+    console.log('I before=', before, 'after=', after);
+    // The 0..3 region is land-dominated (322 worldgen water cells total); its sea pockets
+    // are too small to feed caves within relaxation reach, so settling must preserve the
+    // count exactly — the regression is EATING (loss), which unguarded settling caused.
+    // The flood-into-cave path is demonstrated by the handcrafted 2x2 ocean test below.
+    expect(before).toBe(322);
+    expect(after).toBe(322);
+    assertInvariants(w);
+  });
+
+  it('settling one chunk of a loaded 2x2 ocean region never eats a loaded-unsettled neighbour\'s worldgen water, and floods its sea-facing cave', () => {
+    const w = makeWorld([[0, 0, 0], [1, 0, 0], [0, 0, 1], [1, 0, 1]]); // 2x2 ocean slab, y 0..15
+    for (let x = 0; x < 32; x++) for (let z = 0; z < 32; z++) {
+      w.setBlock(x, 0, z, Block.Stone); // seafloor
+      for (let y = 1; y <= 15; y++) w.setBlock(x, y, z, Block.Water);
+    }
+    for (let x = 16; x <= 23; x++) for (let z = 12; z <= 15; z++) for (let y = 1; y <= 6; y++) w.setBlock(x, y, z, Block.Air); // sea-facing cave pocket in chunk (1,0,0)
+    const sim = new WaterSim(w);
+    const b0 = countWaterAt(w, 16, 31, 0, 31, 0, 15); // right column = the three loaded-unsettled chunks
+    sim.settle(0, 0, 0); // settle ONLY the left chunk (the runtime's per-chunk-on-load form)
+    drain(sim);
+    const b1 = countWaterAt(w, 16, 31, 0, 31, 0, 15);
+    console.log('P before right column=', b0);
+    console.log('P after  right column=', b1);
+    expect(b1).toBeGreaterThanOrEqual(b0); // the neighbours' pristine (l=0, s=0) worldgen water is never re-leveled or dried
+    expect(w.getBlock(17, 3, 13)).toBe(Block.Water); // ...the cave Air IS flooded from the settled chunk's side
+    // No assertInvariants here: the right column is deliberately left loaded-unsettled, so its
+    // unseeded worldgen water is transiently (l=0, s=0) by design — the invariant holds only at rest.
+  });
+
+  it('settle is order-independent: settling the other chunk first converges to the same water count', () => {
+    const ocean = (): World => {
+      const w = makeWorld([[0, 0, 0], [1, 0, 0]]); // 1x2 ocean slab, y 0..15
+      for (let x = 0; x < 32; x++) for (let z = 0; z < 16; z++) {
+        w.setBlock(x, 0, z, Block.Stone);
+        for (let y = 1; y <= 15; y++) w.setBlock(x, y, z, Block.Water);
+      }
+      return w;
+    };
+    const a = ocean();
+    const sa = new WaterSim(a);
+    sa.settle(0, 0, 0); sa.settle(1, 0, 0); // natural order
+    const b = ocean();
+    const sb = new WaterSim(b);
+    sb.settle(1, 0, 0); sb.settle(0, 0, 0); // the other chunk first
+    const w1 = countWater(a), w2 = countWater(b);
+    console.log('PO w1=', w1, 'w2=', w2);
+    expect(w1).toBe(7680); expect(w2).toBe(7680); // the full slab is preserved in either order...
+    expect(w1).toBe(w2); // ...and the converged count does not depend on settle order
+  });
+
   it('terrain caves carve Air (not Water): every carved stone/dirt cell below sea level is Air after generation', () => {
     const gen = new TerrainGen(TERRAIN_SEED);
     const w = new World();
@@ -435,7 +508,7 @@ Create `src/water.ts` with exactly this content:
 
 ```ts
 import { Block, BLOCKS } from './blocks';
-import { World, chunkOf, chunkKey, localIndex, WORLD_Y_MIN, WORLD_Y_MAX } from './world';
+import { World, chunkOf, chunkKey, localIndex, WORLD_Y_MIN, WORLD_Y_MAX, type Chunk } from './world';
 
 // WaterSim: the PROJECT.md §9 flow cellular automaton. Pure TS (no three) so vitest
 // drives it in node, mirroring how streaming.ts is tested. State (wlevel/wsource)
@@ -453,6 +526,7 @@ export class WaterSim {
   private readonly world: World;
   private readonly queue = new Set<string>(); // insertion-ordered FIFO with dedup
   readonly touched = new Set<string>(); // chunk keys whose geometry changed (for re-mesh)
+  private settling: Chunk | null = null; // chunk whose settle is in flight (exempts its own water from the pristine-skip in process)
 
   constructor(world: World) {
     this.world = world;
@@ -505,6 +579,13 @@ export class WaterSim {
   private process(wx: number, wy: number, wz: number): void {
     const C = this.cellState(wx, wy, wz);
     if (C.b !== Block.Water) return; // dried / no longer water: neighbours+above already re-marked
+    // A loaded-unsettled neighbour still carries pristine worldgen water (level 0, no
+    // source) that its own settle has not seeded yet. Never re-level or dry it: settling
+    // A may write levels / flood Air across the seam into B, but B's unseeded water stays
+    // untouched until B's settle re-seeds it as (7,1) — this is what makes sequential
+    // per-chunk settling order-independent and unable to eat worldgen water.
+    const Cc = this.world.getChunk(chunkOf(wx), chunkOf(wy), chunkOf(wz));
+    if (Cc && !Cc.settled && Cc !== this.settling && C.l === 0 && C.s === 0) return;
     const below = this.cellState(wx, wy - 1, wz);
 
     // below is Air (missing / out-of-band counts) → C falls down one cell.
@@ -568,19 +649,17 @@ export class WaterSim {
     return n;
   }
 
-  // On-load settle: seed every worldgen Water cell as a level-7 source, mark each wet
-  // cell (+ neighbours + above), then relax to a fixpoint (guarded). Idempotent.
+  // On-load settle: writeCell-seed every worldgen Water cell as a level-7 source — the
+  // seed write is what queues the cell (+ neighbours + above); a plain array pre-mark
+  // here would satisfy writeCell's exact-state early-return and queue nothing, leaving
+  // the relaxation a no-op (caves would never flood on load). Then relax to a fixpoint
+  // (guarded). Idempotent via the settled flag.
   settle(cx: number, cy: number, cz: number): Set<string> {
     const c = this.world.getChunk(cx, cy, cz);
     if (!c || c.settled) return this.touched;
     this.touched.clear();
+    this.settling = c; // during this settle, only c's own water may be modified (see the pristine-skip in process)
     const bx = cx * 16, by = cy * 16, bz = cz * 16;
-    for (let i = 0; i < c.wlevel.length; i++) {
-      if (c.blocks[i] === Block.Water) {
-        c.wlevel[i] = 7;
-        c.wsource[i] = 1;
-      }
-    }
     for (let lx = 0; lx < 16; lx++)
       for (let ly = 0; ly < 16; ly++)
         for (let lz = 0; lz < 16; lz++)
@@ -596,6 +675,7 @@ export class WaterSim {
       this.process(wx, wy, wz);
       guard++;
     }
+    this.settling = null;
     c.settled = true;
     return this.touched;
   }
@@ -628,11 +708,12 @@ Key invariants the implementation must preserve (the tests assert them, but re-c
 - `setState` calls `world.setBlock` only when the *block* changes, and records the chunk in `touched` only from a true `setBlock` — level-only changes never re-mesh.
 - A fall carries the source bit (`C.s`) and lands at level 7; a landing into a missing/void chunk is a no-op write (destroyed) — the only drain path.
 - Spread only when `nL >= 2` and only into loaded neighbours, so ungenerated space is never filled.
+- The pristine-skip in `process`: a water cell that is level 0 and source 0 in a loaded, not-yet-settled chunk is never re-processed (its own `settle` seeds it as (7,1) and re-queues it) — this is what makes sequential per-chunk settling order-independent and unable to eat worldgen water across a seam. `writeCell` deliberately stays unguarded: settling A may still raise levels or flood *Air* across the seam into B (transient until B settles).
 
 - [ ] **Step 3: Run the water suite (GREEN)**
 
 Run: `npx vitest run src/__tests__/water.test.ts`
-Expected: all 9 tests pass. The `console.log` lines print `A count= 85` and `H carved= 1284`. If any value drifts from the constants in the header (85 / 1 / 0 / 9 / the seam level 6), reproduce it in a throwaway probe before touching any assertion — the constants are load-bearing.
+Expected: all 12 tests pass. The `console.log` lines print `A count= 85`, `I before= 322 after= 322`, `P before right column= 7488` / `P after  right column= 7632`, `PO w1= 7680 w2= 7680`, and `H carved= 1284`. If any value drifts from the constants in the header (85 / 1 / 0 / 9 / the seam level 6 / 322 / 7488·7632 / 7680 / 1284), reproduce it in a throwaway probe before touching any assertion — the constants are load-bearing.
 
 - [ ] **Step 4: Full suite + typecheck**
 
@@ -865,7 +946,7 @@ In §9, change the heading `**Flow (optional for POC).**` to `**Flow.**`, and re
 with:
 
 ```md
-**[Implemented]** The flow sim shipped in `src/water.ts` (unit-tested in `src/__tests__/water.test.ts`). Flow state (`wlevel`/`wsource`) is stored in each chunk (`src/world.ts`) and streams with it. On top of the rules above it also: **re-promotes** a settled water cell to a *source* on solid support below (a rule typical of voxel engines — so settled lakes, pool floors, landing cells, and sealed pockets are immortal), **settles** standing water once on chunk load (freshly loaded chunks show flooded caves without a visible pour), and **drains** only water that falls out of the world. Documented POC-model deviations: "falling" = step down one cell/tick with the source bit carried (a landed source keeps feeding its stream); a re-promoted source *keeps* its level (bounded, unlike a fresh level-7 source), so a settled pool's front stays a level-1 ring; cut in-flight flow lands and re-promotes rather than draining; water never spreads into ungenerated space (missing chunks stop spread — only a *falling* cell into a missing/void destination is destroyed); and levels affect dynamics only, never the mesh.
+**[Implemented]** The flow sim shipped in `src/water.ts` (unit-tested in `src/__tests__/water.test.ts`). Flow state (`wlevel`/`wsource`) is stored in each chunk (`src/world.ts`) and streams with it. On top of the rules above it also: **re-promotes** a settled water cell to a *source* on solid support below (a rule typical of voxel engines — so settled lakes, pool floors, landing cells, and sealed pockets are immortal), **settles** standing water once on chunk load (freshly loaded chunks show flooded caves without a visible pour), and **drains** only water that falls out of the world. Documented POC-model deviations: "falling" = step down one cell/tick with the source bit carried (a landed source keeps feeding its stream); a re-promoted source *keeps* its level (bounded, unlike a fresh level-7 source), so a settled pool's front stays a level-1 ring; cut in-flight flow lands and re-promotes rather than draining; water never spreads into ungenerated space (missing chunks stop spread — only a *falling* cell into a missing/void destination is destroyed); and levels affect dynamics only, never the mesh. One load-path subtlety is handled explicitly: settling chunks one at a time can never eat a loaded-unsettled neighbour's *unseeded* worldgen water (level 0, no source) — such cells are skipped until their own chunk seeds them as level-7 sources, so settling one chunk may flood air or raise levels across a seam but never dries its neighbour's water, and the converged state is independent of settle order.
 ```
 
 - [ ] **Step 3: Commit**
@@ -884,7 +965,7 @@ git commit -m "docs: de-defer the water flow sim (now src/water.ts) and fix the 
 - [ ] **Step 1: Full suite + build**
 
 Run: `npm test && npm run build`
-Expected: every suite green (now 9 test files / 58 tests, including the new `water.test.ts`), `tsc --noEmit` clean, `vite build` succeeds.
+Expected: every suite green (now 9 test files / 61 tests, including the new `water.test.ts`), `tsc --noEmit` clean, `vite build` succeeds.
 
 - [ ] **Step 2: Manual `npm run dev` sanity (if not done in Task 4 Step 7–8)**
 
