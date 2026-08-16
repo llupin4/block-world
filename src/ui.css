@@ -1,3 +1,49 @@
 * { margin: 0; padding: 0; box-sizing: border-box; }
 html, body { width: 100%; height: 100%; overflow: hidden; background: #0b0e14; }
 .hidden { display: none !important; }
+
+#app { position: fixed; inset: 0; }
+#app canvas { display: block; }
+
+#crosshair {
+  display: none; /* shown by game code while pointer-locked (T7+) */
+  position: fixed; left: 50%; top: 50%;
+  width: 14px; height: 14px;
+  transform: translate(-50%, -50%);
+  pointer-events: none;
+}
+#crosshair::before,
+#crosshair::after { content: ''; position: absolute; background: rgba(255, 255, 255, .9); }
+#crosshair::before { left: 50%; top: 0; width: 2px; height: 100%; transform: translateX(-50%); }
+#crosshair::after { top: 50%; left: 0; height: 2px; width: 100%; transform: translateY(-50%); }
+
+#hint {
+  position: fixed; left: 12px; bottom: 12px;
+  color: #e8eef7; font: 12px/1.5 system-ui, sans-serif;
+  text-shadow: 0 1px 2px #000;
+  pointer-events: none;
+}
+
+/* hotbar: bottom-center, display-only (T11 fills it); palette: top-right, click targets */
+#hotbar {
+  position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%);
+  display: flex; gap: 4px;
+  padding: 6px; background: rgba(10, 14, 22, .55); border-radius: 8px;
+  pointer-events: none;
+}
+#palette {
+  position: fixed; top: 12px; right: 12px;
+  display: grid; grid-template-columns: repeat(3, 48px); gap: 4px;
+}
+#hotbar .slot,
+#palette .slot {
+  border: 2px solid rgba(255, 255, 255, .25);
+  border-radius: 6px;
+  background-repeat: no-repeat;
+  background-size: 256px 256px; /* full atlas; per-slot background-position offsets to its tile */
+}
+#hotbar .slot { width: 44px; height: 44px; }
+#palette .slot { width: 48px; height: 48px; }
+#palette .slot { cursor: pointer; }
+#hotbar .slot.sel,
+#palette .slot.sel { border-color: #ffd24a; }
