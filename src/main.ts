@@ -261,15 +261,17 @@ window.addEventListener('keydown', (e) => {
   if (e.code === 'KeyF') player.fly = !player.fly; // fly toggle
   if (e.code === 'KeyN') player.noclip = !player.noclip; // noclip toggle
   if (e.code === 'KeyE') togglePalette(); // creative palette: open (unlock) / close (re-lock)
+  if (e.code === 'KeyH') toggleHelp(); // help overlay: same open (unlock) / close (re-lock)
   if (e.code === 'KeyC') setWireframe(!wireframeOn); // wireframe (PROJECT.md §14: chunk-edge bugs)
   const d = e.code.startsWith('Digit') ? e.code.slice(5) : e.code.startsWith('Numpad') ? e.code.slice(6) : '';
   if (d >= '1' && d <= '9') hotbar.select(Number(d) - 1); // 1-9 / numpad 1-9 selects a slot
 });
 window.addEventListener('keyup', (e) => keys.delete(e.code));
 
-// Click the canvas: close the palette if it is open, otherwise pointer-lock (WASD + mouse steer; ESC releases).
+// Click the canvas: close any open overlay (palette/help), otherwise pointer-lock (WASD + mouse steer; ESC releases).
 renderer.domElement.addEventListener('click', () => {
   if (paletteOpen) closePalette();
+  else if (helpOpen) closeHelp();
   else lockPointer();
 });
 
@@ -408,6 +410,13 @@ const paletteSlotEls = Array.from(paletteEl.children) as HTMLElement[];
 
 hotbarSlotEls.forEach((el, i) => placeIcon(el, hotbar.slots[i], 40)); // 44px box minus 2px border each side
 hotbarEl.classList.remove('hidden');
+// Select-key keycap on each slot (1-9); palette slots are clicked, so they stay unnumbered.
+hotbarSlotEls.forEach((el, i) => {
+  const num = document.createElement('span');
+  num.className = 'num';
+  num.textContent = String(i + 1);
+  el.append(num);
+});
 paletteSlotEls.forEach((el, i) => {
   placeIcon(el, PALETTE_BLOCKS[i], 44); // 48px box minus 2px border each side
   el.addEventListener('click', () => hotbar.setSlot(hotbar.selected, PALETTE_BLOCKS[i])); // the arrow reads the *current* selection
@@ -421,6 +430,9 @@ hotbar.onSlotChange = (i) => {
 };
 
 let paletteOpen = false;
+let helpOpen = false;
+const helpEl = document.getElementById('help')!;
+const helpHintEl = document.getElementById('help-hint')!;
 
 // Browsers enforce a ~1 s re-lock cooldown after ESC; a rejected request is benign
 // (the cooldown is the only realistic failure), so swallow it rather than throw.
@@ -429,30 +441,70 @@ function lockPointer(): void {
   if (r instanceof Promise) r.catch(() => {}); // Safari rejects without a user gesture
 }
 
+// Invariant: at most one overlay (palette/help) is open. The badge advertises help and is
+// visible only when nothing is open.
+function syncOverlays(): void {
+  helpHintEl.classList.toggle('hidden', paletteOpen || helpOpen);
+}
+
 function closePalette(): void {
   paletteEl.classList.add('hidden');
   paletteOpen = false;
+  syncOverlays();
   lockPointer();
 }
 
-function togglePalette(): void {
-  if (paletteOpen) {
-    closePalette();
-  } else {
-    paletteOpen = true;
-    paletteEl.classList.remove('hidden');
-    document.exitPointerLock(); // crosshair + hitbox hide via the existing pointerlockchange handler
+// Opening an overlay closes the other WITHOUT re-locking, so a swap never flickers
+// (the single exitPointerLock below is the only lock call of the toggle).
+function openPalette(): void {
+  if (helpOpen) {
+    helpOpen = false;
+    helpEl.classList.add('hidden');
   }
+  paletteOpen = true;
+  paletteEl.classList.remove('hidden');
+  syncOverlays();
+  document.exitPointerLock(); // crosshair + hitbox hide via the existing pointerlockchange handler
 }
+
+function closeHelp(): void {
+  helpEl.classList.add('hidden');
+  helpOpen = false;
+  syncOverlays();
+  lockPointer();
+}
+
+function openHelp(): void {
+  if (paletteOpen) {
+    paletteOpen = false;
+    paletteEl.classList.add('hidden');
+  }
+  helpOpen = true;
+  helpEl.classList.remove('hidden');
+  syncOverlays();
+  document.exitPointerLock();
+}
+
+function togglePalette(): void {
+  if (paletteOpen) closePalette();
+  else openPalette();
+}
+
+function toggleHelp(): void {
+  if (helpOpen) closeHelp();
+  else openHelp();
+}
+
+helpHintEl.addEventListener('click', () => { if (!helpOpen) openHelp(); });
 
 // Callbacks are wired above, so this initial select lights the .sel border.
 hotbar.select(PALETTE_BLOCKS.indexOf(Block.Planks)); // default: planks, as T8's selectedBlock was
 
-// Wheel cycles the hotbar (down = next slot); while the palette is open the wheel is left alone.
+// Wheel cycles the hotbar (down = next slot); while an overlay is open the wheel is left alone.
 window.addEventListener(
   'wheel',
   (e) => {
-    if (paletteOpen) return;
+    if (paletteOpen || helpOpen) return; // an open overlay owns the wheel (and the mouse is free)
     hotbar.cycle(e.deltaY > 0 ? 1 : -1);
   },
   { passive: true },
@@ -501,9 +553,6 @@ function setWireframe(on: boolean): void {
 // === loop ===
 
 const STEP = 1 / 60;
-const hint = document.getElementById('hint')!;
-hint.textContent =
-  'block-world — click to lock · WASD move · SPACE jump/swim · F fly · SHIFT sink/fly-down · N noclip · C wireframe · E palette · 1-9/wheel select · LMB break · RMB place · world streams in around you · ESC release';
 
 let last = performance.now();
 let acc = 0;
