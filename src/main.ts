@@ -528,7 +528,7 @@ function tickStreaming(): void {
   const r = streaming.update(world, chunkOf(player.pos.x), chunkOf(player.pos.z), chunkOf(player.pos.y));
   for (const c of r.unloaded) removeChunkMesh(c.cx, c.cy, c.cz);
   for (const c of r.rebuilt) {
-    sim.settle(c.cx, c.cy, c.cz); // POC form of worldgen-fluid settling: settle BEFORE meshing so the new chunk's mesh already shows flooded caves. The settled flag makes re-settling a re-meshed chunk a no-op. Cross-seam chunks the sim touched are re-meshed at end of frame (drain below).
+    sim.settle(c.cx, c.cy, c.cz); // POC form of worldgen-fluid settling: settle BEFORE meshing so the new chunk's mesh already shows flooded caves. The settled flag makes re-settling a re-meshed chunk a no-op. settle() never clears sim.touched: cross-seam marks from any settle this frame survive here and to the end-of-frame drain below, which re-meshes them.
     rebuildChunkMesh(c.cx, c.cy, c.cz);
   }
 }

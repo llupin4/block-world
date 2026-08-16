@@ -140,15 +140,17 @@ export class WaterSim {
     return n;
   }
 
-  // On-load settle: writeCell-seed every worldgen Water cell as a level-7 source — the
-  // seed write is what queues the cell (+ neighbours + above); a plain array pre-mark
-  // here would satisfy writeCell's exact-state early-return and queue nothing, leaving
-  // the relaxation a no-op (caves would never flood on load). Then relax to a fixpoint
-  // (guarded). Idempotent via the settled flag.
+  // On-load settle: seed every worldgen Water cell as a level-7 source (a plain array
+  // pre-mark would satisfy writeCell's exact-state early-return and queue nothing,
+  // leaving the relaxation a no-op — caves would never flood on load), then relax to
+  // a fixpoint (guarded). Idempotent via the settled flag.
+  // NOTE: does NOT clear `touched` — marks accumulate for the whole frame and the
+  // frame-end drain (main.ts) is the sole consumer. Clearing here would drop marks
+  // made by an EARLIER settle of the same frame: a seam chunk flooded across from it
+  // keeps a stale pre-flood mesh (visible level steps / dry corners at chunk edges).
   settle(cx: number, cy: number, cz: number): Set<string> {
     const c = this.world.getChunk(cx, cy, cz);
     if (!c || c.settled) return this.touched;
-    this.touched.clear();
     this.settling = c; // during this settle, only c's own water may be modified (see the pristine-skip in process)
     const bx = cx * 16, by = cy * 16, bz = cz * 16;
     for (let lx = 0; lx < 16; lx++)

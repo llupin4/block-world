@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { Block } from '../blocks';
-import { World, chunkOf } from '../world';
+import { World, chunkOf, chunkKey } from '../world';
 import { WaterSim } from '../water';
 import { TerrainGen, generateRegion, SEA_LEVEL, TERRAIN_SEED } from '../terrain';
 
@@ -248,6 +248,23 @@ describe('water sim', () => {
     console.log('PO w1=', w1, 'w2=', w2);
     expect(w1).toBe(7680); expect(w2).toBe(7680); // the full slab is preserved in either order...
     expect(w1).toBe(w2); // ...and the converged count does not depend on settle order
+  });
+
+  it('a settled chunk\'s touched mark survives later sibling settles, so the frame-end drain still re-meshes it (stale seam-mesh fix)', () => {
+    const w = makeWorld([[0, 0, 0], [1, 0, 0], [2, 0, 0]]); // 3 chunks wide: x=0..47, z=0..15
+    for (let x = 0; x < 48; x++) for (let z = 0; z < 16; z++) {
+      for (let y = 0; y <= 3; y++) w.setBlock(x, y, z, Block.Stone); // seafloor
+      for (let y = 4; y <= 7; y++) w.setBlock(x, y, z, Block.Water); // shallow ocean
+    }
+    for (let x = 18; x <= 23; x++) for (let z = 0; z <= 5; z++) for (let y = 1; y <= 3; y++) {
+      w.setBlock(x, y, z, Block.Air); // sea-facing cave inside chunk 1
+    }
+    const sim = new WaterSim(w);
+    sim.settle(0, 0, 0); // settling chunk 0 re-levels chunk 1's pristine seam water, which falls into the cave
+    expect(w.getBlock(19, 2, 2)).toBe(Block.Water); // the cave IS flooded by settle(0) ...
+    expect(sim.touched.has(chunkKey(1, 0, 0))).toBe(true); // ... so chunk 1's mesh is now stale and marked
+    sim.settle(2, 0, 0); // ... and a second settling chunk in the same frame must not wash that mark away
+    expect(sim.touched.has(chunkKey(1, 0, 0))).toBe(true); // the frame-end drain (main.ts) is the sole consumer of `touched`
   });
 
   it('terrain caves carve Air (not Water): every carved stone/dirt cell below sea level is Air after generation', () => {
