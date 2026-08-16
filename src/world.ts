@@ -17,7 +17,10 @@ export interface Chunk {
   cy: number;
   cz: number;
   blocks: Uint8Array; // D9: 10 block values fit in a byte
+  wlevel: Uint8Array;  // water flow level per cell: 0 dry, 1..7 water (7 = full source)
+  wsource: Uint8Array; // 0/1 per cell: this cell is a (re)promoted/placed source
   dirty: boolean;
+  settled: boolean;    // water sim has settled this chunk's worldgen water (makes settle idempotent)
   opaqueMesh: VoxelBuffer | null;
   transMesh: VoxelBuffer | null;
 }
@@ -56,7 +59,10 @@ export class World {
     const n: Chunk = {
       cx, cy, cz,
       blocks: new Uint8Array(CHUNK_VOL),
+      wlevel: new Uint8Array(CHUNK_VOL),
+      wsource: new Uint8Array(CHUNK_VOL),
       dirty: true,
+      settled: false,
       opaqueMesh: null,
       transMesh: null,
     };
