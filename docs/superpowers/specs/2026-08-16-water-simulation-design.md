@@ -40,8 +40,9 @@ Two parallel per-chunk arrays ride alongside `Chunk.blocks` (world.ts):
   level 7", spread happens at `level - 1`, stops at 0 — in the POC the
   level-0 terminus block is never materialized; a level-1 cell is the flow
   front and does not fill further, a documented deviation below).
-- `wsource: Uint8Array(CHUNK_VOL)` — 0/1, this cell is a source (level is
-  read as 7, never dries while its block is Water). The source bit is set
+- `wsource: Uint8Array(CHUNK_VOL)` — 0/1, this cell is a source (never
+  dries while its block is Water; a source spreads only while its level
+  is ≥ 2, so a level-1 front source is inert). The source bit is set
   by: placement via `sim.edit` (placed water is a source), the settle seed
   (all generated water), **re-promotion** (rule: a settled water cell
   supported by solid below or by level-7 water above becomes a source —
@@ -51,6 +52,9 @@ Two parallel per-chunk arrays ride alongside `Chunk.blocks` (world.ts):
   and breaks are meaningful; typical voxel engines keep block state through falls the same
   way), and it is only ever cleared by a block change (`edit`/break).
   Promotion is one-way: a source cell is never un-promoted by the sim.
+  A *placed or landed* source is always level 7; a *promoted* source
+  keeps the level its cell held when it was promoted (possibly below 7),
+  and a source's level never changes thereafter.
 
 Invariants (strict):
 
@@ -130,14 +134,19 @@ src = wsource), in queue order:
    source at the top of a stream lands in the pool and keeps the stream
    fed until the landed block is broken).
 3. **below(C) is solid or water** (C is *resting*):
-   - **src** → L := 7.
-   - Else **below is solid** → **re-promote**: `wsource := 1`, L := 7.
-     (rule: full water resting on solid support becomes a source block.
-     This is why settled lakes, pool floors, and landing cells are
-     immortal — and what makes a broken pool cell refill.)
+   - **src** → no level change (a source keeps the level it became a
+     source with; it spreads per the spread rule below only while
+     `L >= 2`, and never dries).
+   - Else **below is solid** → **re-promote**: `wsource := 1`, **level
+     kept**. (rule: full water resting on solid support becomes a
+     source block. This is why settled lakes, pool floors, and landing
+     cells are immortal — and what makes a broken pool cell refill.
+     Keeping the level — not resetting it to 7 — is what bounds a
+     settled pool: a promoted source spreads at `L − 1`, so the pool's
+     diamond front cannot regenerate past its level-1 ring.)
    - Else the cell **above** C holds water at **level 7** (a source or a
-     just-landed falling cell) → **re-promote**: `wsource := 1`, L := 7.
-     (rule: full water supported by full water above becomes a source.
+     just-landed falling cell) → **re-promote**: `wsource := 1`, level
+     kept. (rule: full water supported by full water above becomes a
      A stream column and the pool it fed thus promote bottom-up into
      pinned sources: the whole settled stream + pool is immortal. The
      level-7 threshold — not "any water" — is what keeps decay of a cut
@@ -148,9 +157,9 @@ src = wsource), in queue order:
      non-source cell can never exceed 6 by this rule, since the max
      neighbour level is 7).
    - If `L < 1` → C **dries** (block → Air, clear `wlevel`/`wsource`).
-     (A source cell can only reach this via its block having changed —
-     the rules above keep a live source pinned at 7; promotion is
-     one-way, the sim never un-promotes.)
+      (A source cell can only reach this via its block having changed —
+      the rules above keep a live source at its own level; promotion is
+      one-way, the sim never un-promotes.)
    - **Spread**: if `L >= 2`, for each of C's 4 horizontal neighbours M
      in a *loaded* chunk: if M is Air → M becomes non-source water at
      level `L − 1` (dirty M); if M is non-source water and `L − 1 >
@@ -170,8 +179,8 @@ Consequences this buys (all user-accepted behaviour):
   everything" draft)**: water that settles on solid support — a pool
   floor, a waterfall landing, a sealed pocket — becomes a *source* and is
   permanent. Breaking the source of a settled pool dries only the
-  refilling: adjacent sources spread into the hole (level 6 → promoted to
-  source on solid below on the next tick), so a rimmed pool is immortal,
+  refilling: adjacent sources spread `L − 1` into the hole (promoted on
+  solid below on the next tick, level kept), so a rimmed pool is immortal,
   as in typical voxel engines. What *disappears*: water that falls out of the world,
   in-flight water severed from its source (it lands and re-promotes, or is
   destroyed), and starved non-source columns — a non-source cell with no
@@ -183,10 +192,11 @@ Consequences this buys (all user-accepted behaviour):
   destroyed (the POC's drain). Severing a *settled* stream or pool shows
   no cascade at all: settled water is sources, and a broken cell refills
   by spread/promotion from adjacent sources. The only top-down collapse
-  is starved non-source water: a poured column settles to one source
-  cell at its bottom (~1 tick per dry cell), since non-source cells above
-  it neither promote (rules require solid below or level-7 above) nor
-  survive (no horizontal feed) — the 1-wide-neck deviation.
+  is starved non-source water: a poured column collapses onto the
+  promoted cell(s) it rests on (solid below or level-7 above — e.g. a
+  1-wide pour on a source yields one source cell at its bottom) at ~1
+  tick per dry cell, since the remaining non-source cells neither
+  promote nor survive (no horizontal feed) — the 1-wide-neck deviation.
 - **All-water dynamic**: generated ocean water is seeded (at settle) as
   level-7 sources — worldgen in typical voxel engines does the same (generated ocean is source
   water), so a broken seafloor cell fills by fall and the landing cell
@@ -295,7 +305,7 @@ rebuilds any chunk the sim touched during a tick, same as T10 picks up
 | `src/main.ts` | construct `WaterSim` after boot-world generation; settle newly-generated chunks in `tickStreaming` (flag-based); `sim.tick(200)` every 5th frame; call `sim.edit(...)` after the two `setBlock` call sites; rebuild chunks the sim touched in a tick |
 | `src/__tests__/terrain.test.ts` | re-pin exact water count (45395 → re-measured after carve→Air fix) |
 | `src/__tests__/water.test.ts` | **new** — see Verification |
-| `PROJECT.md` | §9: de-defer the flow sim (now `src/water.ts`), note the POC model deviations (fall = move-down 1 cell/tick; source bit carried on fall; re-promotion to source per typical voxel engines — settled water on solid support / above level-7 water becomes a permanent source, settled pools are immortal; cut in-flight flow lands and re-promotes instead of draining; no upward promotion (1-wide neck, columns settle to one source cell); flow front stops at a level-1 ring (level-0 terminus not materialized); missing chunks = no spread, falling water destroyed; no persistence), update the pseudo-generator's cave line (145) to carve Air |
+| `PROJECT.md` | §9: de-defer the flow sim (now `src/water.ts`), note the POC model deviations (fall = move-down 1 cell/tick; source bit carried on fall; re-promotion to source per typical voxel engines — settled water on solid support / above level-7 water becomes a permanent source (a promoted source keeps its flow level; placed/landed sources are level 7; a source spreads only while its level ≥ 2, so a settled pool's diamond stays bounded at radius 6), settled pools are immortal; cut in-flight flow lands and re-promotes instead of draining; no upward promotion (1-wide neck, poured columns collapse onto their promoted base cell(s)); flow front stops at a level-1 ring (level-0 terminus not materialized); missing chunks = no spread, falling water destroyed; no persistence), update the pseudo-generator's cave line (145) to carve Air |
 | `docs/superpowers/2026-08-15-voxel-sandbox-poc-execution-notes.md` | note the re-pinned water constant where it cites 45395 |
 
 No changes to `blocks.ts`, `chunk-mesher.ts`, `raycast.ts`, `player.ts`,
@@ -310,8 +320,8 @@ No changes to `blocks.ts`, `chunk-mesher.ts`, `raycast.ts`, `player.ts`,
      (stone column, `caveAt > 0.55`, `wy <= SEA_LEVEL`) is `Air`, not Water.
    - **Source spread reach + promotion**: a lone source in air (over a
      stone pad) settles so that every pad cell within Manhattan distance
-     ≤ 6 is wet — and, having rested on solid, re-promoted to a level-7
-     source — while everything at distance ≥ 7 is air (measured via
+      ≤ 6 is wet — and, having rested on solid, re-promoted to a source
+     (level kept) — while everything at distance ≥ 7 is air (measured via
      `cellState`; include a diagonal probe, e.g. (1,1) → wet source,
      (7,0) → air).
    - **Falling**: a water cell with air below moves down one cell per tick
@@ -374,8 +384,11 @@ post-POC feature, no T-number (consistent with the help-overlay commit).
   falling as a block *state* with bottom-up drain of the column; the POC
   simply steps every in-flight cell down one (state carried), so a severed
   waterfall lands intact and re-promotes (see the in-flight-cut deviation).
-- **Flow reach**: level = 7 − path length to a source, with falls and the
-  above-is-water rule resetting to 7. The level-0 terminus block typical voxel engines
+- **Flow reach**: a placed or landed source is level 7; flow cells hold
+   7 − path length to the nearest such source (a fall resets a landed cell
+   to 7). A re-promoted source keeps its flow level, so the far front of a
+   settled pool is level-1 sources that spread no further. The level-0
+   terminus block typical voxel engines
   materialize at distance 7 is never stored (levels are 1–7 only), so a
   source wets a Manhattan radius of 6 instead of 7 — at most a 1-block
   edge difference, invisible since levels don't render. Vertical-drop level
@@ -388,10 +401,10 @@ post-POC feature, no T-number (consistent with the help-overlay commit).
 - **No upward promotion (1-wide-neck)**: re-promotion fires only on solid
   support below or level-7 water *above*. A non-source cell that rests on
   a source with air above (the top of a poured column, a 1-wide neck)
-  starves and dries, so a poured column settles to a single source cell at
-  its bottom and a multi-deep hole must be filled by placing water
-  (sources) at the surface. Typical voxel engines re-promote any trapped full water cell
-  regardless of what is above it.
+  starves and dries, so a poured column settles onto the promoted cell(s)
+  it rests on (one per level-7-supported cell) and a multi-deep hole must
+  be filled by placing water (sources) at the surface. Typical voxel engines re-promote any
+  trapped full water cell regardless of what is above it.
 - **No persistence**: water state dies with its chunk on unload and is
   re-derived by settling on reload (settling is idempotent, so a reloaded
   region is byte-identical to its first load for unedited terrain).
