@@ -85,9 +85,10 @@ export class WaterSim {
   // chunk to (level 7, source) straight into the chunk arrays — no per-cell state read, no
   // queue write, no re-mark. Pass 2 enqueues ONLY a seeded cell whose rule would act on its
   // neighbours at seed time: a fall (below is Air) or a spread (an HXZ neighbour that is
-  // Air, or unseeded water below level 6 that a level-7 source would upgrade). Interior
-  // ocean cells trigger neither and are never processed. Every later state change still
-  // goes through writeCell (which re-marks dependents), so the worklist stays closed and
+  // Air, or unseeded water at level 1..5 that a level-7 source would upgrade; a pristine
+  // l=0 neighbour is never upgraded — its own settle seeds it as (7,1)). Interior ocean
+  // cells trigger neither and are never processed. Every later state change still goes
+  // through writeCell (which re-marks dependents), so the worklist stays closed and
   // converges to the same fixpoint as per-cell seeding did.
   private settleSeed(c: Chunk): void {
     const bx = c.cx * 16, by = c.cy * 16, bz = c.cz * 16;
@@ -103,11 +104,11 @@ export class WaterSim {
         for (let lz = 0; lz < 16; lz++) {
           if (c.blocks[localIndex(lx, ly, lz)] !== Block.Water) continue;
           const wx = bx + lx, wy = by + ly, wz = bz + lz;
-          if (this.cellState(wx, wy - 1, wz).b === Block.Air) { this.enqueue(wx, wy, wz); continue; }
-          for (const [dx, dz] of HXZ) {
-            const m = this.cellState(wx + dx, wy, wz + dz);
-            if (m.b === Block.Air || (m.b === Block.Water && m.s === 0 && m.l < 6)) { this.enqueue(wx, wy, wz); break; }
-          }
+if (this.cellState(wx, wy - 1, wz).b === Block.Air) { this.enqueue(wx, wy, wz); continue; }
+        for (const [dx, dz] of HXZ) {
+          const m = this.cellState(wx + dx, wy, wz + dz);
+          if (m.b === Block.Air || (m.b === Block.Water && m.s === 0 && m.l >= 1 && m.l < 6)) { this.enqueue(wx, wy, wz); break; }
+        }
         }
   }
 
@@ -118,9 +119,10 @@ export class WaterSim {
     if (C.b !== Block.Water) return; // dried / no longer water: neighbours+above already re-marked
     // A loaded-unsettled neighbour still carries pristine worldgen water (level 0, no
     // source) that its own settle has not seeded yet. Never re-level or dry it: settling
-    // A may write levels / flood Air across the seam into B, but B's unseeded water stays
-    // untouched until B's settle re-seeds it as (7,1) — this is what makes sequential
-    // per-chunk settling order-independent and unable to eat worldgen water.
+    // A may flood Air across the seam into B (loaded cave mouths), but B's unseeded water
+    // stays exactly as generated until B's settle re-seeds it as (7,1) — this is what
+    // makes sequential per-chunk settling order-independent and unable to eat worldgen
+    // water.
     const Cc = this.world.getChunk(chunkOf(wx), chunkOf(wy), chunkOf(wz));
     if (Cc && !Cc.settled && Cc !== this.settling && C.l === 0 && C.s === 0) return;
     const below = this.cellState(wx, wy - 1, wz);
@@ -158,13 +160,23 @@ export class WaterSim {
     }
     this.writeCell(wx, wy, wz, nL, nS, Block.Water);
 
-    // spread to horizontal neighbours at level-1, only from a loaded chunk (a missing
-    // neighbour's writeCell is a no-op, so water never leaks into ungenerated space).
+    // spread to horizontal neighbours at level-1. Two guards keep the load path cheap:
+    // (1) never call writeCell into missing space — the state write there is a no-op, but
+    // writeCell still re-marks the target's closure (self + HXZ + above), which includes
+    // this cell; at a world edge that is a self-re-enqueue loop that sat every ocean
+    // settle at the SETTLE_GUARD ceiling. (2) never re-level a pristine (l=0, s=0)
+    // neighbour into a decaying slab that its own settle will discard — only water a
+    // prior spread/fall already wrote (l>=1) may be re-leveled.
     if (nL >= 2) {
       for (const [dx, dz] of HXZ) {
-        const m = this.cellState(wx + dx, wy, wz + dz);
-        if (m.b === Block.Air || (m.b === Block.Water && m.s === 0 && nL - 1 > m.l)) {
-          this.writeCell(wx + dx, wy, wz + dz, nL - 1, 0, Block.Water);
+        const tx = wx + dx, tz = wz + dz;
+        const m = this.cellState(tx, wy, tz);
+        if (m.b === Block.Air) {
+          if (this.world.hasChunk(chunkOf(tx), chunkOf(wy), chunkOf(tz))) {
+            this.writeCell(tx, wy, tz, nL - 1, 0, Block.Water);
+          }
+        } else if (m.b === Block.Water && m.s === 0 && m.l >= 1 && nL - 1 > m.l) {
+          this.writeCell(tx, wy, tz, nL - 1, 0, Block.Water);
         }
       }
     }

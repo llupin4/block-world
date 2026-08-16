@@ -8,23 +8,27 @@ import { meshChunk } from '../chunk-mesher';
 // Load-path budget: replays main.ts exactly — boot column (0,·,2), then 60 frames of
 // streaming.update around the spawn (pcx=0, pcy=2, pcz=2) with the frame loop's work:
 // settle + remesh per rebuilt chunk, slow-clock tick() every 5th frame, frame-end
-// touched drain. The old implementation ran 2,463,202 process() calls and spent 6.1 s of
-// the 6.7 s wall in settle(). The expected budget was floor(2463202 / 2) process()
-// calls; the MEASURED new value is 2,463,202 — identical to the old (old 2463202 ->
-// new 2463202): every ocean-dominated settle in this replay saturates SETTLE_GUARD
-// under both implementations, because the pass-2 boundary triggers re-flood the
-// loaded-unsettled neighbours' pristine water (the same (6,0) seam cascade the old
-// per-cell seeding produced), so the guard normalizes per-settle process counts and
-// absorbs the interior-seed bulk-skip (which does remove the per-cell seeding work:
-// see stats.seeds / stats.queueAdds) instead of showing it in the count. Re-pinned to
-// the measured value (+1 to keep `toBeLessThan` strict); the pin therefore no longer
-// separates old from new on this cap-bound metric — it guards the work-volume level
-// itself. process() is counted via a runtime prototype patch (TS `private` is
+// touched drain. Lineage of the process() count on this replay:
+//   old code (per-cell seeding, unguarded spread): 2,463,202 — every world-edge settle
+//     looped: a spread write into missing/out-of-band space is a state no-op, but
+//     writeCell still re-marks the target's closure (self + HXZ + above), which contains
+//     the source cell, so the source re-enqueued forever and each ocean settle ran to
+//     the SETTLE_GUARD ceiling; secondarily, unguarded spread re-leveled loaded-unsettled
+//     neighbours' pristine worldgen water into decaying slabs that each neighbour's own
+//     settle then discarded (rework, and the seam-level bug of the load).
+//   two-pass settle only (pass-1 seed + pass-2 reseed, spread still unguarded):
+//     2,463,202 — invariant: the edge loop still capped every ocean settle.
+//   two-pass settle + the two spread guards (this fix): 358,734 — the edge self-loop is
+//     gone (no writeCell into missing space, no pristine-water re-leveling) and each
+//     ocean settle now converges on its own cells.
+// The pin is the original pre-fix budget floor (2,463,202 / 2 = 1,231,601): it separates
+// the fix (358,734) from both the old code and the two-pass-only intermediate.
+// process() is counted via a runtime prototype patch (TS `private` is
 // compile-time only), so the pin is implementation-agnostic. Wall time is logged for
 // the record, never asserted (it is machine-dependent); mesh cost is included (it is
 // unchanged by the fix) and the replay ends on a full 5x5x5 ring: 125 chunks, like
 // main.ts at rest.
-const PIN = 2463203; // old code: 2,463,202; new two-pass settle measured 2,463,202 (SETTLE_GUARD-capped); pin = measured + 1
+const PIN = 1231601; // old code: 2,463,202 (SETTLE_GUARD-saturated edge loop); two-pass-only: 2,463,202; guarded fix measured 358,734
 
 it('boot + 60 streaming frames stay within the load-path work budget', () => {
   const w = new World();
@@ -79,7 +83,7 @@ it('boot + 60 streaming frames stay within the load-path work budget', () => {
   console.log('LOAD wall=', wall.toFixed(0), 'ms');
   console.log('LOAD settle=', settleMs.toFixed(0), 'ms');
   console.log('LOAD mesh=', meshMs.toFixed(0), 'ms');
-  console.log('LOAD processes=', processes, '(old code: 2463202; PIN', PIN + ')');
+  console.log('LOAD processes=', processes, '(old code: 2463202; two-pass-only: 2463202; PIN', PIN + ')');
   console.log('LOAD chunks=', w.count());
 
   expect(w.count()).toBe(125); // the replay really walked to the full 5x5x5 ring

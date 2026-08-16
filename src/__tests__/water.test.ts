@@ -209,7 +209,7 @@ describe('water sim', () => {
     assertInvariants(w);
   });
 
-  it('settling one chunk of a loaded 2x2 ocean region never eats a loaded-unsettled neighbour\'s worldgen water, and floods its sea-facing cave', () => {
+  it('settling one chunk only seeps into the seam-reachable cave Air — it never re-levels a loaded-unsettled neighbour\'s worldgen water; the far cave columns fill when the cave\'s own chunk settles', () => {
     const w = makeWorld([[0, 0, 0], [1, 0, 0], [0, 0, 1], [1, 0, 1]]); // 2x2 ocean slab, y 0..15
     for (let x = 0; x < 32; x++) for (let z = 0; z < 32; z++) {
       w.setBlock(x, 0, z, Block.Stone); // seafloor
@@ -217,16 +217,20 @@ describe('water sim', () => {
     }
     for (let x = 16; x <= 23; x++) for (let z = 12; z <= 15; z++) for (let y = 1; y <= 6; y++) w.setBlock(x, y, z, Block.Air); // sea-facing cave pocket in chunk (1,0,0)
     const sim = new WaterSim(w);
-    const b0 = countWaterAt(w, 16, 31, 0, 31, 0, 15); // right column = the three loaded-unsettled chunks
+    const b0 = countWaterAt(w, 16, 31, 0, 31, 0, 15); // right column = chunk (1,0,0) [the cave] + (1,0,1) [open sea]
     sim.settle(0, 0, 0); // settle ONLY the left chunk (the runtime's per-chunk-on-load form)
-    drain(sim);
     const b1 = countWaterAt(w, 16, 31, 0, 31, 0, 15);
     console.log('P before right column=', b0);
     console.log('P after  right column=', b1);
-    expect(b1).toBeGreaterThanOrEqual(b0); // the neighbours' pristine (l=0, s=0) worldgen water is never re-leveled or dried
-    expect(w.getBlock(17, 3, 13)).toBe(Block.Water); // ...the cave Air IS flooded from the settled chunk's side
-    // No assertInvariants here: the right column is deliberately left loaded-unsettled, so its
-    // unseeded worldgen water is transiently (l=0, s=0) by design — the invariant holds only at rest.
+    expect(b1).toBe(7632); // +144 = exactly the six seam-reachable cave columns (x=16..21); no worldgen water re-leveled or eaten — growth is pure cave filling. (Old code pinned b1>=b0 only, because its seam re-leveling made the count a moving target.)
+    expect(w.getBlock(17, 3, 13)).toBe(Block.Water); // the seam reaches the cave from the settled side
+    expect(w.getBlock(23, 3, 13)).toBe(Block.Air); // ...but the far columns (x=22,23) stay dry: spread levels decay to 1 before crossing, and the chunk's own unsettled water (incl. the x=24 side) is never re-leveled, so nothing falls in from far side or above
+    sim.settle(1, 0, 0); sim.settle(0, 0, 1); sim.settle(1, 0, 1); // settle the rest: the cave's own chunk seeds its own water and completes the fill
+    const b2 = countWaterAt(w, 16, 31, 0, 31, 0, 15);
+    expect(w.getBlock(23, 3, 13)).toBe(Block.Water);
+    expect(b2).toBe(7680); // full ocean + fully filled cave (7488 + 192): the far columns fill from the far side with zero worldgen water eaten
+    // every chunk is settled now: the state is at rest, so the invariant holds
+    assertInvariants(w);
   });
 
   it('settle is order-independent: settling the other chunk first converges to the same water count', () => {
@@ -260,9 +264,12 @@ describe('water sim', () => {
       w.setBlock(x, y, z, Block.Air); // sea-facing cave inside chunk 1
     }
     const sim = new WaterSim(w);
-    sim.settle(0, 0, 0); // settling chunk 0 re-levels chunk 1's pristine seam water, which falls into the cave
-    expect(w.getBlock(19, 2, 2)).toBe(Block.Water); // the cave IS flooded by settle(0) ...
-    expect(sim.touched.has(chunkKey(1, 0, 0))).toBe(true); // ... so chunk 1's mesh is now stale and marked
+    sim.settle(0, 0, 0); // the spread guards keep chunk 1 pristine: only chunk 0's own edge cells are touched
+    expect(w.getBlock(19, 2, 2)).toBe(Block.Air); // chunk 1's cave is NOT flooded by a sibling's settle ...
+    expect(sim.touched.has(chunkKey(1, 0, 0))).toBe(false); // ...and no seam chunk is marked yet
+    sim.settle(1, 0, 0); // settling the cave's own chunk floods it from its own water ...
+    expect(w.getBlock(19, 2, 2)).toBe(Block.Water); // ... so chunk 1's mesh is now stale and marked
+    expect(sim.touched.has(chunkKey(1, 0, 0))).toBe(true); // ...
     sim.settle(2, 0, 0); // ... and a second settling chunk in the same frame must not wash that mark away
     expect(sim.touched.has(chunkKey(1, 0, 0))).toBe(true); // the frame-end drain (main.ts) is the sole consumer of `touched`
   });
