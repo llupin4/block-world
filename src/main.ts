@@ -1,7 +1,8 @@
 import * as THREE from 'three';
 import { Block, isOpaque } from './blocks';
 import { World, chunkKey, chunkOf, CHUNK_SIZE, WORLD_Y_MAX, WORLD_Y_MIN, type VoxelBuffer } from './world';
-import { TERRAIN_SEED, TerrainGen, generateRegion } from './terrain';
+import { TERRAIN_SEED, TerrainGen, generateChunkTerrain } from './terrain';
+import * as streaming from './streaming';
 import { meshChunk } from './chunk-mesher';
 import { Player, EYE, type MoveInput } from './player';
 import { raycastVoxel, REACH, type RayHit } from './raycast';
@@ -154,10 +155,11 @@ const matTrans = new THREE.MeshBasicMaterial({
 
 const world = new World();
 
-// The T4 suite pins this exact region (seed 1234, chunks 0..4 x/z and y): 45395 water cells,
-// surface heights 19..43, 21 trees — so what renders is what the tests describe.
+// T10 streams the rest of the world on demand: only the spawn column is generated up front,
+// so the measured-spawn scan below reads real terrain before the first frame. Streaming uses
+// the same generator/seed, so this column is byte-identical to what it would generate later.
 const gen = new TerrainGen(TERRAIN_SEED);
-generateRegion(world, gen, 0, 0, 4, 4);
+for (let cy = 0; cy <= 4; cy++) generateChunkTerrain(world, gen, 0, cy, 2); // chunk column (0,·,2) → world x 0..15, z 32..47 — contains the (T9) spawn (6,46)
 
 // Spawn on MEASURED ground. Plan deviation (recorded): the plan's probe reported (33,41) as a
 // grass shelf at surface y=33, but under the T4-pinned generator that column is a sea-basin
@@ -204,14 +206,27 @@ function rebuildChunkMesh(cx: number, cy: number, cz: number): void {
   if (entry.opaque) scene.add(entry.opaque);
   if (entry.trans) scene.add(entry.trans);
   chunkObjs.set(key, entry);
+  const ch = world.getChunk(cx, cy, cz);
+  if (ch) ch.dirty = false; // T10: a rebuilt mesh is up to date; streaming only reschedules stale chunks
 }
-// (T8 remeshes around edits via remeshAround; T10 reuses this for streaming loads/unloads.)
+// (T8 remeshes around edits via remeshAround; T10's streaming drives loads/remeshes via
+//  rebuildChunkMesh and unloads via removeChunkMesh below.)
 
-// M4: static build of the initial 5x5x5 terrain band (one-shot, ~1 s at load;
-// T10 replaces this with streaming loads/unloads around the player).
-for (let cx = 0; cx <= 4; cx++)
-  for (let cz = 0; cz <= 4; cz++)
-    for (let cy = 0; cy <= 4; cy++) rebuildChunkMesh(cx, cy, cz);
+/** T10: scene side of an unload — update() has already removed the chunk from the world. */
+function removeChunkMesh(cx: number, cy: number, cz: number): void {
+  const key = chunkKey(cx, cy, cz);
+  const old = chunkObjs.get(key);
+  for (const m of [old?.opaque, old?.trans]) {
+    if (m) {
+      scene.remove(m);
+      m.geometry.dispose();
+    }
+  }
+  chunkObjs.delete(key);
+}
+
+// T10: no static build — the streaming section keeps a 5x5 chunk ring (cy 0..4) around the
+// player and generates/remeshes/unloads chunks as the player moves.
 
 // === camera ===
 
@@ -359,7 +374,15 @@ function updateHitbox(): void {
 }
 
 // === streaming ===
-// T10: replace the static build above with streaming.update(world, pcx, pcz, pcy) in the loop.
+
+// Per physics substep: stream the ring around the player. update() does the world side
+// (generate new chunks, remove far ones); main.ts does the scene side (rebuild/dispose
+// meshes). The 2 loads + 2 remeshes per call keep the frame cost bounded.
+function tickStreaming(): void {
+  const r = streaming.update(world, chunkOf(player.pos.x), chunkOf(player.pos.z), chunkOf(player.pos.y));
+  for (const c of r.unloaded) removeChunkMesh(c.cx, c.cy, c.cz);
+  for (const c of r.rebuilt) rebuildChunkMesh(c.cx, c.cy, c.cz);
+}
 
 // === water-fx ===
 // T12: underwater fog / background / FOV swap driven by player.headInWater.
@@ -372,7 +395,7 @@ function updateHitbox(): void {
 const STEP = 1 / 60;
 const hint = document.getElementById('hint')!;
 hint.textContent =
-  'block-world T9 — click to lock · WASD move · SPACE jump/swim · F fly · SHIFT sink/fly-down · N noclip · LMB break · RMB place (planks) · ESC release';
+  'block-world T10 — click to lock · WASD move · SPACE jump/swim · F fly · SHIFT sink/fly-down · N noclip · LMB break · RMB place (planks) · ESC release · world streams in around you';
 
 let last = performance.now();
 let acc = 0;
@@ -385,7 +408,7 @@ function frame(now: number): void {
   while (acc >= STEP) {
     acc -= STEP;
     player.update(STEP, readMove());
-    // T10: streaming.update(world, pcx, pcz, pcy)
+    tickStreaming();
     if (player.pos.y < WORLD_Y_MIN) player.place(SPAWN); // fell out of the world (open cave / dug-away floor)
   }
   syncCamera();
