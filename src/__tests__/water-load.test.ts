@@ -1,5 +1,6 @@
 import { it, expect } from 'vitest';
-import { World } from '../world';
+import { World, localIndex } from '../world';
+import { Block } from '../blocks';
 import { WaterSim } from '../water';
 import { TerrainGen, generateChunkTerrain, TERRAIN_SEED } from '../terrain';
 import { update } from '../streaming';
@@ -18,15 +19,20 @@ import { meshChunk } from '../chunk-mesher';
 //     settle then discarded (rework, and the seam-level bug of the load).
 //   two-pass settle only (pass-1 seed + pass-2 reseed, spread still unguarded):
 //     2,463,202 — invariant: the edge loop still capped every ocean settle.
-//   two-pass settle + the two spread guards (this fix): 358,734 — the edge self-loop is
-//     gone (no writeCell into missing space, no pristine-water re-leveling) and early
-//     settles near spawn now do their own water's work instead of burning the guard.
-//     The very largest early settles still exhaust per-settle work (SETTLE_GUARD) and hand
-//     their residual relaxation to later settles / the tick/5 slow clock; the queue is
-//     fully drained within the first ~15 frames of the replay (asserted below), so total
-//     work is what the pin bounds.
-// The pin is the original pre-fix budget floor (2,463,202 / 2 = 1,231,601): it separates
-// the fix (358,734) from both the old code and the two-pass-only intermediate.
+//   two-pass settle + the two spread guards (intermediate): 358,734 — the edge self-loop is
+//     gone, but streaming still loaded high y-bands before their low bands: a settle above
+//     a not-yet-generated band read the void as dry Air and "fell" the column's top water
+//     out of the world (destroyed through a hole that does not exist). The ocean top row
+//     was then gone forever and refilled only unevenly by neighbour spreads — the visible
+//     raised/stepped ocean sections (histogram: 2959 columns at one level, 469 one higher).
+//   + band-order fix (this fix): settle() defers a chunk whose low band is in-band but not
+//     yet loaded (and cascades upward once a low band settles), and process() refuses to
+//     fall into not-yet-generated space (world floor excepted). Final: every ocean column
+//     converges to exactly one surface height (the flatness probe below measures 0 columns
+//     off-mode) and the whole replay relaxes in ~3k cell updates — 3,032 here, settle
+//     wall ~25 ms of the ~500 ms total (the rest is terrain+mesh, a POC streaming cost):
+//     // The pin is the original pre-fix budget floor (2,463,202 / 2 = 1,231,601): it separates
+// the fixed pipeline (3,032 final; 358,734 post-T2) from the old code and the two-pass-only intermediate.
 // process() is counted via a runtime prototype patch (TS `private` is
 // compile-time only), so the pin is implementation-agnostic. Wall time is logged for
 // the record, never asserted (it is machine-dependent); mesh cost is included (it is
@@ -94,4 +100,33 @@ it('boot + 60 streaming frames stay within the load-path work budget', () => {
   expect(w.count()).toBe(125); // the replay really walked to the full 5x5x5 ring
   expect(processes).toBeLessThan(PIN);
   expect(sim.tick(1)).toBe(0); // residual relaxation from any guard-saturated early settle completed within the replay window (queue fully drained)
+
+  // Ocean-surface flatness probe (measurement only, no assert): after the queue has fully
+  // drained, a hydrostatically correct ocean shows, per water column, water contiguous
+  // down to its floor, all surfaces at one height. These two histograms are the
+  // objective signature of the user-visible "raised sections" complaint:
+  //  - a column with AIR below its water top = relaxation never completed (guard
+  //    saturation left it mid-fall, or it is sealed — a permanent raised section);
+  //  - surface heights far from the mode = columns the settle never brought to level.
+  let airborne = 0;
+  const tops = new Map<number, number>();
+  for (const c of w.allChunks()) {
+    for (let lx = 0; lx < 16; lx++) for (let lz = 0; lz < 16; lz++) {
+      let top = -1, below = 0;
+      for (let ly = 0; ly < 16; ly++) {
+        const b = c.blocks[localIndex(lx, ly, lz)];
+        if (b !== Block.Water) continue;
+        if (ly > top) { top = ly; } else { below++; }
+      }
+      if (top < 0) continue;
+      const gx = c.cx * 16 + lx, gz = c.cz * 16 + lz;
+      if (top === 15 && w.getBlock(gx, c.cy * 16 + 16, gz) === Block.Water) continue; // continues into the chunk above: not a surface
+      if (below > 0) airborne++;
+      tops.set(c.cy * 16 + top, (tops.get(c.cy * 16 + top) ?? 0) + 1);
+    }
+  }
+  const sorted = [...tops.entries()].sort((a, b) => b[1] - a[1]);
+  const modeY = sorted[0]?.[0] ?? -1;
+  const offMode = [...tops.entries()].filter(([y]) => y !== modeY).reduce((n, [, c]) => n + c, 0);
+  console.log('LOAD waterColumns=', [...tops.values()].reduce((a, b) => a + b, 0), 'airBeneathWater=', airborne, 'surfacesOffMode(', modeY, ')=', offMode, 'hist=', JSON.stringify(sorted));
 }, 30000);

@@ -9,6 +9,7 @@ import { World, chunkOf, chunkKey, localIndex, WORLD_Y_MIN, WORLD_Y_MAX, type Ch
 
 const HXZ: ReadonlyArray<readonly [number, number]> = [[1, 0], [-1, 0], [0, 1], [0, -1]];
 const SETTLE_GUARD = 20000; // safety valve: cap on cell updates one settle run may perform
+const MIN_CY = 0; // lowest GENERATED y band (streaming's CY_MIN): below it is ungenerated world floor — a fall through it drains (legitimate), a settle above it defers
 
 interface CellState { b: number; l: number; s: number }
 const DRY: CellState = { b: Block.Air, l: 0, s: 0 };
@@ -129,10 +130,16 @@ export class WaterSim {
 
     // below is Air (missing / out-of-band counts) → C falls down one cell.
     if (below.b === Block.Air) {
+      // In-band space whose chunk is not generated YET also reads as Air; falling into it
+      // would destroy C out of a hole that does not exist (streaming loads bands in
+      // arbitrary order). Known space = the band below is loaded, or the fall exits the
+      // generated world below its floor (legitimate drain).
+      const belowKnown = wy - 1 < MIN_CY * 16 || this.world.hasChunk(chunkOf(wx), chunkOf(wy - 1), chunkOf(wz));
+      if (!belowKnown) return; // wait: the low band's settle (cascade) or a re-mark retries us
       this.writeCell(wx, wy, wz, 0, 0, Block.Air); // dry origin, re-marked
-      if (this.world.hasChunk(chunkOf(wx), chunkOf(wy - 1), chunkOf(wz))) {
+      if (wy - 1 >= MIN_CY * 16 && this.world.hasChunk(chunkOf(wx), chunkOf(wy - 1), chunkOf(wz))) {
         this.writeCell(wx, wy - 1, wz, 7, C.s, Block.Water); // land at level 7, source bit carried
-      } // else: destination missing/out-of-band → destroyed (fell out of the world)
+      } // else: destination below the generated floor → destroyed (fell out of the world)
       return;
     }
 
@@ -209,6 +216,13 @@ export class WaterSim {
   settle(cx: number, cy: number, cz: number): Set<string> {
     const c = this.world.getChunk(cx, cy, cz);
     if (!c || c.settled) return this.touched;
+    // The band below must already exist (or we are the lowest generated band): settling this
+    // chunk while its bottom neighbours read as missing space makes its bottom water
+    // "fall" out of the still-unloaded world and be destroyed through a hole that does
+    // not exist — the ocean top row is then gone forever (the visible raised/stepped
+    // ocean sections at spawn, from streaming loading a high band before its low band).
+    // Defer: the low band's settle (below) cascades upward and settles this one.
+    if (cy > MIN_CY && !this.world.hasChunk(cx, cy - 1, cz)) return this.touched;
     this.settling = c; // during this settle, only c's own water may be modified (see the pristine-skip in process)
     this.settleSeed(c);
     let guard = 0;
@@ -223,6 +237,10 @@ export class WaterSim {
     }
     this.settling = null;
     c.settled = true;
+    // Wake the band above: its bottom water rests on this band's top row, so its settle
+    // (deferrals, re-relaxation) can only be correct once we exist.
+    const up = this.world.getChunk(cx, cy + 1, cz);
+    if (up && !up.settled) this.settle(cx, cy + 1, cz);
     return this.touched;
   }
 

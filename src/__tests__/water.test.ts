@@ -314,4 +314,40 @@ describe('water sim', () => {
     sim.settle(0, 0, 0);
     expect(sim.stats.seeds).toBe(3840); // 16*16*15 water cells of chunk 0, all bulk-seeded in pass 1
   });
+
+  it('a band settling above a not-yet-loaded low band keeps its bottom water (no drain through unloaded space); the low band arrives and the cascade settles it', () => {
+    // Streaming can load a high y-band before its low band. cellState reads the not-yet-
+    // generated low band as dry Air, so an unconditional settle would "fall" the high
+    // band's bottom water out of the world: the ocean top row is destroyed forever and
+    // only refilled unevenly by spreads (the visible raised/stepped ocean sections).
+    // Bands cy=-2 (world floor)..cy=1; chunk (0,0,0) — the low band under the water —
+    // is missing. The high band's water column is pristine worldgen water at its bottom row.
+    const w = makeWorld([[0, -2, 0], [0, -1, 0], [0, 1, 0]]);
+    for (let x = 0; x < 16; x++) for (let z = 0; z < 16; z++) {
+      w.setBlock(x, -1, z, Block.Stone); // floor of the world-floor band (top row of (0,-1,0))
+      w.setBlock(x, 16, z, Block.Water); // the high band's bottom row (its below = y15, in the MISSING band)
+      w.setBlock(x, 17, z, Block.Water); // one row above
+    }
+    const sim = new WaterSim(w);
+    const hi = w.getChunk(0, 1, 0)!;
+    sim.settle(0, -2, 0); // the floor band settles (its low band is out of band, not missing) and cascades up to (0,-1,0)
+    sim.settle(0, 1, 0); // DEFERRED: its low band (0,0,0) does not exist yet — the water must survive exactly as generated
+    expect(hi.settled).toBe(false); // deferred, not settled
+    expect(countWater(w)).toBe(512); // 2 rows x 256: nothing fell out of the unloaded world
+    expect(w.getBlock(5, 16, 5)).toBe(Block.Water);
+    const s = sim.cellState(5, 16, 5);
+    expect(s.b).toBe(Block.Water);
+    expect(s.l).toBe(0); // still pristine: the settle never ran on it
+    // Now the low band arrives: it is all stone (solid floor under the water), and its
+    // settle must cascade into the deferred high band.
+    w.ensureChunk(0, 0, 0);
+    for (let x = 0; x < 16; x++) for (let z = 0; z < 16; z++) for (let y = 0; y < 16; y++) w.setBlock(x, y, z, Block.Stone);
+    sim.settle(0, 0, 0);
+    expect(hi.settled).toBe(true); // the cascade (low band -> band above) settled the deferred band
+    expect(countWater(w)).toBe(512); // resting on the stone below: nothing fell, nothing drained
+    const t = sim.cellState(5, 16, 5);
+    expect(t.b).toBe(Block.Water);
+    expect(t.s).toBe(1); // re-seeded as a source by the cascade settle
+    assertInvariants(w);
+  });
 });
