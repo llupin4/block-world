@@ -1,9 +1,10 @@
 import * as THREE from 'three';
 import { Block } from './blocks';
-import { World, chunkKey, localIndex, type VoxelBuffer } from './world';
+import { World, chunkKey, chunkOf, localIndex, CHUNK_SIZE, WORLD_Y_MAX, WORLD_Y_MIN, type VoxelBuffer } from './world';
 import { SEA_LEVEL } from './terrain';
 import { meshChunk } from './chunk-mesher';
 import { Player, EYE, type MoveInput } from './player';
+import { raycastVoxel, REACH, type RayHit } from './raycast';
 
 // === boot ===
 
@@ -240,7 +241,7 @@ function rebuildChunkMesh(cx: number, cy: number, cz: number): void {
   if (entry.trans) scene.add(entry.trans);
   chunkObjs.set(key, entry);
 }
-// (T8/T10 reuse rebuildChunkMesh for edits and streaming loads.)
+// (T8 remeshes around edits via remeshAround; T10 reuses this for streaming loads/unloads.)
 
 // M1: static build of the whole demo band (T10 replaces this with streaming).
 for (let cx = 0; cx <= 2; cx++)
@@ -303,7 +304,94 @@ function readMove(): MoveInput {
 }
 
 // === actions ===
-// T8: break/place on mouse click (remeshes affected chunks); T11: selected hotbar slot.
+
+// T8: crosshair break (LMB) / place (RMB). T11 replaces this single block with hotbar selection.
+let selectedBlock = Block.Planks;
+
+// Targeting wireframe: box edges, 1.002 so it never z-fights the target face.
+const hitbox = new THREE.LineSegments(
+  new THREE.EdgesGeometry(new THREE.BoxGeometry(1.002, 1.002, 1.002)),
+  new THREE.LineBasicMaterial({ color: 0xffffff }),
+);
+hitbox.visible = false;
+scene.add(hitbox);
+
+// Attach the action handlers only while the pointer is locked, so the click that
+// requests the lock (and any later UI click) can never mutate the world.
+let pointerLocked = false;
+document.addEventListener('pointerlockchange', () => {
+  pointerLocked = document.pointerLockElement === renderer.domElement;
+  if (pointerLocked) {
+    document.addEventListener('mousedown', onMouseDown);
+    document.addEventListener('contextmenu', onContextMenu);
+  } else {
+    document.removeEventListener('mousedown', onMouseDown);
+    document.removeEventListener('contextmenu', onContextMenu);
+    hitbox.visible = false;
+  }
+});
+// RMB must suppress the browser menu, which would also drop the pointer lock.
+function onContextMenu(e: Event): void {
+  e.preventDefault();
+}
+
+function castFromCamera(): RayHit | null {
+  const dir = new THREE.Vector3();
+  camera.getWorldDirection(dir); // view direction in world space, normalized
+  return raycastVoxel((x, y, z) => world.getBlock(x, y, z), camera.position, dir, REACH);
+}
+
+// Rebuild the edited cell's chunk, plus — when the cell sits on a chunk face — the
+// touched neighbor, so faces on the shared border are regenerated (setBlock only
+// marks data dirty; the static build has no dirty consumer until T10's streaming scan).
+function remeshAround(wx: number, wy: number, wz: number): void {
+  const cx = chunkOf(wx);
+  const cy = chunkOf(wy);
+  const cz = chunkOf(wz);
+  rebuildChunkMesh(cx, cy, cz);
+  const lx = wx - cx * CHUNK_SIZE;
+  const ly = wy - cy * CHUNK_SIZE;
+  const lz = wz - cz * CHUNK_SIZE;
+  const touch: [number, number, number][] = [];
+  if (lx === 0) touch.push([cx - 1, cy, cz]);
+  if (lx === CHUNK_SIZE - 1) touch.push([cx + 1, cy, cz]);
+  if (lz === 0) touch.push([cx, cy, cz - 1]);
+  if (lz === CHUNK_SIZE - 1) touch.push([cx, cy, cz + 1]);
+  if (ly === 0) touch.push([cx, cy - 1, cz]);
+  if (ly === CHUNK_SIZE - 1) touch.push([cx, cy + 1, cz]);
+  for (const [nx, ny, nz] of touch) if (world.hasChunk(nx, ny, nz)) rebuildChunkMesh(nx, ny, nz);
+}
+
+function onMouseDown(e: MouseEvent): void {
+  const hit = castFromCamera();
+  if (!hit) return;
+  if (e.button === 0) {
+    // `hit` is always a breakable solid (water is pass-through in the raycast).
+    world.setBlock(hit.x, hit.y, hit.z, Block.Air);
+    remeshAround(hit.x, hit.y, hit.z);
+  } else if (e.button === 2) {
+    const tx = hit.x + hit.nx;
+    const ty = hit.y + hit.ny;
+    const tz = hit.z + hit.nz;
+    if (ty < WORLD_Y_MIN || ty >= WORLD_Y_MAX) return;
+    const target = world.getBlock(tx, ty, tz);
+    if (target !== Block.Air && target !== Block.Water) return; // empty or water (filling pools)
+    if (!player.noclip && player.intersectsVoxel(tx, ty, tz)) return; // no placing through yourself
+    world.setBlock(tx, ty, tz, selectedBlock);
+    remeshAround(tx, ty, tz);
+  }
+}
+
+// Per-frame actions: re-target the wireframe from the just-synced camera (called after syncCamera).
+function updateHitbox(): void {
+  const hit = pointerLocked ? castFromCamera() : null;
+  if (!hit) {
+    hitbox.visible = false;
+    return;
+  }
+  hitbox.position.set(hit.x + 0.5, hit.y + 0.5, hit.z + 0.5);
+  hitbox.visible = true;
+}
 
 // === streaming ===
 // T10: replace the static build above with streaming.update(world, pcx, pcz, pcy) in the loop.
@@ -319,7 +407,7 @@ function readMove(): MoveInput {
 const STEP = 1 / 60;
 const hint = document.getElementById('hint')!;
 hint.textContent =
-  'block-world T7 — click to lock · WASD move · SPACE jump/swim · F fly · SHIFT sink/fly-down · N noclip · ESC release';
+  'block-world T8 — click to lock · LMB break · RMB place (planks) · F fly · N noclip · ESC release';
 
 let last = performance.now();
 let acc = 0;
@@ -333,9 +421,9 @@ function frame(now: number): void {
     acc -= STEP;
     player.update(STEP, readMove());
     // T10: streaming.update(world, pcx, pcz, pcy)
-    // T8:  tickInteractions()
   }
   syncCamera();
+  updateHitbox();
   renderer.render(scene, camera);
   requestAnimationFrame(frame);
 }
