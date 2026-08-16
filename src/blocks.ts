@@ -43,3 +43,11 @@ export const PLACEABLE: Block[] = [Block.Grass, Block.Stone, Block.Dirt, Block.S
 export function iconTile(b: Block): number {
   return BLOCKS[b].faces[2]; // top-face tile doubles as the UI icon
 }
+
+// CSS background-position that crops the block's top-row tile column out of the full
+// atlas, scaled to `px` per tile (16 tiles across). Kept as a pure string helper so the
+// interpolation stays unit-tested (main.ts's `-$((` typo once made it static, invalid
+// CSS, and every slot fell back to tile 0 — grass).
+export function iconPosition(b: Block, px: number): string {
+  return `-${(iconTile(b) % 16) * px}px 0px`;
+}

@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import { Block, isOpaque, PLACEABLE, iconTile } from './blocks';
+import { Block, isOpaque, PLACEABLE, iconPosition } from './blocks';
 import { World, chunkKey, chunkOf, CHUNK_SIZE, WORLD_Y_MAX, WORLD_Y_MIN, type VoxelBuffer } from './world';
 import { TERRAIN_SEED, TerrainGen, generateChunkTerrain } from './terrain';
 import * as streaming from './streaming';
@@ -393,11 +393,11 @@ const hotbar = new Hotbar(PALETTE_BLOCKS);
 const atlasURL = atlasCanvas.toDataURL();
 
 // Crop the block's top-row tile into a `px`-sized icon: full atlas scaled 16·px wide, shifted
-// to the tile column (iconTile — same tile as the mesh top face). Nearest keeps it crisp.
+// via iconPosition (same tile as the mesh top face). Nearest keeps it crisp.
 function placeIcon(el: HTMLElement, b: number, px: number): void {
   el.style.backgroundImage = `url(${atlasURL})`;
   el.style.backgroundSize = `${px * 16}px ${px * 16}px`;
-  el.style.backgroundPosition = `-$((iconTile(b) % 16) * px}px 0px`;
+  el.style.backgroundPosition = iconPosition(b, px);
   el.title = String(Block[b]);
 }
 

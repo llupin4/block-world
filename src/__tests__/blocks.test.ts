@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { Block, BLOCKS, isOpaque, PLACEABLE } from '../blocks';
+import { Block, BLOCKS, isOpaque, PLACEABLE, iconTile, iconPosition } from '../blocks';
 
 describe('blocks', () => {
   it('assigns the spec values in order (0..9)', () => {
@@ -41,5 +41,23 @@ describe('blocks', () => {
   it('PLACEABLE: 9 blocks, never Air', () => {
     expect(PLACEABLE).toHaveLength(9);
     expect(PLACEABLE).not.toContain(Block.Air);
+  });
+
+  // Regression: main.ts once built this string as static text (a `-$((` typo broke the
+  // template interpolation), so every slot got the same invalid position, CSS dropped
+  // it, and all icons defaulted to atlas tile 0 (grass). The string must embed real
+  // per-block numbers and stay valid CSS.
+  it('iconPosition: per-block pixel offset from the top row, at the given icon scale', () => {
+    expect(iconPosition(Block.Grass, 40)).toBe('-0px 0px'); // tile 0, no shift
+    expect(iconPosition(Block.Stone, 40)).toBe('-120px 0px'); // tile 3 * 40
+    expect(iconPosition(Block.Dirt, 40)).toBe('-80px 0px'); // tile 2 * 40
+    expect(iconPosition(Block.Sand, 40)).toBe('-160px 0px'); // tile 4 * 40
+    expect(iconPosition(Block.Water, 44)).toBe('-220px 0px'); // tile 5 * 44 (palette scale)
+    expect(iconPosition(Block.Wood, 40)).toBe('-280px 0px'); // top face tile 7
+    expect(iconPosition(Block.Leaves, 40)).toBe('-320px 0px'); // tile 8
+    expect(iconPosition(Block.Glass, 40)).toBe('-360px 0px'); // tile 9
+    expect(iconPosition(Block.Planks, 40)).toBe('-400px 0px'); // tile 10
+    // must stay a number, not the raw expression text
+    expect(iconPosition(Block.Stone, 40)).not.toContain('iconTile');
   });
 });
