@@ -1,8 +1,9 @@
 import * as THREE from 'three';
-import { Block, isOpaque } from './blocks';
+import { Block, isOpaque, PLACEABLE, iconTile } from './blocks';
 import { World, chunkKey, chunkOf, CHUNK_SIZE, WORLD_Y_MAX, WORLD_Y_MIN, type VoxelBuffer } from './world';
 import { TERRAIN_SEED, TerrainGen, generateChunkTerrain } from './terrain';
 import * as streaming from './streaming';
+import { Hotbar } from './ui';
 import { meshChunk } from './chunk-mesher';
 import { Player, EYE, type MoveInput } from './player';
 import { raycastVoxel, REACH, type RayHit } from './raycast';
@@ -250,15 +251,18 @@ const keys = new Set<string>();
 window.addEventListener('keydown', (e) => {
   keys.add(e.code);
   if (e.repeat) return;
-  if (e.code === 'KeyF') player.fly = !player.fly;         // fly toggle
-  if (e.code === 'KeyN') player.noclip = !player.noclip;   // noclip toggle (T13 adds KeyC here)
+  if (e.code === 'KeyF') player.fly = !player.fly; // fly toggle
+  if (e.code === 'KeyN') player.noclip = !player.noclip; // noclip toggle (T13 adds KeyC here)
+  if (e.code === 'KeyE') togglePalette(); // creative palette: open (unlock) / close (re-lock)
+  const d = e.code.startsWith('Digit') ? e.code.slice(5) : e.code.startsWith('Numpad') ? e.code.slice(6) : '';
+  if (d >= '1' && d <= '9') hotbar.select(Number(d) - 1); // 1-9 / numpad 1-9 selects a slot
 });
 window.addEventListener('keyup', (e) => keys.delete(e.code));
 
-// Click the canvas to pointer-lock (then WASD + mouse steer the character); ESC releases.
+// Click the canvas: close the palette if it is open, otherwise pointer-lock (WASD + mouse steer; ESC releases).
 renderer.domElement.addEventListener('click', () => {
-  const r = renderer.domElement.requestPointerLock() as unknown;
-  if (r instanceof Promise) r.catch(() => {}); // Safari rejects without a user gesture
+  if (paletteOpen) closePalette();
+  else lockPointer();
 });
 
 const crosshair = document.getElementById('crosshair')!;
@@ -285,8 +289,7 @@ function readMove(): MoveInput {
 
 // === actions ===
 
-// T8: crosshair break (LMB) / place (RMB). T11 replaces this single block with hotbar selection.
-let selectedBlock = Block.Planks;
+// T8: crosshair break (LMB) / place (RMB); the placed block comes from the selected hotbar slot (T11).
 
 // Targeting wireframe: box edges, 1.002 so it never z-fights the target face.
 const hitbox = new THREE.LineSegments(
@@ -357,7 +360,7 @@ function onMouseDown(e: MouseEvent): void {
     const target = world.getBlock(tx, ty, tz);
     if (target !== Block.Air && target !== Block.Water) return; // empty or water (filling pools)
     if (!player.noclip && player.intersectsVoxel(tx, ty, tz)) return; // no placing through yourself
-    world.setBlock(tx, ty, tz, selectedBlock);
+    world.setBlock(tx, ty, tz, hotbar.block);
     remeshAround(tx, ty, tz);
   }
 }
@@ -372,6 +375,80 @@ function updateHitbox(): void {
   hitbox.position.set(hit.x + 0.5, hit.y + 0.5, hit.z + 0.5);
   hitbox.visible = true;
 }
+
+// === ui ===
+
+// T11: hotbar (bottom, display-only) + palette (top-right, click targets). The nine `.slot`
+// divs are pre-placed in index.html; each is painted with the atlas crop of the block it holds.
+const PALETTE_BLOCKS = [...PLACEABLE];
+const hotbar = new Hotbar(PALETTE_BLOCKS);
+const atlasURL = atlasCanvas.toDataURL();
+
+// Crop the block's top-row tile into a `px`-sized icon: full atlas scaled 16·px wide, shifted
+// to the tile column (iconTile — same tile as the mesh top face). Nearest keeps it crisp.
+function placeIcon(el: HTMLElement, b: number, px: number): void {
+  el.style.backgroundImage = `url(${atlasURL})`;
+  el.style.backgroundSize = `${px * 16}px ${px * 16}px`;
+  el.style.backgroundPosition = `-$((iconTile(b) % 16) * px}px 0px`;
+  el.title = String(Block[b]);
+}
+
+const hotbarEl = document.getElementById('hotbar')!;
+const paletteEl = document.getElementById('palette')!;
+const hotbarSlotEls = Array.from(hotbarEl.children) as HTMLElement[];
+const paletteSlotEls = Array.from(paletteEl.children) as HTMLElement[];
+
+hotbarSlotEls.forEach((el, i) => placeIcon(el, hotbar.slots[i], 40)); // 44px box minus 2px border each side
+hotbarEl.classList.remove('hidden');
+paletteSlotEls.forEach((el, i) => {
+  placeIcon(el, PALETTE_BLOCKS[i], 44); // 48px box minus 2px border each side
+  el.addEventListener('click', () => hotbar.setSlot(hotbar.selected, PALETTE_BLOCKS[i])); // the arrow reads the *current* selection
+});
+
+hotbar.onSelectChange = (i) => {
+  hotbarSlotEls.forEach((el, j) => el.classList.toggle('sel', j === i));
+};
+hotbar.onSlotChange = (i) => {
+  placeIcon(hotbarSlotEls[i], hotbar.slots[i], 40); // the palette wrote into a slot
+};
+
+let paletteOpen = false;
+
+// Browsers enforce a ~1 s re-lock cooldown after ESC; a rejected request is benign
+// (the cooldown is the only realistic failure), so swallow it rather than throw.
+function lockPointer(): void {
+  const r = renderer.domElement.requestPointerLock() as unknown;
+  if (r instanceof Promise) r.catch(() => {}); // Safari rejects without a user gesture
+}
+
+function closePalette(): void {
+  paletteEl.classList.add('hidden');
+  paletteOpen = false;
+  lockPointer();
+}
+
+function togglePalette(): void {
+  if (paletteOpen) {
+    closePalette();
+  } else {
+    paletteOpen = true;
+    paletteEl.classList.remove('hidden');
+    document.exitPointerLock(); // crosshair + hitbox hide via the existing pointerlockchange handler
+  }
+}
+
+// Callbacks are wired above, so this initial select lights the .sel border.
+hotbar.select(PALETTE_BLOCKS.indexOf(Block.Planks)); // default: planks, as T8's selectedBlock was
+
+// Wheel cycles the hotbar (down = next slot); while the palette is open the wheel is left alone.
+window.addEventListener(
+  'wheel',
+  (e) => {
+    if (paletteOpen) return;
+    hotbar.cycle(e.deltaY > 0 ? 1 : -1);
+  },
+  { passive: true },
+);
 
 // === streaming ===
 
@@ -395,7 +472,7 @@ function tickStreaming(): void {
 const STEP = 1 / 60;
 const hint = document.getElementById('hint')!;
 hint.textContent =
-  'block-world T10 — click to lock · WASD move · SPACE jump/swim · F fly · SHIFT sink/fly-down · N noclip · LMB break · RMB place (planks) · ESC release · world streams in around you';
+  'block-world T11 — click to lock · WASD move · SPACE jump/swim · F fly · SHIFT sink/fly-down · N noclip · E palette · 1-9/wheel select · LMB break · RMB place · ESC release · world streams in around you';
 
 let last = performance.now();
 let acc = 0;

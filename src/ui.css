@@ -40,10 +40,9 @@ html, body { width: 100%; height: 100%; overflow: hidden; background: #0b0e14; }
   border: 2px solid rgba(255, 255, 255, .25);
   border-radius: 6px;
   background-repeat: no-repeat;
-  background-size: 256px 256px; /* full atlas; per-slot background-position offsets to its tile */
+  /* T11 sets image/size/position inline per slot (atlas-crop icons) */
 }
 #hotbar .slot { width: 44px; height: 44px; }
-#palette .slot { width: 48px; height: 48px; }
-#palette .slot { cursor: pointer; }
+#palette .slot { width: 48px; height: 48px; cursor: pointer; }
 #hotbar .slot.sel,
 #palette .slot.sel { border-color: #ffd24a; }
