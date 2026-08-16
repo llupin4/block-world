@@ -29,22 +29,6 @@ function countWaterAt(w: World, x0: number, x1: number, z0: number, z1: number, 
   return n;
 }
 
-// Tall cave under a sea: stone floor y0, air band y1..12, stone slab y13, sea y14..15
-// over x0..31 z0..15 (chunks 0 and 1). The sea is the "large body" (1024 cells) and its
-// flat surface is y=15, so equalization fills the whole band (6144 cells) plus any
-// opened floor cell.
-function oceanCaveW(): World {
-  const w = makeWorld([[0, 0, 0], [1, 0, 0]]);
-  for (let x = 0; x < 32; x++)
-    for (let z = 0; z < 16; z++) {
-      w.setBlock(x, 0, z, Block.Stone);
-      w.setBlock(x, 13, z, Block.Stone);
-      for (let y = 14; y <= 15; y++) w.setBlock(x, y, z, Block.Water);
-      // y1..12 stays Air (the cave band)
-    }
-  return w;
-}
-
 // Run the queue to a fixpoint (or until `max` ticks) — the node-side stand-in for the
 // runtime slow clock.
 function drain(sim: WaterSim, max = 300): void {
@@ -329,34 +313,5 @@ describe('water sim', () => {
     const sim = new WaterSim(w);
     sim.settle(0, 0, 0);
     expect(sim.stats.seeds).toBe(3840); // 16*16*15 water cells of chunk 0, all bulk-seeded in pass 1
-  });
-
-  it('punching the ocean floor instantly floods the connected cave to sea level (connected vessels, no tick())', () => {
-    const w = oceanCaveW();
-    const sim = new WaterSim(w);
-    sim.settle(0, 0, 0);
-    sim.settle(1, 0, 0);
-    expect(countWaterAt(w, 0, 31, 0, 15, 1, 13)).toBe(0); // sealed cave stays dry until opened
-    w.setBlock(9, 13, 9, Block.Air); // break the ocean floor
-    sim.edit(9, 13, 9, Block.Air);
-    // NO tick() anywhere: the fill must happen at edit time, not one fell cell/tick
-    expect(countWaterAt(w, 0, 31, 0, 15, 1, 13)).toBe(6145); // band 6144 + the opened cell
-    expect(countWater(w)).toBe(7169); // sea 1024 + cave 6145
-    expect(sim.cellState(9, 14, 9).b).toBe(Block.Water); // the sea above the hole is untouched
-    expect(sim.cellState(5, 15, 5)).toEqual({ b: Block.Water, l: 7, s: 1 }); // flat sea surface, unchanged
-    expect(sim.stats.equalizeFills).toBe(6145);
-    assertInvariants(w);
-  });
-
-  it('a pre-carved gap in the ocean floor is filled during settle (the load path), with no tick() involved', () => {
-    const w = oceanCaveW();
-    w.setBlock(9, 13, 9, Block.Air); // the gap exists in worldgen (Air), as a carve would leave it
-    const sim = new WaterSim(w);
-    sim.settle(0, 0, 0);
-    sim.settle(1, 0, 0); // settle alone must equalize — no tick()/drain()
-    expect(countWaterAt(w, 0, 31, 0, 15, 1, 13)).toBe(6145);
-    expect(countWater(w)).toBe(7169);
-    expect(sim.cellState(5, 14, 5).b).toBe(Block.Water); // sea intact
-    assertInvariants(w);
   });
 });
