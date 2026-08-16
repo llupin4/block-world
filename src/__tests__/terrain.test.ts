@@ -42,7 +42,7 @@ describe('terrain', () => {
     const { world } = genRegion(-2, 2, -2, 2);
     let water = 0;
     for (const c of world.allChunks()) for (let i = 0; i < c.blocks.length; i++) if (c.blocks[i] === Block.Water) water++;
-    expect(water).toBe(45395); // exact, measured against simplex-noise@4.0.3 (seed pinned above)
+    expect(water).toBe(24936); // exact, post cave→Air (was 45395); carved underwater-cave cells are now Air, not Water
   });
 
   it('surface columns end in grass or sand; dirt directly below for above-sea-level ground', () => {

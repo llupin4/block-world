@@ -12,8 +12,9 @@ function mulberry32(seed: number): () => number {
     a = (a + 0x6d2b79f5) | 0;
     let t = Math.imul(a ^ (a >>> 15), 1 | a);
     // Pinned variant: t ^ (a >>> 7) instead of canonical mulberry32's t >>> 7 — matches the plan's
-    // measured constants (45395 water cells, heights 19..43, 21 trees at seed 1234); the canonical
-    // form gives 45258 water cells. See docs/superpowers/2026-08-15-voxel-sandbox-poc-execution-notes.md
+    // measured constants (24936 water cells post cave→Air, was 45395; heights 19..43, 21 trees at
+    // seed 1234). The canonical form's 45258 water-cell figure predates the cave→Air change and
+    // was not re-measured after it. See docs/superpowers/2026-08-15-voxel-sandbox-poc-execution-notes.md
     t = (t + Math.imul(t ^ (a >>> 7), 61 | t)) ^ t;
     return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
   };
@@ -73,9 +74,10 @@ export function generateChunkTerrain(world: World, gen: TerrainGen, cx: number, 
         if (wy < h - 4) c.blocks[i] = Block.Stone;
         else if (wy < h) c.blocks[i] = Block.Dirt;
         else c.blocks[i] = h < SEA_LEVEL + 1 ? Block.Sand : Block.Grass;
-        // caves carve stone/dirt below sea level (underwater caves fill with water)
+        // caves carve stone/dirt below sea level to AIR; the water sim (src/water.ts) floods
+        // them from any sea-facing opening and leaves sealed caves dry.
         if ((c.blocks[i] === Block.Stone || c.blocks[i] === Block.Dirt) && wy <= SEA_LEVEL && gen.caveAt(wx, wy, wz) > 0.55) {
-          c.blocks[i] = Block.Water;
+          c.blocks[i] = Block.Air;
         }
       }
     }
