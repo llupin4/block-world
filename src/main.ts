@@ -3,6 +3,7 @@ import { Block } from './blocks';
 import { World, chunkKey, localIndex, type VoxelBuffer } from './world';
 import { SEA_LEVEL } from './terrain';
 import { meshChunk } from './chunk-mesher';
+import { Player, EYE, type MoveInput } from './player';
 
 // === boot ===
 
@@ -248,21 +249,58 @@ for (let cx = 0; cx <= 2; cx++)
 
 // === camera ===
 
-// T6: slow orbit. T7 replaces the updateOrbitCamera call sites with the player-driven camera.
-const ORBIT_TARGET = new THREE.Vector3(28, 43, 28);
-const ORBIT_OFFSET = new THREE.Vector3(0, 8, 26);
-const UP = new THREE.Vector3(0, 1, 0);
-let orbitAngle = 0;
+// Camera = the player's eyes (feet + EYE). Rotation order YXZ: yaw first, then pitch.
+const player = new Player((x, y, z) => world.getBlock(x, y, z));
+player.place(SPAWN);
+player.yaw = Math.PI; // face south, toward the deck/pool features
+camera.rotation.order = 'YXZ';
 
-function updateOrbitCamera(dt: number): void {
-  orbitAngle += dt * 0.35;
-  camera.position.copy(ORBIT_TARGET).add(ORBIT_OFFSET.clone().applyAxisAngle(UP, orbitAngle));
-  camera.lookAt(ORBIT_TARGET);
+function syncCamera(): void {
+  camera.position.set(player.pos.x, player.pos.y + EYE, player.pos.z);
+  camera.rotation.set(player.pitch, player.yaw, 0);
 }
-updateOrbitCamera(0);
+syncCamera();
 
 // === input ===
-// T7: pointer-lock + WASD/SPACE key state -> MoveInput.
+
+const MAX_PITCH = Math.PI / 2 - 0.01; // never go over the top
+const keys = new Set<string>();
+
+window.addEventListener('keydown', (e) => {
+  keys.add(e.code);
+  if (e.repeat) return;
+  if (e.code === 'KeyF') player.fly = !player.fly;         // fly toggle
+  if (e.code === 'KeyN') player.noclip = !player.noclip;   // noclip toggle (T13 adds KeyC here)
+});
+window.addEventListener('keyup', (e) => keys.delete(e.code));
+
+// Click the canvas to pointer-lock (then WASD + mouse steer the character); ESC releases.
+renderer.domElement.addEventListener('click', () => {
+  const r = renderer.domElement.requestPointerLock() as unknown;
+  if (r instanceof Promise) r.catch(() => {}); // Safari rejects without a user gesture
+});
+
+const crosshair = document.getElementById('crosshair')!;
+document.addEventListener('pointerlockchange', () => {
+  const locked = document.pointerLockElement === renderer.domElement;
+  crosshair.style.display = locked ? 'block' : 'none';
+  if (!locked) keys.clear(); // never drift on stuck keys after ESC
+});
+
+document.addEventListener('mousemove', (e) => {
+  if (document.pointerLockElement !== renderer.domElement) return;
+  player.yaw -= e.movementX * 0.0025;
+  player.pitch = Math.max(-MAX_PITCH, Math.min(MAX_PITCH, player.pitch - e.movementY * 0.0025));
+});
+
+function readMove(): MoveInput {
+  return {
+    forward: (keys.has('KeyW') ? 1 : 0) - (keys.has('KeyS') ? 1 : 0),
+    strafe: (keys.has('KeyD') ? 1 : 0) - (keys.has('KeyA') ? 1 : 0),
+    up: keys.has('Space'),
+    down: keys.has('ShiftLeft') || keys.has('ShiftRight'),
+  };
+}
 
 // === actions ===
 // T8: break/place on mouse click (remeshes affected chunks); T11: selected hotbar slot.
@@ -280,7 +318,8 @@ updateOrbitCamera(0);
 
 const STEP = 1 / 60;
 const hint = document.getElementById('hint')!;
-hint.textContent = 'block-world T6 — orbiting demo (player lands in T7)';
+hint.textContent =
+  'block-world T7 — click to lock · WASD move · SPACE jump/swim · F fly · SHIFT sink/fly-down · N noclip · ESC release';
 
 let last = performance.now();
 let acc = 0;
@@ -292,10 +331,11 @@ function frame(now: number): void {
   acc += dt;
   while (acc >= STEP) {
     acc -= STEP;
-    updateOrbitCamera(STEP); // T7: player.update(STEP, moveInput)
+    player.update(STEP, readMove());
     // T10: streaming.update(world, pcx, pcz, pcy)
     // T8:  tickInteractions()
   }
+  syncCamera();
   renderer.render(scene, camera);
   requestAnimationFrame(frame);
 }
