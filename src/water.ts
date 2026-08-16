@@ -17,6 +17,10 @@ export class WaterSim {
   private readonly world: World;
   private readonly queue = new Set<string>(); // insertion-ordered FIFO with dedup
   readonly touched = new Set<string>(); // chunk keys whose geometry changed (for re-mesh)
+  // Work counters, pinned by src/__tests__/water-load.test.ts (the load-path budget
+  // regression). `queueAdds` counts re-mark *events* (one per enqueue() call; each
+  // re-marks self + 4 horizontal + above, the same closure writeCell re-marks).
+  readonly stats = { seeds: 0, processes: 0, queueAdds: 0, equalizeFills: 0 };
   private settling: Chunk | null = null; // chunk whose settle is in flight (exempts its own water from the pristine-skip in process)
 
   constructor(world: World) {
@@ -66,8 +70,50 @@ export class WaterSim {
     this.queue.add(`${wx},${wy + 1},${wz}`);
   }
 
+  // Re-mark exactly the cells writeCell re-marks (self + 4 horizontal + above), without
+  // writing state: pass-2 settle seeding and equalize fills use this to pull dependent
+  // cells back into the queue. A below cell is never re-marked from above (same rule as
+  // writeCell: a resting level is a function of HXZ + above; a changed below re-triggers).
+  private enqueue(wx: number, wy: number, wz: number): void {
+    this.queue.add(`${wx},${wy},${wz}`);
+    this.stats.queueAdds++;
+    for (const [dx, dz] of HXZ) this.queue.add(`${wx + dx},${wy},${wz + dz}`);
+    this.queue.add(`${wx},${wy + 1},${wz}`);
+  }
+
+  // Two-pass seed (the load-path fix): pass 1 bulk-writes every worldgen Water cell of the
+  // chunk to (level 7, source) straight into the chunk arrays — no per-cell state read, no
+  // queue write, no re-mark. Pass 2 enqueues ONLY a seeded cell whose rule would act on its
+  // neighbours at seed time: a fall (below is Air) or a spread (an HXZ neighbour that is
+  // Air, or unseeded water below level 6 that a level-7 source would upgrade). Interior
+  // ocean cells trigger neither and are never processed. Every later state change still
+  // goes through writeCell (which re-marks dependents), so the worklist stays closed and
+  // converges to the same fixpoint as per-cell seeding did.
+  private settleSeed(c: Chunk): void {
+    const bx = c.cx * 16, by = c.cy * 16, bz = c.cz * 16;
+    for (let i = 0; i < c.blocks.length; i++) {
+      if (c.blocks[i] !== Block.Water) continue;
+      if (c.wlevel[i] === 7 && c.wsource[i] === 1) continue; // already a source
+      c.wlevel[i] = 7;
+      c.wsource[i] = 1;
+      this.stats.seeds++;
+    }
+    for (let lx = 0; lx < 16; lx++)
+      for (let ly = 0; ly < 16; ly++)
+        for (let lz = 0; lz < 16; lz++) {
+          if (c.blocks[localIndex(lx, ly, lz)] !== Block.Water) continue;
+          const wx = bx + lx, wy = by + ly, wz = bz + lz;
+          if (this.cellState(wx, wy - 1, wz).b === Block.Air) { this.enqueue(wx, wy, wz); continue; }
+          for (const [dx, dz] of HXZ) {
+            const m = this.cellState(wx + dx, wy, wz + dz);
+            if (m.b === Block.Air || (m.b === Block.Water && m.s === 0 && m.l < 6)) { this.enqueue(wx, wy, wz); break; }
+          }
+        }
+  }
+
   // One update: process one water cell to its rule-driven action.
   private process(wx: number, wy: number, wz: number): void {
+    this.stats.processes++;
     const C = this.cellState(wx, wy, wz);
     if (C.b !== Block.Water) return; // dried / no longer water: neighbours+above already re-marked
     // A loaded-unsettled neighbour still carries pristine worldgen water (level 0, no
@@ -140,10 +186,10 @@ export class WaterSim {
     return n;
   }
 
-  // On-load settle: seed every worldgen Water cell as a level-7 source (a plain array
-  // pre-mark would satisfy writeCell's exact-state early-return and queue nothing,
-  // leaving the relaxation a no-op — caves would never flood on load), then relax to
-  // a fixpoint (guarded). Idempotent via the settled flag.
+  // On-load settle: bulk-seed every worldgen Water cell of the chunk as a level-7 source
+  // (pass 1 of settleSeed, no per-cell queue work), then enqueue only the seeded cells
+  // whose rule would already act (pass 2) and relax to a fixpoint (guarded). Idempotent
+  // via the settled flag.
   // NOTE: does NOT clear `touched` — marks accumulate for the whole frame and the
   // frame-end drain (main.ts) is the sole consumer. Clearing here would drop marks
   // made by an EARLIER settle of the same frame: a seam chunk flooded across from it
@@ -152,12 +198,7 @@ export class WaterSim {
     const c = this.world.getChunk(cx, cy, cz);
     if (!c || c.settled) return this.touched;
     this.settling = c; // during this settle, only c's own water may be modified (see the pristine-skip in process)
-    const bx = cx * 16, by = cy * 16, bz = cz * 16;
-    for (let lx = 0; lx < 16; lx++)
-      for (let ly = 0; ly < 16; ly++)
-        for (let lz = 0; lz < 16; lz++)
-          if (c.blocks[localIndex(lx, ly, lz)] === Block.Water)
-            this.writeCell(bx + lx, by + ly, bz + lz, 7, 1, Block.Water);
+    this.settleSeed(c);
     let guard = 0;
     while (this.queue.size > 0 && guard < SETTLE_GUARD) {
       const it = this.queue.values().next();

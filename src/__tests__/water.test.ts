@@ -293,4 +293,15 @@ describe('water sim', () => {
     console.log('H carved=', carved);
     expect(carved).toBeGreaterThan(0);
   });
+
+  it('settle seeds worldgen water in bulk (stats.seeds) — interior ocean cells trigger no per-cell seeding work', () => {
+    const w = makeWorld([[0, 0, 0], [1, 0, 0]]); // 2-chunk ocean slab
+    for (let x = 0; x < 32; x++) for (let z = 0; z < 16; z++) {
+      w.setBlock(x, 0, z, Block.Stone); // seafloor
+      for (let y = 1; y <= 15; y++) w.setBlock(x, y, z, Block.Water); // ocean to the chunk top
+    }
+    const sim = new WaterSim(w);
+    sim.settle(0, 0, 0);
+    expect(sim.stats.seeds).toBe(3840); // 16*16*15 water cells of chunk 0, all bulk-seeded in pass 1
+  });
 });
