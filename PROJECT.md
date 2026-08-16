@@ -139,10 +139,11 @@ function generateChunk(chunk: Chunk, noise2D, noise3D) {
         else if (wy === height)    b = wy < SEA_LEVEL + 1 ? Block.Sand : Block.Grass;
         else if (wy <= SEA_LEVEL)  b = Block.Water;
 
-        // caves: carve where 3D noise crosses a threshold
+        // caves: carve AIR where 3D noise crosses a threshold; the water sim (§9, src/water.ts)
+        // floods caves from any sea-facing opening and leaves sealed caves dry
         if (b === Block.Stone || b === Block.Dirt) {
           const cave = noise3D(wx * 0.05, wy * 0.05, wz * 0.05);
-          if (cave > 0.55) b = wy <= SEA_LEVEL ? Block.Water : Block.Air;
+          if (cave > 0.55) b = Block.Air;
         }
 
         chunk.blocks[idx(lx, ly, lz)] = b;
@@ -409,7 +410,7 @@ Axis order matters — resolving Y separately is what gives you clean landing an
 
 **Swimming.** In water: gravity × 0.3, horizontal speed × 0.5, vertical damping, space swims upward at a constant rate rather than impulse-jumping.
 
-**Flow (optional for POC).** A cellular automaton with a 0–7 level per water cell, stored in a parallel `Uint8Array`:
+**Flow.** A cellular automaton with a 0–7 level per water cell, stored in a parallel `Uint8Array`:
 
 - A source block is level 7.
 - Each tick, a water cell tries to flow **down** first at full level.
@@ -419,7 +420,7 @@ Axis order matters — resolving Y separately is what gives you clean landing an
 
 Tick water on a slower clock than physics — every 5th frame is plenty and it looks more like typical voxel engines anyway.
 
-**[POC shortcut]** You can ship the POC with water as a purely static block that fills below sea level and never flows. Flow is a genuinely fiddly system (removal/de-propagation is the hard half) and it's independent of everything else. Defer it until the rest is fun.
+**[Implemented]** The flow sim shipped in `src/water.ts` (unit-tested in `src/__tests__/water.test.ts`). Flow state (`wlevel`/`wsource`) is stored in each chunk (`src/world.ts`) and streams with it. On top of the rules above it also: **re-promotes** a settled water cell to a *source* on solid support below (a rule typical of voxel engines — so settled lakes, pool floors, landing cells, and sealed pockets are immortal), **settles** standing water once on chunk load (freshly loaded chunks show flooded caves without a visible pour), and **drains** only water that falls out of the world. Documented POC-model deviations: "falling" = step down one cell/tick with the source bit carried (a landed source keeps feeding its stream); a re-promoted source *keeps* its level (bounded, unlike a fresh level-7 source), so a settled pool's front stays a level-1 ring; cut in-flight flow lands and re-promotes rather than draining; water never spreads into ungenerated space (missing chunks stop spread — only a *falling* cell into a missing/void destination is destroyed); and levels affect dynamics only, never the mesh. One load-path subtlety is handled explicitly: settling chunks one at a time can never eat a loaded-unsettled neighbour's *unseeded* worldgen water (level 0, no source) — such cells are skipped until their own chunk seeds them as level-7 sources, so settling one chunk may flood air or raise levels across a seam but never dries its neighbour's water, and the converged state is independent of settle order.
 
 ---
 
