@@ -18,9 +18,16 @@ app.append(renderer.domElement);
 // === scene ===
 
 const scene = new THREE.Scene();
-const BG_AIR = 0x87ceeb; // T12 reuses this (air/underwater background + fog swap)
-scene.background = new THREE.Color(BG_AIR);
+// T12: two "moods" — air (sky blue, faint distance fog) vs water (deep blue, dense fog).
+const BG_AIR = new THREE.Color(0x87ceeb);
+const BG_WATER = new THREE.Color(0x0a2a55);
+const FOG_AIR = new THREE.FogExp2(0xcfe8ff, 0.004);
+const FOG_WATER = new THREE.FogExp2(0x0a2a55, 0.35);
+scene.background = BG_AIR;
+scene.fog = FOG_AIR;
 const camera = new THREE.PerspectiveCamera(70, 1, 0.1, 512);
+const FOV_AIR = 70; // must equal the perspective camera fov above
+const FOV_WATER = 62;
 // SPAWN is computed in world-state, after the terrain exists (scan of a measured column).
 
 function onResize() {
@@ -462,7 +469,20 @@ function tickStreaming(): void {
 }
 
 // === water-fx ===
-// T12: underwater fog / background / FOV swap driven by player.headInWater.
+
+// T12: when the eye voxel is water, the whole scene swaps to the water mood — background,
+// fog, and a slight FOV squeeze, in one frame, in both directions. Driven by
+// player.headInWater (T7 samples it each physics step); called per frame below.
+let waterFx: 'air' | 'water' = 'air';
+function syncWaterFx(): void {
+  const m: 'air' | 'water' = player.headInWater ? 'water' : 'air';
+  if (m === waterFx) return; // stable: one swap per (de)submersion, not per frame
+  waterFx = m;
+  scene.background = m === 'water' ? BG_WATER : BG_AIR;
+  scene.fog = m === 'water' ? FOG_WATER : FOG_AIR;
+  camera.fov = m === 'water' ? FOV_WATER : FOV_AIR;
+  camera.updateProjectionMatrix(); // a fov change only reaches the GPU via this call
+}
 
 // === debug ===
 // T13: C = chunk-wireframe / AO demo scene (F fly / N noclip toggles live in the T7 input section).
@@ -472,7 +492,7 @@ function tickStreaming(): void {
 const STEP = 1 / 60;
 const hint = document.getElementById('hint')!;
 hint.textContent =
-  'block-world T11 — click to lock · WASD move · SPACE jump/swim · F fly · SHIFT sink/fly-down · N noclip · E palette · 1-9/wheel select · LMB break · RMB place · ESC release · world streams in around you';
+  'block-world T12 — click to lock · WASD move · SPACE jump/swim · F fly · SHIFT sink/fly-down · N noclip · E palette · 1-9/wheel select · LMB break · RMB place · ESC release · world streams in around you';
 
 let last = performance.now();
 let acc = 0;
@@ -490,6 +510,7 @@ function frame(now: number): void {
   }
   syncCamera();
   updateHitbox();
+  syncWaterFx();
   renderer.render(scene, camera);
   requestAnimationFrame(frame);
 }
