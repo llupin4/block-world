@@ -7,6 +7,7 @@ import { Hotbar } from './ui';
 import { meshChunk } from './chunk-mesher';
 import { Player, EYE, type MoveInput } from './player';
 import { raycastVoxel, REACH, type RayHit } from './raycast';
+import { WaterSim } from './water';
 
 // === boot ===
 
@@ -168,6 +169,12 @@ const world = new World();
 // the same generator/seed, so this column is byte-identical to what it would generate later.
 const gen = new TerrainGen(TERRAIN_SEED);
 for (let cy = 0; cy <= 4; cy++) generateChunkTerrain(world, gen, 0, cy, 2); // chunk column (0,·,2) → world x 0..15, z 32..47 — contains the (T9) spawn (6,46)
+
+// Water sim (PROJECT.md §9, src/water.ts): flow state streams with each chunk; it is
+// settled per chunk as streaming loads them (tickStreaming) and advanced on a slower
+// clock than physics (every 5th frame). The boot-generated spawn column is settled by
+// the first tickStreaming, before the first rendered frame, so caves read as already filled.
+const sim = new WaterSim(world);
 
 // Spawn on MEASURED ground. Plan deviation (recorded): the plan's probe reported (33,41) as a
 // grass shelf at surface y=33, but under the T4-pinned generator that column is a sea-basin
@@ -362,6 +369,7 @@ function onMouseDown(e: MouseEvent): void {
     // `hit` is always a breakable solid (water is pass-through in the raycast).
     world.setBlock(hit.x, hit.y, hit.z, Block.Air);
     remeshAround(hit.x, hit.y, hit.z);
+    sim.edit(hit.x, hit.y, hit.z, Block.Air); // clears the cell's water state + re-marks dependents (source/support removed)
   } else if (e.button === 2) {
     const tx = hit.x + hit.nx;
     const ty = hit.y + hit.ny;
@@ -372,6 +380,7 @@ function onMouseDown(e: MouseEvent): void {
     if (!player.noclip && player.intersectsVoxel(tx, ty, tz)) return; // no placing through yourself
     world.setBlock(tx, ty, tz, hotbar.block);
     remeshAround(tx, ty, tz);
+    sim.edit(tx, ty, tz, hotbar.block); // Water → a level-7 source; any other block dries this cell (surrounding water re-relaxes on the next tick)
   }
 }
 
@@ -518,7 +527,10 @@ window.addEventListener(
 function tickStreaming(): void {
   const r = streaming.update(world, chunkOf(player.pos.x), chunkOf(player.pos.z), chunkOf(player.pos.y));
   for (const c of r.unloaded) removeChunkMesh(c.cx, c.cy, c.cz);
-  for (const c of r.rebuilt) rebuildChunkMesh(c.cx, c.cy, c.cz);
+  for (const c of r.rebuilt) {
+    sim.settle(c.cx, c.cy, c.cz); // POC form of worldgen-fluid settling: settle BEFORE meshing so the new chunk's mesh already shows flooded caves. The settled flag makes re-settling a re-meshed chunk a no-op. Cross-seam chunks the sim touched are re-meshed at end of frame (drain below).
+    rebuildChunkMesh(c.cx, c.cy, c.cz);
+  }
 }
 
 // === water-fx ===
@@ -556,6 +568,7 @@ const STEP = 1 / 60;
 
 let last = performance.now();
 let acc = 0;
+let frameNo = 0;
 
 function frame(now: number): void {
   let dt = (now - last) / 1000;
@@ -567,6 +580,16 @@ function frame(now: number): void {
     player.update(STEP, readMove());
     tickStreaming();
     if (player.pos.y < WORLD_Y_MIN) player.place(SPAWN); // fell out of the world (open cave / dug-away floor)
+  }
+  frameNo++;
+  if (frameNo % 5 === 0) sim.tick(200); // water runs on a slower clock than physics (PROJECT.md §9: ~12 ticks/s)
+  const touched = sim.touched; // re-mesh any chunk the sim changed this frame (settles from substeps + ticks), then drain
+  if (touched.size) {
+    for (const key of touched) {
+      const [cx, cy, cz] = key.split(',').map(Number);
+      if (world.hasChunk(cx, cy, cz)) rebuildChunkMesh(cx, cy, cz);
+    }
+    touched.clear();
   }
   syncCamera();
   updateHitbox();
