@@ -222,7 +222,8 @@ describe('water sim', () => {
     const b1 = countWaterAt(w, 16, 31, 0, 31, 0, 15);
     console.log('P before right column=', b0);
     console.log('P after  right column=', b1);
-    expect(b1).toBe(7632); // +144 = exactly the six seam-reachable cave columns (x=16..21); no worldgen water re-leveled or eaten — growth is pure cave filling. (Old code pinned b1>=b0 only, because its seam re-leveling made the count a moving target.)
+    expect(b1).toBe(7632); // +144 = exactly the six seam-reachable cave columns (x=16..21); growth is pure cave filling — no worldgen water eaten. The block-level count is observably identical on the old code (re-leveling is block-identity-preserving), so it cannot pin the re-leveling guard — the (16,8,8) state assertion below is what does.
+    expect(sim.cellState(16, 8, 8)).toEqual({ b: Block.Water, l: 0, s: 0 }); // guard-2 state pin: the neighbour's pristine sea water is never re-leveled into a decaying slab (old code wrote (6,*) here); its own settle re-seeds it as (7,1)
     expect(w.getBlock(17, 3, 13)).toBe(Block.Water); // the seam reaches the cave from the settled side
     expect(w.getBlock(23, 3, 13)).toBe(Block.Air); // ...but the far columns (x=22,23) stay dry: spread levels decay to 1 before crossing, and the chunk's own unsettled water (incl. the x=24 side) is never re-leveled, so nothing falls in from far side or above
     sim.settle(1, 0, 0); sim.settle(0, 0, 1); sim.settle(1, 0, 1); // settle the rest: the cave's own chunk seeds its own water and completes the fill
@@ -255,6 +256,8 @@ describe('water sim', () => {
   });
 
   it('a settled chunk\'s touched mark survives later sibling settles, so the frame-end drain still re-meshes it (stale seam-mesh fix)', () => {
+    // Also pins spread guard 2's observable effect: without it, settle(0) re-levels chunk 1's
+    // pristine sea water into a decaying slab that falls into the cave below — do not relax.
     const w = makeWorld([[0, 0, 0], [1, 0, 0], [2, 0, 0]]); // 3 chunks wide: x=0..47, z=0..15
     for (let x = 0; x < 48; x++) for (let z = 0; z < 16; z++) {
       for (let y = 0; y <= 3; y++) w.setBlock(x, y, z, Block.Stone); // seafloor

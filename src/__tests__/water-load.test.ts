@@ -19,8 +19,12 @@ import { meshChunk } from '../chunk-mesher';
 //   two-pass settle only (pass-1 seed + pass-2 reseed, spread still unguarded):
 //     2,463,202 — invariant: the edge loop still capped every ocean settle.
 //   two-pass settle + the two spread guards (this fix): 358,734 — the edge self-loop is
-//     gone (no writeCell into missing space, no pristine-water re-leveling) and each
-//     ocean settle now converges on its own cells.
+//     gone (no writeCell into missing space, no pristine-water re-leveling) and early
+//     settles near spawn now do their own water's work instead of burning the guard.
+//     The very largest early settles still exhaust per-settle work (SETTLE_GUARD) and hand
+//     their residual relaxation to later settles / the tick/5 slow clock; the queue is
+//     fully drained within the first ~15 frames of the replay (asserted below), so total
+//     work is what the pin bounds.
 // The pin is the original pre-fix budget floor (2,463,202 / 2 = 1,231,601): it separates
 // the fix (358,734) from both the old code and the two-pass-only intermediate.
 // process() is counted via a runtime prototype patch (TS `private` is
@@ -79,6 +83,7 @@ it('boot + 60 streaming frames stay within the load-path work budget', () => {
     }
   }
   const wall = performance.now() - tStart;
+  proto.process = origProcess; // stop counting before the residual-drain probe below
 
   console.log('LOAD wall=', wall.toFixed(0), 'ms');
   console.log('LOAD settle=', settleMs.toFixed(0), 'ms');
@@ -88,4 +93,5 @@ it('boot + 60 streaming frames stay within the load-path work budget', () => {
 
   expect(w.count()).toBe(125); // the replay really walked to the full 5x5x5 ring
   expect(processes).toBeLessThan(PIN);
+  expect(sim.tick(1)).toBe(0); // residual relaxation from any guard-saturated early settle completed within the replay window (queue fully drained)
 }, 30000);

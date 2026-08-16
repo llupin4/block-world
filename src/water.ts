@@ -104,7 +104,7 @@ export class WaterSim {
         for (let lz = 0; lz < 16; lz++) {
           if (c.blocks[localIndex(lx, ly, lz)] !== Block.Water) continue;
           const wx = bx + lx, wy = by + ly, wz = bz + lz;
-if (this.cellState(wx, wy - 1, wz).b === Block.Air) { this.enqueue(wx, wy, wz); continue; }
+          if (this.cellState(wx, wy - 1, wz).b === Block.Air) { this.enqueue(wx, wy, wz); continue; }
         for (const [dx, dz] of HXZ) {
           const m = this.cellState(wx + dx, wy, wz + dz);
           if (m.b === Block.Air || (m.b === Block.Water && m.s === 0 && m.l >= 1 && m.l < 6)) { this.enqueue(wx, wy, wz); break; }
