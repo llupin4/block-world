@@ -49,7 +49,7 @@ function assertInvariants(w: World): void {
 }
 
 describe('water sim', () => {
-  it('water placed on a stone pad floods the whole connected floor layer (unlimited range); exactly one source (the placed cell), the rest is flow, and water never climbs', () => {
+it('water placed on a stone pad makes a bounded fan: one level lost per sideways step (~6 blocks out), a fall resets to full level; exactly one source (the placed cell), the rest is flow, and water never climbs', () => {
     const w = makeWorld([[0, 0, 0]]);
     slab(w, Block.Stone, 0, 15, 0, 0, 15); // floor at y=0
     const sim = new WaterSim(w);
@@ -58,17 +58,14 @@ describe('water sim', () => {
     sim.settle(0, 0, 0);
     drain(sim);
 
-    console.log('A count=', countWater(w));
     const cs = (x: number, y: number, z: number) => sim.cellState(x, y, z);
     expect(cs(8, 1, 8)).toEqual({ b: Block.Water, l: 7, s: 1, f: 0, p: 1, st: 0 }); // the only source: the placed cell (a spring)
-    expect(cs(9, 1, 8)).toEqual({ b: Block.Water, l: 7, s: 0, f: 1, p: 0, st: 0 }); // flow, level stays 7 (it never decays), sustained by the source
-    expect(cs(0, 1, 8).b).toBe(Block.Water); // the flood runs to the chunk edge — range is unlimited...
-    expect(cs(15, 1, 8).b).toBe(Block.Water);
-    expect(cs(8, 1, 0).b).toBe(Block.Water);
-    expect(cs(8, 1, 15).b).toBe(Block.Water);
-    // ...but it is bounded by missing space (no spread into ungenerated chunks)
+    expect(cs(9, 1, 8)).toEqual({ b: Block.Water, l: 6, s: 0, f: 1, p: 0, st: 0 }); // flow one step out: level 6, sustained by the source
+    expect(cs(14, 1, 8)).toEqual({ b: Block.Water, l: 1, s: 0, f: 1, p: 0, st: 0 }); // the fan's lip: level 1, six steps out...
+    expect(cs(15, 1, 8).b).toBe(Block.Air); // ...and it stops there: a level-1 cell spreads nothing (no more contour-flooding on hills)
+    expect(cs(8, 1, 2), 'the fan reaches ~6 blocks out in the sideways directions').toEqual({ b: Block.Water, l: 1, s: 0, f: 1, p: 0, st: 0 });
     expect(cs(8, 2, 8).b).toBe(Block.Air); // water never climbs: the flood stays a floor layer
-    expect(countWater(w)).toBe(256); // every floor cell of the 16x16 pad
+    expect(countWater(w)).toBe(85); // the bounded 4-way fan (six steps of level decay from the spring)
     assertInvariants(w);
   });
 
@@ -80,7 +77,7 @@ describe('water sim', () => {
     sim.edit(8, 1, 8, Block.Water);
     sim.settle(0, 0, 0);
     drain(sim);
-    expect(countWater(w)).toBe(256); // 1 source + 255 flow
+    expect(countWater(w)).toBe(85); // 1 source + 84 flow
 
     w.setBlock(8, 1, 8, Block.Stone); // block the source: no source remains in the world
     sim.edit(8, 1, 8, Block.Stone);
@@ -139,17 +136,31 @@ describe('water sim', () => {
     assertInvariants(w);
   });
 
-  it('a source falling into a walled pit lands as flow and starves away: only placement creates sources, and flow with no source left to reach it goes', () => {
-    const w = makeWorld([[0, 0, 0]]); // chunks span y=0..15
-    w.setBlock(8, 0, 8, Block.Stone); // floor of a 1-wide pit
-    // solid walls at the landing level so the landed cell cannot spread to a floorless edge
-    for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) w.setBlock(8 + dx, 1, 8 + dz, Block.Stone);
+  it('a source placed inside a hollow never falls: it stays a spring, pouring a stream to the floor and a bounded pool; mined out, the pool starves away', () => {
+    const w = makeWorld([[0, 0, 0]]); // chunk spans y=0..15
+    for (let y = 0; y <= 15; y++) for (let x = 0; x < 16; x++) for (let z = 0; z < 16; z++) w.setBlock(x, y, z, Block.Stone); // solid rock ...
+    for (let x = 7; x <= 9; x++) for (let z = 7; z <= 9; z++) for (let y = 1; y <= 4; y++) w.setBlock(x, y, z, Block.Air); // ... with a 3x3 hollow (a cave pocket)
     const sim = new WaterSim(w);
-    w.setBlock(8, 8, 8, Block.Water);
-    sim.edit(8, 8, 8, Block.Water);
-    drain(sim);
-    expect(sim.cellState(8, 8, 8).b).toBe(Block.Air); // origin dried as it fell
-    expect(sim.cellState(8, 1, 8).b).toBe(Block.Air); // landed as flow in the walled pit, then starved: no source anywhere
+    w.setBlock(8, 4, 8, Block.Water); // place a spring in the rock, inside the hollow
+    sim.edit(8, 4, 8, Block.Water);
+    for (let i = 0; i < 50; i++) sim.tick(250); // 50 slow-clock pulses
+
+    expect(sim.cellState(8, 4, 8)).toEqual({ b: Block.Water, l: 7, s: 1, f: 0, p: 1, st: 0 }); // a placed spring NEVER falls — it stays a permanent emitter in the wall
+    expect(w.getBlock(8, 3, 8)).toBe(Block.Water); // its stream runs down the hollow ...
+    expect(w.getBlock(8, 2, 8)).toBe(Block.Water); // ... and pools on the floor ...
+    expect(w.getBlock(7, 1, 8)).toBe(Block.Water); // a bounded floor pool (six decaying steps from each landing, clamped by the walls) ...
+    expect(sim.cellState(7, 4, 8).st).toBe(1); // ... and its sideways push at head level runs down the wall as a STREAM (visible, never spreads, cannot climb)
+    const c1 = countWater(w);
+    expect(c1).toBe(24); // 1 spring + 4 head-level side flows + 5 + 5 stream cells (y=3,2) + 9 floor cells
+    for (let i = 0; i < 20; i++) sim.tick(250); // it keeps flowing, but the state is stable at rest
+    expect(countWater(w)).toBe(c1); // no churn, no climbing
+    assertInvariants(w);
+
+    // mine the spring out of the rock: with no source left, the stream and pool starve away
+    w.setBlock(8, 4, 8, Block.Air);
+    sim.edit(8, 4, 8, Block.Air);
+    let guard = 0;
+    while (countWater(w) > 0 && guard++ < 300) sim.tick(200);
     expect(countWater(w)).toBe(0);
     assertInvariants(w);
   });
@@ -164,35 +175,40 @@ describe('water sim', () => {
     sim.edit(8, 10, 8, Block.Water);
     for (let i = 0; i < 100; i++) sim.tick(250); // 100 slow-clock pulses (50 s of sim)
 
-    expect(sim.cellState(8, 11, 8)).toEqual({ b: Block.Water, l: 7, s: 1, f: 0, p: 1, st: 0 }); // the springs stay put (fed) — they never fall out of the water
+    expect(sim.cellState(8, 11, 8)).toEqual({ b: Block.Water, l: 7, s: 1, f: 0, p: 1, st: 0 }); // the springs stay put — a placed spring never falls out of the water
     expect(sim.cellState(8, 10, 8).s).toBe(1);
     for (let y = 1; y <= 11; y++) {
       expect(w.getBlock(8, y, 8), `level y=${y} must be full`).toBe(Block.Water);
     }
     expect(sim.cellState(8, 3, 8).st).toBe(1); // the main column is a stream (visible, never spreads)
-    expect(sim.cellState(8, 1, 8).st).toBe(0); // the floor pool is a sheet on solid ground, not stream
+    expect(sim.cellState(8, 1, 8)).toEqual({ b: Block.Water, l: 7, s: 0, f: 1, p: 0, st: 0 }); // the floor pool is a sheet on solid ground, not stream
+    expect(sim.cellState(14, 1, 8).l).toBe(1); // the pool's lip: six decaying steps from the landing
+    expect(sim.cellState(15, 1, 8).b).toBe(Block.Air); // ...and it stops there — no run-off beyond the fan
     expect(w.getBlock(7, 11, 8), 'side streams run off the head level').toBe(Block.Water);
     expect(w.getBlock(7, 12, 8), 'nothing is written above the head level').toBe(Block.Air);
-    expect(w.getBlock(7, 1, 8), 'the pool sheet runs to the chunk edge').toBe(Block.Water);
-    // 256 floor sheet + 8 main column cells (y=2..9) + 2 spring heads + 4 side columns x 10 cells (y=2..11)
-    expect(countWater(w)).toBe(256 + 8 + 2 + 4 * 10);
-    expect(sim.tick(1)).toBe(0); // steady state: springs on water, streams static, sheet at rest — no churn
+    // 85 floor sheet (bounded fan) + 8 main column cells (y=2..9) + 2 spring heads + 4 side columns x 10 cells (y=2..11)
+    expect(countWater(w)).toBe(85 + 8 + 2 + 4 * 10);
+    const c = countWater(w);
+    for (let i = 0; i < 20; i++) sim.tick(250); // steady: the springs keep pouring into their full columns, nothing new happens
+    expect(countWater(w)).toBe(c); // no churn, no climbing
     assertInvariants(w);
   });
 
-  it('a stream that falls out of the world is destroyed (drain)', () => {
-    const w = makeWorld([[0, 0, 0]]); // chunks span y=0..15; nothing below
+it('a spring pouring out of the world keeps pouring: the falling stream is destroyed, the spring endures (a world-edge fountain)', () => {
+    const w = makeWorld([[0, 0, 0]]); // chunk spans y=0..15; nothing below
     const sim = new WaterSim(w);
     w.setBlock(8, 8, 8, Block.Water);
     sim.edit(8, 8, 8, Block.Water);
-    drain(sim);
-    expect(countWater(w)).toBe(0);
-    expect(sim.cellState(8, 0, 8).b).toBe(Block.Air);
-    expect(sim.cellState(8, 8, 8).b).toBe(Block.Air);
+    for (let i = 0; i < 30; i++) sim.tick(250);
+    expect(sim.cellState(8, 8, 8)).toEqual({ b: Block.Water, l: 7, s: 1, f: 0, p: 1, st: 0 }); // a placed spring never falls or dries, even pouring into the void
+    expect(countWater(w)).toBe(8); // spring + its falling stream (y=7..1 in flight; the drop at y=0 is destroyed each pulse)
+    const c = countWater(w);
+    for (let i = 0; i < 10; i++) sim.tick(250);
+    expect(countWater(w)).toBe(c); // steady drip: nothing accumulates
     assertInvariants(w);
   });
 
-  it('a sealed 3x3 pool is a fixpoint of tick (immortal); breaking the centre refills it from the source ring', () => {
+it('a sealed 3x3 pool is a fixpoint of the slow clock (immortal); breaking the centre refills it from the source ring', () => {
     const w = makeWorld([[0, 0, 0]]);
     slab(w, Block.Stone, 4, 10, 0, 4, 10); // floor
     slab(w, Block.Stone, 4, 10, 1, 4, 10); // wall/ceiling level
@@ -203,10 +219,12 @@ describe('water sim', () => {
     sim.settle(0, 0, 0);
     drain(sim);
 
-for (let x = 6; x <= 8; x++) for (let z = 6; z <= 8; z++)
-    expect(sim.cellState(x, 1, z)).toEqual({ b: Block.Water, l: 7, s: 1, f: 0, p: 1, st: 0 });
-    expect(sim.tick(1)).toBe(0); // fixpoint: settled pool never cascades
+ for (let x = 6; x <= 8; x++) for (let z = 6; z <= 8; z++)
+     expect(sim.cellState(x, 1, z)).toEqual({ b: Block.Water, l: 7, s: 1, f: 0, p: 1, st: 0 });
     expect(countWater(w)).toBe(9);
+    const c = countWater(w);
+    for (let i = 0; i < 20; i++) sim.tick(250); // fixpoint: settled pool never cascades (the spring ring re-checks every pulse, writes nothing)
+    expect(countWater(w)).toBe(c);
 
     // break the centre and let the source ring refill it
     w.setBlock(7, 1, 7, Block.Air);
@@ -214,9 +232,11 @@ for (let x = 6; x <= 8; x++) for (let z = 6; z <= 8; z++)
     drain(sim);
     expect(sim.cellState(7, 1, 7).b).toBe(Block.Water);
     expect(sim.cellState(7, 1, 7).s).toBe(0); // refilled as flow, sustained by the source ring (no re-promotion)
-    expect(sim.cellState(7, 1, 7)).toEqual({ b: Block.Water, l: 7, s: 0, f: 1, p: 0, st: 0 });
+    expect(sim.cellState(7, 1, 7)).toEqual({ b: Block.Water, l: 6, s: 0, f: 1, p: 0, st: 0 }); // one level down: it is a spread from the ring, not a new spring
     expect(countWater(w)).toBe(9);
-    expect(sim.tick(1)).toBe(0);
+    const c2 = countWater(w);
+    for (let i = 0; i < 20; i++) sim.tick(250);
+    expect(countWater(w)).toBe(c2);
     assertInvariants(w);
   });
 
@@ -230,8 +250,8 @@ for (let x = 6; x <= 8; x++) for (let z = 6; z <= 8; z++)
     drain(sim);
     expect(chunkOf(16)).toBe(1);
     expect(sim.cellState(16, 1, 8).b).toBe(Block.Water); // spread into the loaded neighbour
-    expect(sim.cellState(16, 1, 8).l).toBe(7);
-    expect(sim.cellState(14, 1, 8).l).toBe(7); // and back into chunk 0
+    expect(sim.cellState(16, 1, 8).l).toBe(6); // the level is carried (and decays: one less per step from the spring)
+    expect(sim.cellState(14, 1, 8).l).toBe(6); // and back into chunk 0
     assertInvariants(w);
   });
 
@@ -248,16 +268,25 @@ for (let x = 6; x <= 8; x++) for (let z = 6; z <= 8; z++)
     assertInvariants(w);
   });
 
-  it('placing Water via edit makes a source; placing a solid into water clears that cell; invariants hold', () => {
+it('placing Water via edit makes a source (a spring that never falls, even alone in the sky); placing a solid into water clears that cell; invariants hold', () => {
     const w = makeWorld([[0, 0, 0]]);
     const sim = new WaterSim(w);
-w.setBlock(4, 4, 4, Block.Water);
-  sim.edit(4, 4, 4, Block.Water);
-  expect(sim.cellState(4, 4, 4)).toEqual({ b: Block.Water, l: 7, s: 1, f: 0, p: 1, st: 0 });
-  w.setBlock(4, 4, 4, Block.Stone);
-  sim.edit(4, 4, 4, Block.Stone);
-  expect(sim.cellState(4, 4, 4)).toEqual({ b: Block.Stone, l: 0, s: 0, f: 0, p: 0, st: 0 });
-    expect(sim.cellState(4, 3, 4).b).toBe(Block.Air); // a lone placed cell on air falls away
+ w.setBlock(4, 4, 4, Block.Water);
+   sim.edit(4, 4, 4, Block.Water);
+   expect(sim.cellState(4, 4, 4)).toEqual({ b: Block.Water, l: 7, s: 1, f: 0, p: 1, st: 0 });
+   w.setBlock(4, 4, 4, Block.Stone);
+   sim.edit(4, 4, 4, Block.Stone);
+   expect(sim.cellState(4, 4, 4)).toEqual({ b: Block.Stone, l: 0, s: 0, f: 0, p: 0, st: 0 });
+});
+
+  it('a placed spring alone in the sky never falls or dries: it keeps pouring, and its fall is destroyed out of the world', () => {
+    const w = makeWorld([[0, 0, 0]]);
+    const sim = new WaterSim(w);
+    w.setBlock(4, 4, 4, Block.Water);
+    sim.edit(4, 4, 4, Block.Water);
+    for (let i = 0; i < 30; i++) sim.tick(250); // a dozen or so slow-clock pulses
+    expect(sim.cellState(4, 4, 4)).toEqual({ b: Block.Water, l: 7, s: 1, f: 0, p: 1, st: 0 }); // the spring hovers: it is a source, not a falling block
+    expect(countWater(w)).toBe(4); // spring + its 3-cell falling stream (each drop is destroyed once it exits the world)
     assertInvariants(w);
   });
 
@@ -278,7 +307,7 @@ w.setBlock(4, 4, 4, Block.Water);
     const after = snap();
     expect(after.l.join()).toBe(before.l.join());
     expect(after.s.join()).toBe(before.s.join());
-    expect(countWater(w)).toBe(256);
+    expect(countWater(w)).toBe(85);
     expect(w.getChunk(0, 0, 0)!.settled).toBe(true);
     assertInvariants(w);
   });

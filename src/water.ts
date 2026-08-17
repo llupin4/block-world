@@ -8,7 +8,8 @@ import { World, chunkOf, chunkKey, localIndex, WORLD_Y_MIN, WORLD_Y_MAX, type Ch
 // out-of-band or missing is destroyed (falls out of the world).
 //
 // Model: SOURCES (wsource=1) are immortal. Two kinds: a PLACED source (wplaced=1, created
-// only by placing a water block) is a spring — it keeps pushing flow into horizontal air at
+// only by placing a water block) is a spring — it NEVER falls (not even alone in the sky),
+// it pours down through whatever air is below and keeps pushing flow into horizontal air at
 // rest; a SETTLED worldgen source (the sea, re-seeded on load) is static — it stands, falls
 // and pours through gaps in its support, but never pushes, so the sea does not fill caves.
 // Everything that is not a source is FLOW: it spreads and rests, and it is SUSTAINED
@@ -18,11 +19,19 @@ import { World, chunkOf, chunkKey, localIndex, WORLD_Y_MIN, WORLD_Y_MAX, type Ch
 // a removed source, a cut stream — starves away at the slow-clock pace: plug the hole and
 // the cave you flooded (floor pool + stream) empties itself, visibly.
 //
-// Waterfalls: a FEED source with air below that has water above or beside it (sea surface, a
-// lake edge, a stacked head) does NOT fall — it stays in place pouring flow down through the
-// gap each pulse. The flow keeps dropping one level per pulse while the head refills the top,
-// so the falling stream is a persistent column, not a single migrating drop. A source with no
-// water around it (a lone block in the sky) DOES fall and lands as flow.
+// RANGE: wlevel is a real (render-cosmetic) decay number: every live start is level 7; a
+// water cell spreads sideways to Air only at level >= 2, and the neighbour it writes is at
+// level-1. So a spring's flood is a 13x13 square (six blocks out) around the nearest
+// full-level water — and any fall (pour or drop) RESETS the parcel to 7, so water always
+// prefers to run down a slope: a hillside spring fans out a few blocks, then runs off down
+// to the next ledge instead of flooding the whole contour. Levels do not render (a cell is
+// always a full-height quad) and a cell keeps the level it was written with.
+//
+// Waterfalls: a PLACED spring with air below pours flow down through the gap every pulse
+// (re-queued by the slow clock while it lasts), so a falling stream is a persistent column
+// that drops one level per pulse — not a single migrating drop, and not a block that falls
+// away and dries. A static worldgen source pours the same way when fed by its own body; a
+// static source with no water around it (a lone drip) still falls as flow.
 //
 // Where that water goes is the whole point of the model:
 //   - flow that lands on SOLID ground rests and spreads sideways (a floor sheet, hugging
@@ -60,6 +69,7 @@ export class WaterSim {
   private auditPending = false; // a water-removing edit happened: re-derive sustained-flow flags globally on the next tick/settle
   private inPulse = false; // true while a slow-clock tick() run is in flight
   private falling = new Set<string>(); // cells that dropped a level during the current pulse: they move once per pulse (a falling column drops as a rigid body, one level per 0.5 s, instead of teleporting to the ground in a single pulse)
+  private springs = new Set<string>(); // live PLACED sources (springs): re-queued at every pulse's start so a spring keeps pouring through whatever gap has opened below it (a sky spring never dries out, a wall spring keeps flowing) — maintained by edit()
 
   constructor(world: World) {
     this.world = world;
@@ -202,10 +212,21 @@ export class WaterSim {
       const belowKnown = wy - 1 < MIN_CY * 16 || this.world.hasChunk(chunkOf(wx), chunkOf(wy - 1), chunkOf(wz));
       if (!belowKnown) return; // wait: the low band's settle (cascade) or a re-mark retries us
       if (C.s === 1) {
+        if (C.p === 1) {
+          // A placed spring NEVER falls, even alone in the sky: it stays a permanent
+          // emitter and pours flow down through any gap (the user's "wall spring" — a
+          // spring placed in a hollow keeps flowing, it is not a falling block).
+          // f=1: the poured cell is born sustained BY THE SOURCE ABOVE it. A fresh flow cell
+          // otherwise starves on the instant it lands (nothing next to it is a source or a
+          // sustained flow yet), and the stream could never build its floor pool.
+          this.writeCell(wx, wy - 1, wz, 7, 0, Block.Water, 1); // pour flow down; the spring stays put
+          return;
+        }
         // A fed source on a ledge is a waterfall head: it stays put and pours FLOW down
         // through the gap (refilled each pulse), keeping the falling stream a persistent
         // column. Fed = water directly above, or water in a horizontal neighbour (a lake
-        // edge, a sea surface cell above a hole in the floor).
+        // edge, a sea surface cell above a hole in the floor). A static source with no
+        // water around it is a lone drip: it falls and lands as flow.
         let fed = this.cellState(wx, wy + 1, wz).b === Block.Water;
         if (!fed) {
           for (const [dx, dz] of HXZ) {
@@ -214,16 +235,13 @@ export class WaterSim {
           }
         }
         if (fed) {
-          // f=1: the poured cell is born sustained BY THE SOURCE ABOVE it. A fresh flow cell
-          // otherwise starves on the instant it lands (nothing next to it is a source or a
-          // sustained flow yet), and the stream could never build its floor pool.
           this.writeCell(wx, wy - 1, wz, 7, 0, Block.Water, 1); // pour flow down; the source never falls
           return;
         }
       }
       this.writeCell(wx, wy, wz, 0, 0, Block.Air); // dry origin, re-marked
       if (wy - 1 >= MIN_CY * 16 && this.world.hasChunk(chunkOf(wx), chunkOf(wy - 1), chunkOf(wz))) {
-        this.writeCell(wx, wy - 1, wz, 7, 0, Block.Water, C.f); // land at level 7 as FLOW: only placement creates sources (a source that fell is no longer its own supply)
+        this.writeCell(wx, wy - 1, wz, 7, 0, Block.Water, C.f); // fall RESETS to level 7: a drop runs full-strength down the next slope; lands as FLOW (only placement creates springs)
         this.falling.add(`${wx},${wy - 1},${wz}`); // the landing cell drops at most one more level this pulse
       } // else: destination below the generated floor → destroyed (fell out of the world)
       return;
@@ -255,11 +273,11 @@ export class WaterSim {
 
     if (C.s === 1) {
       // A resting source spreads only if the player placed it: the spring pushes flow into
-      // whatever air is beside it (which then runs down terrain as flow). Settled worldgen
-      // water stays put — it falls and pours where support goes, but the sea never erupts
-      // into cave air.
+      // whatever air is beside it (at one level less per step — see spreadToAir). Settled
+      // worldgen water stays put — it falls and pours where support goes, but the sea never
+      // erupts into cave air.
       if (nF !== C.f) this.writeCell(wx, wy, wz, C.l, C.s, Block.Water, nF, C.p, 0);
-      if (C.p === 1) this.spreadToAir(wx, wy, wz);
+      if (C.p === 1) this.spreadToAir(wx, wy, wz, C.l);
       return;
     }
 
@@ -278,25 +296,30 @@ export class WaterSim {
       return;
     }
 
-    // over solid ground: rest, and (still alive) spread to horizontal air — floor sheets
-    // hugging terrain. Unlimited range (water is always level 7); terrain and
-    // reachability, not levels, bound it.
+    // over solid ground: rest, and (still alive, level >= 2) spread to horizontal air at
+    // one level less per step — bounded floor sheets hugging terrain. A level-1 cell is
+    // the flood's outer lip: it stands (and still falls if its support goes), but pushes
+    // nothing, so a spring on a hillside fans out a handful of blocks instead of drowning
+    // the whole contour. A falling water cell resets to 7, so water keeps running down
+    // slopes ledge by ledge.
     if (nF !== C.f) this.writeCell(wx, wy, wz, C.l, C.s, Block.Water, nF, C.p, C.st);
-    this.spreadToAir(wx, wy, wz);
+    if (C.l >= 2) this.spreadToAir(wx, wy, wz, C.l);
   }
 
-  // Spread to horizontal AIR neighbours. Two guards keep the load path cheap: (1) never
+  // Spread to horizontal AIR neighbours at one level less. Two guards keep the load path cheap: (1) never
   // call writeCell into missing space — a state write there is a no-op, but the re-mark of
   // the target's closure (self + HXZ + above) includes this cell; at a world edge that is
   // a self-re-enqueue loop that sat every ocean settle at the SETTLE_GUARD ceiling.
   // (2) spread targets AIR only: a loaded-unsettled neighbour's pristine worldgen water is
-  // never touched — its own settle re-seeds it.
-  private spreadToAir(wx: number, wy: number, wz: number): void {
+  // never touched — its own settle re-seeds it. A level-1 cell spreads nothing: the
+  // flood's range is six blocks from full-level water (the user's 5–6 block fan).
+  private spreadToAir(wx: number, wy: number, wz: number, l: number): void {
+    if (l < 2) return;
     for (const [dx, dz] of HXZ) {
       const tx = wx + dx, tz = wz + dz;
       if (this.cellState(tx, wy, tz).b === Block.Air) {
         if (this.world.hasChunk(chunkOf(tx), chunkOf(wy), chunkOf(tz))) {
-          this.writeCell(tx, wy, tz, 7, 0, Block.Water, 0, 0, 0);
+          this.writeCell(tx, wy, tz, l - 1, 0, Block.Water, 0, 0, 0);
         }
       }
     }
@@ -313,6 +336,15 @@ export class WaterSim {
     // pulse).
     for (const key of this.falling) this.queue.add(key);
     this.falling.clear();
+    // Springs are eternal emitters: requeue the live ones so each pulse re-checks (and
+    // re-pours through) the gap below them. A key whose cell is no longer a placed spring
+    // (the player broke it, or its chunk was evicted and reloaded as worldgen water) is
+    // dropped from the set.
+    for (const key of this.springs) {
+      const [sx, sy, sz] = key.split(',').map(Number);
+      if (this.cellState(sx, sy, sz).p === 1) this.queue.add(key);
+      else this.springs.delete(key);
+    }
     this.inPulse = true;
     let n = 0;
     try {
@@ -447,10 +479,12 @@ export class WaterSim {
       c.wlevel[i] = 7;
       c.wsource[i] = 1;
       c.wplaced[i] = 1; // only placement makes a true spring
+      this.springs.add(`${wx},${wy},${wz}`); // eternal emitter: re-checked every pulse
     } else {
       c.wlevel[i] = 0;
       c.wsource[i] = 0;
       c.wplaced[i] = 0;
+      this.springs.delete(`${wx},${wy},${wz}`);
     }
     c.wflow[i] = 0;
     c.wstream[i] = 0; // any stream cell here is overwritten/removed: not a stream

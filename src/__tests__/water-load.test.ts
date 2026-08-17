@@ -34,6 +34,8 @@ import { meshChunk } from '../chunk-mesher';
 //   + placed-water split (sources are now only placed water; worldgen water is static
 //     and never pushes): settle-time equalization across seams is gone, so the load-path
 //     cost drops to ~9.9k processes on this replay.
+//   + level decay / eternal springs (round 5: springs never fall; sideways spread costs a
+//     level per step): untouched here — the replay places no water, so the count holds.
 // The pin is the original pre-fix budget floor (2,463,202 / 2 = 1,231,601): it
 // separates the fixed pipeline from the old code and the two-pass-only intermediate.
 // process() is counted via a runtime prototype patch (TS `private` is
