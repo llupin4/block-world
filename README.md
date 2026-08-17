@@ -4,6 +4,8 @@ A browser based voxel building engine that runs entirely in the browser. Fly aro
 
 Built with [Three.js](https://threejs.org/), [TypeScript](https://www.typescriptlang.org/), [Vite](https://vitejs.dev/), and [simplex-noise](https://github.com/jwagner/simplex-noise.js). No game engine, no physics library — collision, terrain generation, chunk meshing, raycasting, and water simulation are all hand-rolled.
 
+Preview here [https://llupin4.github.io/block-world/](https://llupin4.github.io/block-world/)
+
 ## Features
 
 - **Procedural terrain** — multi-octave simplex noise heightmap with 3D-noise cave carving, seeded and deterministic per column.
