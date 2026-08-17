@@ -888,3 +888,48 @@ Verification: full suite 11 files / 69 tests green, `tsc --noEmit`, `vite build`
 replay **9,911 processes** (unchanged — the replay places no water) with the ocean still flat.
 Docs: `PROJECT.md` §9 rewritten (two source kinds, decay/range rules, eternal springs),
 `water-load.test.ts` lineage note.
+
+## Addendum 7 — Round 6: instant falls (cave flicker)
+
+Symptom: water in caves "flickers" while it drops over tall heights. Probing showed the
+steady-state CA is already a fixpoint (zero voxel changes per settled pulse) — the flicker
+is the *fill-in transient*: the old model dropped a column one level per 0.5 s pulse, so a
+10-block cave fall took 5 s of a visibly migrating/blinking drop, and the world-edge case
+re-dripped one cell out of the void every pulse.
+
+Fix (the principle: water spreads downward indefinitely into nearby air blocks
+until stopped by a block; the falling-drip look is a cosmetic animation over
+already-settled voxels):
+- **`dropColumn()` in `src/water.ts`**: a fall writes the WHOLE column in one deterministic
+  two-pass — pass 1 walks the air below to classify the landing (solid / sheet / deep /
+  world floor / not-yet-generated edge / already-connected), pass 2 writes every air cell
+  of the column at level 7 with final flags in place:
+  - landing on solid ground or the world floor → bottom cell a sheet (spreads its bounded
+    fan), the shaft above it stream (`wstream=1`: visible, never spreads);
+  - landing on a pool sheet / stream over solid → all stream (a waterfall meeting a pool);
+  - reaching anything DEEPER → absorbed one block above the surface: nothing is written on
+    the pool's surface, so a falls-to-sea stream never blinks and no pool level ever rises;
+  - edge (low band not loaded) → column stops at the band edge; the cell parks in a
+    `waiting` set that the slow clock re-checks every pulse, so the column extends once
+    the band loads (replaces the old destroy-out-of-the-world behavior).
+- **World floor is solid**: water at the bottom row of the generated world rests on the
+  void — no more per-pulse drain blink at the world edge (a world-edge spring is a stable
+  fountain whose column lands and fans out on the y=0 plane).
+- The 1-step-per-pulse pacing (`inPulse` gate + `falling` re-queue) is gone: a column's
+  first processing is a no-op fixpoint, and a settled waterfall is *exactly* at rest
+  (spring re-checks its full column each pulse, writes nothing) — nothing is recomputed
+  unless the path changes.
+
+Re-pins: waterfall 135 → **163** (the head's 4 side streams now land as their own sheets
+whose fans merge with the main one) and asserts the whole column exists after 3 pulses;
+world-edge 8 → **125** (stable column + world-floor fan + the spring's 4 side-spread
+fountains); sky spring 4 → **97** (column + clipped world-floor fan + 4 side fountains);
+new test: a spring pouring into a 6-deep pool is absorbed above the surface — the 1-block
+gap stays Air, the pool level never rises, zero churn at the base.
+
+Verification: full suite 11 files / 71 tests green, `tsc --noEmit`, `vite build`; 10-s
+load replay **9,911 processes** (unchanged — settle processes the same cells).
+Docs: `PROJECT.md` §9 (instant-fall rule, world-floor stability),
+`water-load.test.ts` lineage note. Caveat carried to the user: if any flicker remains in
+multi-depth cave water, the next suspect is the render layer (transparent water quads are
+not depth-sorted across chunk borders — a documented POC shortcut).

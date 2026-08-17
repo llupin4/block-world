@@ -165,7 +165,7 @@ it('water placed on a stone pad makes a bounded fan: one level lost per sideways
     assertInvariants(w);
   });
 
-  it('a fed source on a ledge pours a persistent waterfall: the column drops one level per pulse, pools a floor sheet, and side streams run from the head — nothing climbs', () => {
+  it('a spring on a ledge writes its waterfall in one pass (downward spread is unlimited until stopped by ground): the whole column appears instantly, pools a floor sheet, side streams run from the head — nothing climbs, and the result is a quiet fixpoint', () => {
     const w = makeWorld([[0, 0, 0]]);
     slab(w, Block.Stone, 0, 15, 0, 0, 15); // open floor at y=0
     const sim = new WaterSim(w);
@@ -173,7 +173,10 @@ it('water placed on a stone pad makes a bounded fan: one level lost per sideways
     sim.edit(8, 11, 8, Block.Water);
     w.setBlock(8, 10, 8, Block.Water); // a two-source (spring) stack above the floor = a ledge head
     sim.edit(8, 10, 8, Block.Water);
-    for (let i = 0; i < 100; i++) sim.tick(250); // 100 slow-clock pulses (50 s of sim)
+    for (let i = 0; i < 3; i++) sim.tick(250);
+    expect(w.getBlock(8, 2, 8), 'no drip fill-in: the column is written in one pass').toBe(Block.Water);
+    expect(w.getBlock(8, 9, 8), '...top of the shaft included, within pulses').toBe(Block.Water);
+    for (let i = 0; i < 100; i++) sim.tick(250); // settle to the side-stream steady state
 
     expect(sim.cellState(8, 11, 8)).toEqual({ b: Block.Water, l: 7, s: 1, f: 0, p: 1, st: 0 }); // the springs stay put — a placed spring never falls out of the water
     expect(sim.cellState(8, 10, 8).s).toBe(1);
@@ -182,29 +185,30 @@ it('water placed on a stone pad makes a bounded fan: one level lost per sideways
     }
     expect(sim.cellState(8, 3, 8).st).toBe(1); // the main column is a stream (visible, never spreads)
     expect(sim.cellState(8, 1, 8)).toEqual({ b: Block.Water, l: 7, s: 0, f: 1, p: 0, st: 0 }); // the floor pool is a sheet on solid ground, not stream
-    expect(sim.cellState(14, 1, 8).l).toBe(1); // the pool's lip: six decaying steps from the landing
-    expect(sim.cellState(15, 1, 8).b).toBe(Block.Air); // ...and it stops there — no run-off beyond the fan
+    expect(sim.cellState(14, 1, 8).b).toBe(Block.Water); // inside the combined floor fan (main landing + side-column landings)
+    expect(sim.cellState(15, 1, 8).b).toBe(Block.Water); // the side-column fans push the lip one block further
+    expect(sim.cellState(16, 1, 8).b).toBe(Block.Air); // ...but it stops at the chunk edge (missing neighbour writes nothing)
     expect(w.getBlock(7, 11, 8), 'side streams run off the head level').toBe(Block.Water);
     expect(w.getBlock(7, 12, 8), 'nothing is written above the head level').toBe(Block.Air);
     // 85 floor sheet (bounded fan) + 8 main column cells (y=2..9) + 2 spring heads + 4 side columns x 10 cells (y=2..11)
-    expect(countWater(w)).toBe(85 + 8 + 2 + 4 * 10);
+    expect(countWater(w)).toBe(163); // 93 (springs + main column + main fan) + 36 shaft cells of the 4 side columns off the head + their clipped landing sheets + merged overlapping fans
     const c = countWater(w);
-    for (let i = 0; i < 20; i++) sim.tick(250); // steady: the springs keep pouring into their full columns, nothing new happens
-    expect(countWater(w)).toBe(c); // no churn, no climbing
+    for (let i = 0; i < 20; i++) sim.tick(250); // steady: the springs keep checking their full columns, write nothing
+    expect(countWater(w)).toBe(c); // no churn, no flicker: a true fixpoint
     assertInvariants(w);
   });
 
-it('a spring pouring out of the world keeps pouring: the falling stream is destroyed, the spring endures (a world-edge fountain)', () => {
+it('a spring pouring at the world edge stays stable: the column rests on the void at the floor of the world (no per-pulse blink) and fans out a bounded sheet there; the spring endures', () => {
     const w = makeWorld([[0, 0, 0]]); // chunk spans y=0..15; nothing below
     const sim = new WaterSim(w);
     w.setBlock(8, 8, 8, Block.Water);
     sim.edit(8, 8, 8, Block.Water);
     for (let i = 0; i < 30; i++) sim.tick(250);
-    expect(sim.cellState(8, 8, 8)).toEqual({ b: Block.Water, l: 7, s: 1, f: 0, p: 1, st: 0 }); // a placed spring never falls or dries, even pouring into the void
-    expect(countWater(w)).toBe(8); // spring + its falling stream (y=7..1 in flight; the drop at y=0 is destroyed each pulse)
+    expect(sim.cellState(8, 8, 8)).toEqual({ b: Block.Water, l: 7, s: 1, f: 0, p: 1, st: 0 }); // a placed spring never falls or dries
+    expect(countWater(w)).toBe(125); // 85 fan on the y=0 world-floor plane + 7 shaft stream cells + the spring + 28 shaft cells + 4 landing sheets from the spring's 4 side-spread flows
     const c = countWater(w);
-    for (let i = 0; i < 10; i++) sim.tick(250);
-    expect(countWater(w)).toBe(c); // steady drip: nothing accumulates
+    for (let i = 0; i < 30; i++) sim.tick(250);
+    expect(countWater(w)).toBe(c); // steady: the base sheet rests on the void and writes nothing
     assertInvariants(w);
   });
 
@@ -286,7 +290,7 @@ it('placing Water via edit makes a source (a spring that never falls, even alone
     sim.edit(4, 4, 4, Block.Water);
     for (let i = 0; i < 30; i++) sim.tick(250); // a dozen or so slow-clock pulses
     expect(sim.cellState(4, 4, 4)).toEqual({ b: Block.Water, l: 7, s: 1, f: 0, p: 1, st: 0 }); // the spring hovers: it is a source, not a falling block
-    expect(countWater(w)).toBe(4); // spring + its 3-cell falling stream (each drop is destroyed once it exits the world)
+    expect(countWater(w)).toBe(97); // spring + 3 shaft cells + the world-floor sheet's clipped fan (77) + 3 shaft cells + 1 landing sheet for each of the spring's 4 side-spread flows
     assertInvariants(w);
   });
 
