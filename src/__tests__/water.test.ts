@@ -152,6 +152,28 @@ describe('water sim', () => {
     assertInvariants(w);
   });
 
+  it('a fed source on a ledge pours a persistent waterfall: the column drops one level per pulse, then pools and climbs to the head level in an open basin', () => {
+    const w = makeWorld([[0, 0, 0]]);
+    slab(w, Block.Stone, 0, 15, 0, 0, 15); // open floor at y=0
+    const sim = new WaterSim(w);
+    w.setBlock(8, 11, 8, Block.Water);
+    sim.edit(8, 11, 8, Block.Water);
+    w.setBlock(8, 10, 8, Block.Water); // a two-source stack above the floor = a ledge head
+    sim.edit(8, 10, 8, Block.Water);
+    for (let i = 0; i < 100; i++) sim.tick(250); // 100 slow-clock pulses (50 s of sim): fall, pool, climb to the head level
+
+    expect(sim.cellState(8, 11, 8)).toEqual({ b: Block.Water, l: 7, s: 1, f: 0 }); // the heads stay put (fed from above/beside) — they never fall out of the water body
+    expect(sim.cellState(8, 10, 8).s).toBe(1);
+    for (let y = 1; y <= 11; y++) {
+      expect(w.getBlock(8, y, 8), `level y=${y} must be full`).toBe(Block.Water);
+    }
+    expect(w.getBlock(0, 11, 8), 'climb runs to the chunk edge — range is unlimited').toBe(Block.Water);
+    expect(w.getBlock(8, 12, 8), 'water never climbs above the top head').toBe(Block.Air);
+    expect(countWater(w)).toBe(11 * 256); // 11 full 16x16 layers, floored to the head level
+    expect(sim.tick(1)).toBe(0); // steady state: heads on water, pool at rest — no churn
+    assertInvariants(w);
+  });
+
   it('a stream that falls out of the world is destroyed (drain)', () => {
     const w = makeWorld([[0, 0, 0]]); // chunks span y=0..15; nothing below
     const sim = new WaterSim(w);

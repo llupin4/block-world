@@ -17,12 +17,19 @@ import { World, chunkOf, chunkKey, localIndex, WORLD_Y_MIN, WORLD_Y_MAX, type Ch
 // — a plugged hole, a sealed pocket, a removed source — starves away at the slow-clock
 // pace, one cell per processed update: plug the hole and the cave you flooded empties
 // itself, visibly.
+//
+// Waterfalls: a source with air below that is fed from above or beside (water in a
+// 6-neighbour) does NOT fall — it stays in place pouring flow down through the gap, so
+// a falling stream is a persistent column (drops one level per slow-clock pulse while
+// the head keeps flowing out and the top is refilled), not a single migrating drop. A
+// source with no water beside or above it (lone block in the sky) does fall, landing
+// as flow.
 
 const HXZ: ReadonlyArray<readonly [number, number]> = [[1, 0], [-1, 0], [0, 1], [0, -1]];
 const NB6: ReadonlyArray<readonly [number, number, number]> = [
   [1, 0, 0], [-1, 0, 0], [0, 0, 1], [0, 0, -1], [0, 1, 0], [0, -1, 0],
 ]; // 6-neighbour water adjacency: reachability (sustained-flow BFS) walks vertically too
-const SETTLE_GUARD = 20000; // safety valve: cap on cell updates one settle run may perform
+const SETTLE_GUARD = 2000; // safety valve: cap on cell updates one settle run may perform — ~5–10 ms of work so a chunk's settle never owns a full frame; a cave that is still mid-fill when the cap hits keeps relaxing through later slow-clock ticks (the queue is closed and persistent)
 const MIN_CY = 0; // lowest GENERATED y band (streaming's CY_MIN): below it is ungenerated world floor — a fall through it drains (legitimate), a settle above it defers
 
 interface CellState { b: number; l: number; s: number; f: number }
@@ -38,6 +45,8 @@ export class WaterSim {
   readonly stats = { seeds: 0, processes: 0, queueAdds: 0, equalizeFills: 0 };
   private settling: Chunk | null = null; // chunk whose settle is in flight (exempts its own water from the pristine-skip in process)
   private auditPending = false; // a water-removing edit happened: re-derive sustained-flow flags globally on the next tick/settle
+  private inPulse = false; // true while a slow-clock tick() run is in flight
+  private falling = new Set<string>(); // cells that dropped a level during the current pulse: they move once per pulse (a falling column drops as a rigid body, one level per 0.5 s, instead of teleporting to the ground in a single pulse)
 
   constructor(world: World) {
     this.world = world;
@@ -99,9 +108,12 @@ export class WaterSim {
   // queue write, no re-mark. Pass 2 enqueues ONLY a seeded cell whose rule would act on its
   // neighbours at seed time: a fall (below is Air) or a spread (an HXZ neighbour that is
   // Air). A pristine l=0 neighbour is never an action target (spread writes Air only), and
-  // interior ocean cells trigger neither and are never processed. Every later state change
-  // still goes through writeCell (which re-marks dependents), so the worklist stays closed
-  // and converges to the same fixpoint as per-cell seeding did.
+  // interior ocean cells trigger neither and are never processed. In-chunk neighbours read
+  // the chunk's own arrays directly (no chunk lookup, no closure): only boundary cells pay
+  // a cross-chunk read, so a full-water band settles in O(chunk) cheap reads — deeper
+  // oceans no longer slow the load. Every later state change still goes through writeCell
+  // (which re-marks dependents), so the worklist stays closed and converges to the same
+  // fixpoint as per-cell seeding did.
   private settleSeed(c: Chunk): void {
     const bx = c.cx * 16, by = c.cy * 16, bz = c.cz * 16;
     for (let i = 0; i < c.blocks.length; i++) {
@@ -112,16 +124,35 @@ export class WaterSim {
       c.wflow[i] = 0; // worldgen water becomes source; the sustained flag is flow-only
       this.stats.seeds++;
     }
-    for (let lx = 0; lx < 16; lx++)
-      for (let ly = 0; ly < 16; ly++)
-        for (let lz = 0; lz < 16; lz++) {
-          if (c.blocks[localIndex(lx, ly, lz)] !== Block.Water) continue;
+    const edgeAir = (ncx: number, ncz: number, lx2: number, ly2: number, lz2: number): boolean => {
+      const n = this.world.getChunk(ncx, c.cy, ncz);
+      if (!n) return true; // missing chunk reads as dry Air
+      return n.blocks[localIndex(lx2, ly2, lz2)] === Block.Air;
+    };
+    for (let ly = 0; ly < 16; ly++)
+      for (let lz = 0; lz < 16; lz++)
+        for (let lx = 0; lx < 16; lx++) {
+          const i = lx + lz * 16 + ly * 256;
+          if (c.blocks[i] !== Block.Water) continue;
           const wx = bx + lx, wy = by + ly, wz = bz + lz;
-          if (this.cellState(wx, wy - 1, wz).b === Block.Air) { this.enqueue(wx, wy, wz); continue; }
-          for (const [dx, dz] of HXZ) {
-            const m = this.cellState(wx + dx, wy, wz + dz);
-            if (m.b === Block.Air) { this.enqueue(wx, wy, wz); break; }
+          // fall trigger: the below cell reads Air (in-chunk directly, or the band below)
+          if (ly > 0) {
+            if (c.blocks[i - 256] === Block.Air) { this.enqueue(wx, wy, wz); continue; }
+          } else {
+            const lo = this.world.getChunk(c.cx, c.cy - 1, c.cz);
+            if (wy - 1 < WORLD_Y_MIN || wy - 1 >= WORLD_Y_MAX || !lo || lo.blocks[localIndex(lx, 15, lz)] === Block.Air) { this.enqueue(wx, wy, wz); continue; }
           }
+          // spread trigger: an HXZ neighbour reads Air
+          let hit = false;
+          if (lx > 0 && c.blocks[i - 1] === Block.Air) hit = true;
+          else if (lx < 15 && c.blocks[i + 1] === Block.Air) hit = true;
+          else if (lz > 0 && c.blocks[i - 16] === Block.Air) hit = true;
+          else if (lz < 15 && c.blocks[i + 16] === Block.Air) hit = true;
+          else if (lx === 0 && edgeAir(c.cx - 1, c.cz, 15, ly, lz)) hit = true;
+          else if (lx === 15 && edgeAir(c.cx + 1, c.cz, 0, ly, lz)) hit = true;
+          else if (lz === 0 && edgeAir(c.cx, c.cz - 1, lx, ly, 15)) hit = true;
+          else if (lz === 15 && edgeAir(c.cx, c.cz + 1, lx, ly, 0)) hit = true;
+          if (hit) this.enqueue(wx, wy, wz);
         }
   }
 
@@ -138,6 +169,7 @@ export class WaterSim {
     // water.
     const Cc = this.world.getChunk(chunkOf(wx), chunkOf(wy), chunkOf(wz));
     if (Cc && !Cc.settled && Cc !== this.settling && C.l === 0 && C.s === 0) return;
+    if (this.inPulse && this.falling.has(`${wx},${wy},${wz}`)) return; // dropped earlier this pulse: moves once per pulse
     const below = this.cellState(wx, wy - 1, wz);
 
     // below is Air (missing / out-of-band counts) → C falls down one cell.
@@ -148,9 +180,27 @@ export class WaterSim {
       // generated world below its floor (legitimate drain).
       const belowKnown = wy - 1 < MIN_CY * 16 || this.world.hasChunk(chunkOf(wx), chunkOf(wy - 1), chunkOf(wz));
       if (!belowKnown) return; // wait: the low band's settle (cascade) or a re-mark retries us
+      if (C.s === 1) {
+        // A fed source on a ledge is a waterfall head: it stays put and pours FLOW down
+        // through the gap (refilled each pulse), keeping the falling stream a persistent
+        // column. Fed = water directly above, or water in a horizontal neighbour (a lake
+        // edge, a sea surface cell above a hole in the floor).
+        let fed = this.cellState(wx, wy + 1, wz).b === Block.Water;
+        if (!fed) {
+          for (const [dx, dz] of HXZ) {
+            const m = this.cellState(wx + dx, wy, wz + dz);
+            if (m.b === Block.Water && (m.s === 1 || m.f === 1)) { fed = true; break; }
+          }
+        }
+        if (fed) {
+          this.writeCell(wx, wy - 1, wz, 7, 0, Block.Water, 0); // pour flow down; the source never falls
+          return;
+        }
+      }
       this.writeCell(wx, wy, wz, 0, 0, Block.Air); // dry origin, re-marked
       if (wy - 1 >= MIN_CY * 16 && this.world.hasChunk(chunkOf(wx), chunkOf(wy - 1), chunkOf(wz))) {
         this.writeCell(wx, wy - 1, wz, 7, 0, Block.Water, C.f); // land at level 7 as FLOW: only placement creates sources (a source that fell is no longer its own supply)
+        this.falling.add(`${wx},${wy - 1},${wz}`); // the landing cell drops at most one more level this pulse
       } // else: destination below the generated floor → destroyed (fell out of the world)
       return;
     }
@@ -200,20 +250,31 @@ export class WaterSim {
   // edit is pending, its reachability audit runs first (it is free work: the starves it
   // schedules then drain through the normal budget, one cell per update).
   tick(budget: number): number {
+    // Cells that landed mid-air earlier this pulse consumed their queue token (the skip in
+    // process() returns without re-marking); requeue them or the column freezes in the air
+    // forever (a "drop" that falls one step and stops instead of falling at one level per
+    // pulse).
+    for (const key of this.falling) this.queue.add(key);
+    this.falling.clear();
+    this.inPulse = true;
     let n = 0;
-    while (n < budget) {
-      if (this.auditPending) {
-        this.auditPending = false;
-        this.runAudit();
-        continue;
+    try {
+      while (n < budget) {
+        if (this.auditPending) {
+          this.auditPending = false;
+          this.runAudit();
+          continue;
+        }
+        const it = this.queue.values().next();
+        if (it.done) break;
+        const key = it.value as string;
+        this.queue.delete(key);
+        const [wx, wy, wz] = key.split(',').map(Number);
+        this.process(wx, wy, wz);
+        n++;
       }
-      const it = this.queue.values().next();
-      if (it.done) break;
-      const key = it.value as string;
-      this.queue.delete(key);
-      const [wx, wy, wz] = key.split(',').map(Number);
-      this.process(wx, wy, wz);
-      n++;
+    } finally {
+      this.inPulse = false;
     }
     return n;
   }

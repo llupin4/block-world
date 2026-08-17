@@ -10,8 +10,12 @@ export const VIEW_RADIUS = 2; // chunk radius in x/z: the ring is 5x5 columns
 export const CY_MIN = 0;      // generated y band: 0..79
 export const CY_MAX = 4;
 
-const LOAD_BUDGET = 2;   // new chunk generations per call
-const REMESH_BUDGET = 2; // dirty chunk rebuilds per call (main.ts performs the rebuild)
+// One rebuild per budget per frame (measured: 2+2 made walking over deep ocean stutter
+// — a chunk's terrain+settle+mesh is a 10–35 ms spike, so two in one frame ran 25–138 ms
+// frames against the 16.7 ms budget). One per frame keeps every frame light; the ring
+// simply fills/relocates a little more gradually.
+const LOAD_BUDGET = 1;   // new chunk generations per call
+const REMESH_BUDGET = 1; // dirty chunk rebuilds per call (main.ts performs the rebuild)
 
 export interface Coord { cx: number; cy: number; cz: number }
 
