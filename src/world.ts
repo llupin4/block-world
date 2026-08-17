@@ -20,6 +20,8 @@ export interface Chunk {
   wlevel: Uint8Array;  // water flow level per cell: 0 dry, 1..7 water (7 = full source)
   wsource: Uint8Array; // 0/1 per cell: this cell is a placed/fallen source (immortal)
   wflow: Uint8Array;   // 0/1 per flow cell: sustained — reachable from a source through water; 0 → starves away (slow clock)
+  wplaced: Uint8Array; // 0/1 per source cell: created by the player PLACING water (a true spring: immortal, keeps pushing flow out). 0 = worldgen water that settle re-seeded as a source: it stands, falls and can pour, but never pushes/spreads — the sea is not a spring
+  wstream: Uint8Array; // 0/1 per flow cell: part of a falling stream column (over a stream cell, or over a pool sheet grounded one deep on solid). Stream cells are visible water that never spreads and never climbs — so a waterfall leaves a column + a floor pool, and water over sea/deep pools disappears into them instead of raising them
   dirty: boolean;
   settled: boolean;    // water sim has settled this chunk's worldgen water (makes settle idempotent)
   opaqueMesh: VoxelBuffer | null;
@@ -63,6 +65,8 @@ export class World {
       wlevel: new Uint8Array(CHUNK_VOL),
       wsource: new Uint8Array(CHUNK_VOL),
       wflow: new Uint8Array(CHUNK_VOL),
+      wplaced: new Uint8Array(CHUNK_VOL),
+      wstream: new Uint8Array(CHUNK_VOL),
       dirty: true,
       settled: false,
       opaqueMesh: null,

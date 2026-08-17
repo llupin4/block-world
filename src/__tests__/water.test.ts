@@ -60,8 +60,8 @@ describe('water sim', () => {
 
     console.log('A count=', countWater(w));
     const cs = (x: number, y: number, z: number) => sim.cellState(x, y, z);
-    expect(cs(8, 1, 8)).toEqual({ b: Block.Water, l: 7, s: 1, f: 0 }); // the only source: the placed cell
-    expect(cs(9, 1, 8)).toEqual({ b: Block.Water, l: 7, s: 0, f: 1 }); // flow, level stays 7 (it never decays), sustained by the source
+    expect(cs(8, 1, 8)).toEqual({ b: Block.Water, l: 7, s: 1, f: 0, p: 1, st: 0 }); // the only source: the placed cell (a spring)
+    expect(cs(9, 1, 8)).toEqual({ b: Block.Water, l: 7, s: 0, f: 1, p: 0, st: 0 }); // flow, level stays 7 (it never decays), sustained by the source
     expect(cs(0, 1, 8).b).toBe(Block.Water); // the flood runs to the chunk edge — range is unlimited...
     expect(cs(15, 1, 8).b).toBe(Block.Water);
     expect(cs(8, 1, 0).b).toBe(Block.Water);
@@ -92,7 +92,7 @@ describe('water sim', () => {
     assertInvariants(w);
   });
 
-  it('a cave under the ocean fills when the floor is breached, drains when the hole is plugged, and refills when it is broken again', () => {
+  it('a cave under the ocean takes a stream + floor pool when the floor is breached, drains when the hole is plugged, and re-fills when it is broken again', () => {
     const w = makeWorld([[0, 0, 0], [1, 0, 0]]); // x 0..31, y 0..15
     for (let x = 0; x < 32; x++) for (let z = 0; z < 16; z++) {
       w.setBlock(x, 0, z, Block.Stone); // world-floor rock (solid bottom: nothing drains out of the world)
@@ -107,12 +107,14 @@ describe('water sim', () => {
     const sim = new WaterSim(w);
     sim.settle(0, 0, 0); sim.settle(1, 0, 0);
     drain(sim);
-    expect(w.getBlock(20, 3, 13)).toBe(Block.Water); // the ocean poured in through the hole and filled the cave
-    expect(w.getBlock(16, 7, 12)).toBe(Block.Water); // all the way to the far corner (unlimited range)
-    expect(sim.cellState(20, 3, 13).s).toBe(0); // ...as flow: the sea water that fell in carries no source bit
+    expect(w.getBlock(20, 3, 13)).toBe(Block.Water); // a stream came down through the hole and holds there (it is flow, never a source)
+    expect(w.getBlock(16, 1, 12)).toBe(Block.Water); // the floor pool runs to the far corner (unlimited range on solid ground)
+    expect(w.getBlock(16, 7, 12)).toBe(Block.Air);   // but the cave does NOT fill: only a floor pool + thin stream over the hole
+    expect(sim.cellState(20, 3, 13).s).toBe(0); // ...the stream carries no source bit (worldgen water pours flow)
     expect(sim.tick(1)).toBe(0);
     const caveWater = () => countWaterAt(w, 16, 23, 12, 15, 1, 7);
-    expect(caveWater()).toBe(224); // 8 x 4 x 7: the whole cave, and it stays (connected to the sea through the hole)
+    // 8 x 4 floor pool (y=1) + 4 x 2 columns x 6 stream levels (y=2..7 over the hole) = 80 of 224
+    expect(caveWater()).toBe(80); // and it stays (connected to the sea through the hole)
 
     // plug the hole: the cave is now sealed off from every source.
     for (let x = 18; x <= 21; x++) for (let z = 13; z <= 14; z++) {
@@ -132,7 +134,7 @@ describe('water sim', () => {
       sim.edit(x, 8, z, Block.Air);
     }
     drain(sim);
-    expect(caveWater()).toBe(224);
+    expect(caveWater()).toBe(80); // broken plug: the stream and floor pool come back
     expect(sim.tick(1)).toBe(0);
     assertInvariants(w);
   });
@@ -152,25 +154,29 @@ describe('water sim', () => {
     assertInvariants(w);
   });
 
-  it('a fed source on a ledge pours a persistent waterfall: the column drops one level per pulse, then pools and climbs to the head level in an open basin', () => {
+  it('a fed source on a ledge pours a persistent waterfall: the column drops one level per pulse, pools a floor sheet, and side streams run from the head — nothing climbs', () => {
     const w = makeWorld([[0, 0, 0]]);
     slab(w, Block.Stone, 0, 15, 0, 0, 15); // open floor at y=0
     const sim = new WaterSim(w);
     w.setBlock(8, 11, 8, Block.Water);
     sim.edit(8, 11, 8, Block.Water);
-    w.setBlock(8, 10, 8, Block.Water); // a two-source stack above the floor = a ledge head
+    w.setBlock(8, 10, 8, Block.Water); // a two-source (spring) stack above the floor = a ledge head
     sim.edit(8, 10, 8, Block.Water);
-    for (let i = 0; i < 100; i++) sim.tick(250); // 100 slow-clock pulses (50 s of sim): fall, pool, climb to the head level
+    for (let i = 0; i < 100; i++) sim.tick(250); // 100 slow-clock pulses (50 s of sim)
 
-    expect(sim.cellState(8, 11, 8)).toEqual({ b: Block.Water, l: 7, s: 1, f: 0 }); // the heads stay put (fed from above/beside) — they never fall out of the water body
+    expect(sim.cellState(8, 11, 8)).toEqual({ b: Block.Water, l: 7, s: 1, f: 0, p: 1, st: 0 }); // the springs stay put (fed) — they never fall out of the water
     expect(sim.cellState(8, 10, 8).s).toBe(1);
     for (let y = 1; y <= 11; y++) {
       expect(w.getBlock(8, y, 8), `level y=${y} must be full`).toBe(Block.Water);
     }
-    expect(w.getBlock(0, 11, 8), 'climb runs to the chunk edge — range is unlimited').toBe(Block.Water);
-    expect(w.getBlock(8, 12, 8), 'water never climbs above the top head').toBe(Block.Air);
-    expect(countWater(w)).toBe(11 * 256); // 11 full 16x16 layers, floored to the head level
-    expect(sim.tick(1)).toBe(0); // steady state: heads on water, pool at rest — no churn
+    expect(sim.cellState(8, 3, 8).st).toBe(1); // the main column is a stream (visible, never spreads)
+    expect(sim.cellState(8, 1, 8).st).toBe(0); // the floor pool is a sheet on solid ground, not stream
+    expect(w.getBlock(7, 11, 8), 'side streams run off the head level').toBe(Block.Water);
+    expect(w.getBlock(7, 12, 8), 'nothing is written above the head level').toBe(Block.Air);
+    expect(w.getBlock(7, 1, 8), 'the pool sheet runs to the chunk edge').toBe(Block.Water);
+    // 256 floor sheet + 8 main column cells (y=2..9) + 2 spring heads + 4 side columns x 10 cells (y=2..11)
+    expect(countWater(w)).toBe(256 + 8 + 2 + 4 * 10);
+    expect(sim.tick(1)).toBe(0); // steady state: springs on water, streams static, sheet at rest — no churn
     assertInvariants(w);
   });
 
@@ -198,7 +204,7 @@ describe('water sim', () => {
     drain(sim);
 
 for (let x = 6; x <= 8; x++) for (let z = 6; z <= 8; z++)
-    expect(sim.cellState(x, 1, z)).toEqual({ b: Block.Water, l: 7, s: 1, f: 0 });
+    expect(sim.cellState(x, 1, z)).toEqual({ b: Block.Water, l: 7, s: 1, f: 0, p: 1, st: 0 });
     expect(sim.tick(1)).toBe(0); // fixpoint: settled pool never cascades
     expect(countWater(w)).toBe(9);
 
@@ -208,7 +214,7 @@ for (let x = 6; x <= 8; x++) for (let z = 6; z <= 8; z++)
     drain(sim);
     expect(sim.cellState(7, 1, 7).b).toBe(Block.Water);
     expect(sim.cellState(7, 1, 7).s).toBe(0); // refilled as flow, sustained by the source ring (no re-promotion)
-    expect(sim.cellState(7, 1, 7).f).toBe(1);
+    expect(sim.cellState(7, 1, 7)).toEqual({ b: Block.Water, l: 7, s: 0, f: 1, p: 0, st: 0 });
     expect(countWater(w)).toBe(9);
     expect(sim.tick(1)).toBe(0);
     assertInvariants(w);
@@ -245,12 +251,12 @@ for (let x = 6; x <= 8; x++) for (let z = 6; z <= 8; z++)
   it('placing Water via edit makes a source; placing a solid into water clears that cell; invariants hold', () => {
     const w = makeWorld([[0, 0, 0]]);
     const sim = new WaterSim(w);
-    w.setBlock(4, 4, 4, Block.Water);
-    sim.edit(4, 4, 4, Block.Water);
-    expect(sim.cellState(4, 4, 4)).toEqual({ b: Block.Water, l: 7, s: 1, f: 0 });
-    w.setBlock(4, 4, 4, Block.Stone);
-    sim.edit(4, 4, 4, Block.Stone);
-    expect(sim.cellState(4, 4, 4)).toEqual({ b: Block.Stone, l: 0, s: 0, f: 0 });
+w.setBlock(4, 4, 4, Block.Water);
+  sim.edit(4, 4, 4, Block.Water);
+  expect(sim.cellState(4, 4, 4)).toEqual({ b: Block.Water, l: 7, s: 1, f: 0, p: 1, st: 0 });
+  w.setBlock(4, 4, 4, Block.Stone);
+  sim.edit(4, 4, 4, Block.Stone);
+  expect(sim.cellState(4, 4, 4)).toEqual({ b: Block.Stone, l: 0, s: 0, f: 0, p: 0, st: 0 });
     expect(sim.cellState(4, 3, 4).b).toBe(Block.Air); // a lone placed cell on air falls away
     assertInvariants(w);
   });
@@ -296,27 +302,28 @@ for (let x = 6; x <= 8; x++) for (let z = 6; z <= 8; z++)
     assertInvariants(w);
   });
 
-  it('settling one chunk fills the entire seam-reachable cave (unlimited range) — it never touches a loaded-unsettled neighbour\'s worldgen water, whose own settle re-seeds it', () => {
+  it('settling one chunk never floods a seam neighbour (worldgen water is static) — settling the cave chunk itself pours its own sea down as stream + floor sheet, and no worldgen water is eaten', () => {
     const w = makeWorld([[0, 0, 0], [1, 0, 0], [0, 0, 1], [1, 0, 1]]); // 2x2 ocean slab, y 0..15
     for (let x = 0; x < 32; x++) for (let z = 0; z < 32; z++) {
       w.setBlock(x, 0, z, Block.Stone); // seafloor
       for (let y = 1; y <= 15; y++) w.setBlock(x, y, z, Block.Water);
     }
-    for (let x = 16; x <= 23; x++) for (let z = 12; z <= 15; z++) for (let y = 1; y <= 6; y++) w.setBlock(x, y, z, Block.Air); // sea-facing cave pocket in chunk (1,0,0)
+    for (let x = 16; x <= 23; x++) for (let z = 12; z <= 15; z++) for (let y = 1; y <= 6; y++) w.setBlock(x, y, z, Block.Air); // sea-facing cave pocket in chunk (1,0,0), open to the sea columns directly above it
     const sim = new WaterSim(w);
     const b0 = countWaterAt(w, 16, 31, 0, 31, 0, 15); // right column = chunk (1,0,0) [the cave] + (1,0,1) [open sea]
     sim.settle(0, 0, 0); // settle ONLY the left chunk (the runtime's per-chunk-on-load form)
     const b1 = countWaterAt(w, 16, 31, 0, 31, 0, 15);
     console.log('P before right column=', b0);
     console.log('P after  right column=', b1);
-    expect(b1).toBe(7680); // +192 = the whole cave (x=16..23, unlimited range): growth is pure cave filling — no worldgen water eaten
-    expect(sim.cellState(16, 8, 8)).toEqual({ b: Block.Water, l: 0, s: 0, f: 0 }); // guard-2 state pin: the neighbour's pristine sea water is never touched by a spread (which targets Air only); its own settle re-seeds it as (7,1)
-    expect(w.getBlock(17, 3, 13)).toBe(Block.Water); // the spread reached through the seam into the cave
-    expect(w.getBlock(23, 3, 13)).toBe(Block.Water); // and all the way to the far columns (range is unlimited)
-    sim.settle(1, 0, 0); sim.settle(0, 0, 1); sim.settle(1, 0, 1); // settle the rest: the cave's own chunk seeds its own water
+    expect(b1).toBe(b0); // the worldgen sea does NOT push: settling the left column leaves the seam cave dry (the 2c fix — water levels never rise)
+    expect(sim.cellState(16, 8, 8)).toEqual({ b: Block.Water, l: 0, s: 0, f: 0, p: 0, st: 0 }); // the neighbour's pristine sea water is never touched
+    expect(w.getBlock(17, 3, 13)).toBe(Block.Air); // nothing crossed the seam
+    sim.settle(1, 0, 0); sim.settle(0, 0, 1); sim.settle(1, 0, 1); // settle the rest: the cave's own chunk pours its own sea down
+    let n = 0;
+    while (n++ < 100 && sim.tick(200) !== 0) { /* drain: the runtime drains the queue every frame; settle can bail out on its per-chunk budget guard, the rest lands on the next pulses */ }
     const b2 = countWaterAt(w, 16, 31, 0, 31, 0, 15);
-    expect(w.getBlock(23, 3, 13)).toBe(Block.Water);
-    expect(b2).toBe(7680); // full ocean + fully filled cave (7488 + 192) with zero worldgen water eaten
+    expect(w.getBlock(23, 3, 13)).toBe(Block.Water); // stream through the cave to the far column
+    expect(b2).toBe(7680); // 32 floor-pool cells + 32 stream columns x 5 levels = +192, with zero worldgen water eaten
     // every chunk is settled now: the state is at rest, so the invariant holds
     assertInvariants(w);
   });
@@ -343,10 +350,9 @@ for (let x = 6; x <= 8; x++) for (let z = 6; z <= 8; z++)
   });
 
   it('a settled chunk\'s touched mark survives later sibling settles, so the frame-end drain still re-meshes it (stale seam-mesh fix)', () => {
-    // The geometry keeps chunk 1\'s cave out of reach of chunk 0\'s water (the seafloor
-    // row between them is solid): spreading — which only writes Air targets — never
-    // touches chunk 1, so nothing there is marked until chunk 1 settles and fills its
-    // own cave from its own water.
+    // Worldgen water is static: chunk 0's ocean never pushes across the seam, so chunk 1
+    // stays pristine until it settles and pours its OWN sea water down into the cave
+    // (the cave opens straight into the ocean at y=4, above the carved seafloor).
     const w = makeWorld([[0, 0, 0], [1, 0, 0], [2, 0, 0]]); // 3 chunks wide: x=0..47, z=0..15
     for (let x = 0; x < 48; x++) for (let z = 0; z < 16; z++) {
       for (let y = 0; y <= 3; y++) w.setBlock(x, y, z, Block.Stone); // seafloor
@@ -356,10 +362,10 @@ for (let x = 6; x <= 8; x++) for (let z = 6; z <= 8; z++)
       w.setBlock(x, y, z, Block.Air); // sea-facing cave inside chunk 1
     }
     const sim = new WaterSim(w);
-    sim.settle(0, 0, 0); // the spread guards keep chunk 1 pristine: only chunk 0's own edge cells are touched
+    sim.settle(0, 0, 0); // worldgen water stands: chunk 0's settle leaves chunk 1 pristine (no static sea ever crosses the seam)
     expect(w.getBlock(19, 2, 2)).toBe(Block.Air); // chunk 1's cave is NOT flooded by a sibling's settle ...
     expect(sim.touched.has(chunkKey(1, 0, 0))).toBe(false); // ...and no seam chunk is marked yet
-    sim.settle(1, 0, 0); // settling the cave's own chunk floods it from its own water ...
+    sim.settle(1, 0, 0); // settling the cave's own chunk pours its own sea down into the cave (stream + floor pool) ...
     expect(w.getBlock(19, 2, 2)).toBe(Block.Water); // ... so chunk 1's mesh is now stale and marked
     expect(sim.touched.has(chunkKey(1, 0, 0))).toBe(true); // ...
     sim.settle(2, 0, 0); // ... and a second settling chunk in the same frame must not wash that mark away

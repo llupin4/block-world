@@ -31,6 +31,9 @@ import { meshChunk } from '../chunk-mesher';
 //     ~12.5k cell updates; the slow-clock pulse adds at most 20 x 250 in 10 s.
 //   + slow clock (water now pulses once per 0.5 s instead of every 5th frame): the
 //     per-frame sim work drops to ~zero and placement/drain take visible time.
+//   + placed-water split (sources are now only placed water; worldgen water is static
+//     and never pushes): settle-time equalization across seams is gone, so the load-path
+//     cost drops to ~9.9k processes on this replay.
 // The pin is the original pre-fix budget floor (2,463,202 / 2 = 1,231,601): it
 // separates the fixed pipeline from the old code and the two-pass-only intermediate.
 // process() is counted via a runtime prototype patch (TS `private` is
@@ -98,7 +101,7 @@ it('boot + a 10-second streaming session stays within the load-path work budget'
   console.log('LOAD wall=', wall.toFixed(0), 'ms');
   console.log('LOAD settle=', settleMs.toFixed(0), 'ms');
   console.log('LOAD mesh=', meshMs.toFixed(0), 'ms');
-  console.log('LOAD processes=', processes, '(old code: 2463202; two-pass-only: 2463202; PIN', PIN + ')');
+  console.log('LOAD processes=', processes, '(old code: 2463202; guarded fix: 358734; slow clock: 12797; placed-water split: 9911; PIN', PIN + ')');
   console.log('LOAD chunks=', w.count());
 
   expect(w.count()).toBe(125); // the replay really walked to the full 5x5x5 ring

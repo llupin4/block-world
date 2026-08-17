@@ -5,20 +5,19 @@ Items deliberately not done in the POC. Rough order of value.
 ## Water
 
 - **Distinguish flow water from source water visually** (user request, 2026-08-16). The mesher
-  reads only the block type, so a placed source (an eternal spring) and the flow it poured out
-  render identically. The state already exists per cell — `wsource` (placed/immortal) and
-  `wflow` (sustained reachability) in each chunk (`src/world.ts`), written by `WaterSim`.
-  `meshChunk()` already takes the chunk, so it can read both arrays per cell. Ideas, in order of
-  cheapness: lower the surface of flow water by a few mm (source keeps the full cell height), or
-  give flow a slightly different alpha/colour in the transparent pass, or a subtle animated UV
+  reads only the block type, so a placed spring and the flow it pours out render identically.
+  The state already exists per cell — `wsource` (immortal: placed springs *and* static worldgen
+  water; `wplaced` tells the two apart), `wflow` (sustained reachability), `wstream` (a stream
+  column that never spreads) in each chunk (`src/world.ts`), written by `WaterSim`.
+  `meshChunk()` already takes the chunk, so it can read those arrays per cell. Ideas, in order of
+  cheapness: lower the surface of non-spring water by a few mm (a spring keeps the full cell
+  height), or a slightly different alpha/colour in the transparent pass, or a subtle animated UV
   offset on flow quads. Whatever we pick, keep the `nb === b` face cull (no quads between
   adjacent water) — the distinction must come from height/alpha, not extra faces.
-- A waterfall flowing into the sea raises the *loaded* sea surface by one where the droplets land
-  (flow over water spreads sideways, so an open basin climbs to the head's level — physically
-  right, but on a finite loaded sea it reads as a slow swell spreading out from the falls).
-  Possible fix: cap the at-rest spread of flow that is itself over water for cells at the *top*
-  of a local water column (a surface-flow gate). Only worth it if the swell is visually
-  annoying.
+- ~~A waterfall flowing into the sea raised the loaded sea surface by one.~~ **Resolved (2026-08-16,
+  round 4):** flow over deep water now vanishes instead of spreading sideways, and worldgen water
+  is static (only placed water is a spring), so no water body's level ever rises — a falls-to-sea
+  pour is lost at the surface, basins hold a floor sheet, caves take a stream + floor pool.
 - Player-swim interaction beyond the current gravity/speed tweaks (buoyancy bob, underwater
   particles, drag trails).
 
