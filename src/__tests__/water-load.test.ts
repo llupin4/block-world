@@ -6,33 +6,33 @@ import { TerrainGen, generateChunkTerrain, TERRAIN_SEED } from '../terrain';
 import { update } from '../streaming';
 import { meshChunk } from '../chunk-mesher';
 
-// Load-path budget: replays main.ts exactly — boot column (0,·,2), then 60 frames of
-// streaming.update around the spawn (pcx=0, pcy=2, pcz=2) with the frame loop's work:
-// settle + remesh per rebuilt chunk, slow-clock tick() every 5th frame, frame-end
-// touched drain. Lineage of the process() count on this replay:
+// Load-path budget: replays main.ts exactly — boot column (0,·,2), then a 10-second
+// session (600 frames at 60 fps) of streaming.update around the spawn (pcx=0, pcy=2,
+// pcz=2) with the frame loop's work: settle + remesh per rebuilt chunk, the slow
+// water clock (one pulse of 250 updates every 0.5 s), frame-end touched drain.
+// Lineage of the process() count on this replay:
 //   old code (per-cell seeding, unguarded spread): 2,463,202 — every world-edge settle
 //     looped: a spread write into missing/out-of-band space is a state no-op, but
-//     writeCell still re-marks the target's closure (self + HXZ + above), which contains
-//     the source cell, so the source re-enqueued forever and each ocean settle ran to
-//     the SETTLE_GUARD ceiling; secondarily, unguarded spread re-leveled loaded-unsettled
-//     neighbours' pristine worldgen water into decaying slabs that each neighbour's own
-//     settle then discarded (rework, and the seam-level bug of the load).
-//   two-pass settle only (pass-1 seed + pass-2 reseed, spread still unguarded):
-//     2,463,202 — invariant: the edge loop still capped every ocean settle.
-//   two-pass settle + the two spread guards (intermediate): 358,734 — the edge self-loop is
-//     gone, but streaming still loaded high y-bands before their low bands: a settle above
-//     a not-yet-generated band read the void as dry Air and "fell" the column's top water
-//     out of the world (destroyed through a hole that does not exist). The ocean top row
-//     was then gone forever and refilled only unevenly by neighbour spreads — the visible
-//     raised/stepped ocean sections (histogram: 2959 columns at one level, 469 one higher).
-//   + band-order fix (this fix): settle() defers a chunk whose low band is in-band but not
-//     yet loaded (and cascades upward once a low band settles), and process() refuses to
-//     fall into not-yet-generated space (world floor excepted). Final: every ocean column
-//     converges to exactly one surface height (the flatness probe below measures 0 columns
-//     off-mode) and the whole replay relaxes in ~3k cell updates — 3,032 here, settle
-//     wall ~25 ms of the ~500 ms total (the rest is terrain+mesh, a POC streaming cost):
-//     // The pin is the original pre-fix budget floor (2,463,202 / 2 = 1,231,601): it separates
-// the fixed pipeline (3,032 final; 358,734 post-T2) from the old code and the two-pass-only intermediate.
+//     writeCell still re-marks the target's closure, which contains the source cell, so
+//     the source re-enqueued forever and each ocean settle ran to the SETTLE_GUARD
+//     ceiling; secondarily, unguarded spread re-leveled loaded-unsettled neighbours'
+//     pristine worldgen water into decaying slabs their own settle discarded.
+//   two-pass settle only: 2,463,202 — invariant: the edge loop still capped ocean settles.
+//   two-pass settle + the two spread guards: 358,734 — the edge self-loop is gone, but
+//     streaming still loaded high y-bands before their low bands: a settle above a
+//     not-yet-generated band read the void as dry Air and "fell" the column's top water
+//     out of the world (destroyed through a hole that does not exist); the ocean top row
+//     was then gone forever and refilled only unevenly (the visible raised/stepped
+//     ocean sections: 2959 columns at one surface level, 469 one higher).
+//   + band-order fix: settle() defers a chunk whose low band is in-band but not yet
+//     loaded (and cascades upward once a low band settles); process() refuses to fall
+//     into not-yet-generated space (world floor excepted). Every ocean column converges
+//     to exactly one surface height (flatness probe below) and the replay relaxes in
+//     ~12.5k cell updates; the slow-clock pulse adds at most 20 x 250 in 10 s.
+//   + slow clock (water now pulses once per 0.5 s instead of every 5th frame): the
+//     per-frame sim work drops to ~zero and placement/drain take visible time.
+// The pin is the original pre-fix budget floor (2,463,202 / 2 = 1,231,601): it
+// separates the fixed pipeline from the old code and the two-pass-only intermediate.
 // process() is counted via a runtime prototype patch (TS `private` is
 // compile-time only), so the pin is implementation-agnostic. Wall time is logged for
 // the record, never asserted (it is machine-dependent); mesh cost is included (it is
@@ -40,7 +40,7 @@ import { meshChunk } from '../chunk-mesher';
 // main.ts at rest.
 const PIN = 1231601; // old code: 2,463,202 (SETTLE_GUARD-saturated edge loop); two-pass-only: 2,463,202; guarded fix measured 358,734
 
-it('boot + 60 streaming frames stay within the load-path work budget', () => {
+it('boot + a 10-second streaming session stays within the load-path work budget', () => {
   const w = new World();
   const gen = new TerrainGen(TERRAIN_SEED);
   for (let cy = 0; cy <= 4; cy++) generateChunkTerrain(w, gen, 0, cy, 2); // main.ts:171
@@ -58,9 +58,10 @@ it('boot + 60 streaming frames stay within the load-path work budget', () => {
 
   let settleMs = 0, meshMs = 0;
   const tStart = performance.now();
-  let frameNo = 0;
-  for (let f = 0; f < 60; f++) {
-    frameNo++;
+  let waterAcc = 0;
+  const STEP = 1 / 60, WATER_STEP = 0.5, WATER_PULSE = 250; // main.ts slow-clock constants
+  for (let f = 0; f < 600; f++) { // 10 s at 60 fps
+    waterAcc += STEP;
     const r = update(w, 0, 2, 2); // main.ts:528
     for (const c of r.rebuilt) {
       const t0 = performance.now();
@@ -72,8 +73,11 @@ it('boot + 60 streaming frames stay within the load-path work budget', () => {
       const ch = w.getChunk(c.cx, c.cy, c.cz);
       if (ch) ch.dirty = false; // main.ts:225
     }
-    if (frameNo % 5 === 0) sim.tick(200); // main.ts:585
-    const touched = sim.touched; // main.ts:586-593
+    if (waterAcc >= WATER_STEP) {
+      waterAcc = 0;
+      sim.tick(WATER_PULSE); // main.ts: the 0.5 s slow-clock pulse
+    }
+    const touched = sim.touched; // main.ts frame-end drain
     if (touched.size) {
       const t0 = performance.now();
       for (const key of touched) {
@@ -99,7 +103,13 @@ it('boot + 60 streaming frames stay within the load-path work budget', () => {
 
   expect(w.count()).toBe(125); // the replay really walked to the full 5x5x5 ring
   expect(processes).toBeLessThan(PIN);
-  expect(sim.tick(1)).toBe(0); // residual relaxation from any guard-saturated early settle completed within the replay window (queue fully drained)
+
+  // The 10-second session may still hold a residual queue (a slow-clock pulse in
+  // flight); drain it like a longer standing-still session, and the queue MUST reach
+  // empty — a never-draining queue is a re-enqueue pathology and a frame-loop cost.
+  let guard = 0;
+  while (sim.tick(2000) !== 0 && guard++ < 400) { /* drain */ }
+  expect(sim.tick(1)).toBe(0); // fixpoint: nothing left to relax
 
   // Ocean-surface flatness probe (measurement only, no assert): after the queue has fully
   // drained, a hydrostatically correct ocean shows, per water column, water contiguous

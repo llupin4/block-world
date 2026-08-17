@@ -565,10 +565,12 @@ function setWireframe(on: boolean): void {
 // === loop ===
 
 const STEP = 1 / 60;
+const WATER_STEP = 0.5;   // slow-clock pulse interval (s): water takes one "tick" per pulse — placement and drain visibly take time
+const WATER_PULSE = 250;  // cell updates budgeted per pulse
 
 let last = performance.now();
 let acc = 0;
-let frameNo = 0;
+let waterAcc = 0;
 
 function frame(now: number): void {
   let dt = (now - last) / 1000;
@@ -581,8 +583,11 @@ function frame(now: number): void {
     tickStreaming();
     if (player.pos.y < WORLD_Y_MIN) player.place(SPAWN); // fell out of the world (open cave / dug-away floor)
   }
-  frameNo++;
-  if (frameNo % 5 === 0) sim.tick(200); // water runs on a slower clock than physics (PROJECT.md §9: ~12 ticks/s)
+  waterAcc += dt;
+  if (waterAcc >= WATER_STEP) {
+    waterAcc = 0;
+    sim.tick(WATER_PULSE); // water on a ~2 Hz slow clock (PROJECT.md §9); settles are event-driven and stay snappy
+  }
   const touched = sim.touched; // re-mesh any chunk the sim changed this frame (settles from substeps + ticks), then drain
   if (touched.size) {
     for (const key of touched) {

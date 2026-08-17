@@ -18,7 +18,8 @@ export interface Chunk {
   cz: number;
   blocks: Uint8Array; // D9: 10 block values fit in a byte
   wlevel: Uint8Array;  // water flow level per cell: 0 dry, 1..7 water (7 = full source)
-  wsource: Uint8Array; // 0/1 per cell: this cell is a (re)promoted/placed source
+  wsource: Uint8Array; // 0/1 per cell: this cell is a placed/fallen source (immortal)
+  wflow: Uint8Array;   // 0/1 per flow cell: sustained — reachable from a source through water; 0 → starves away (slow clock)
   dirty: boolean;
   settled: boolean;    // water sim has settled this chunk's worldgen water (makes settle idempotent)
   opaqueMesh: VoxelBuffer | null;
@@ -61,6 +62,7 @@ export class World {
       blocks: new Uint8Array(CHUNK_VOL),
       wlevel: new Uint8Array(CHUNK_VOL),
       wsource: new Uint8Array(CHUNK_VOL),
+      wflow: new Uint8Array(CHUNK_VOL),
       dirty: true,
       settled: false,
       opaqueMesh: null,

@@ -1,18 +1,32 @@
-import { Block, BLOCKS } from './blocks';
+import { Block } from './blocks';
 import { World, chunkOf, chunkKey, localIndex, WORLD_Y_MIN, WORLD_Y_MAX, type Chunk } from './world';
 
 // WaterSim: the PROJECT.md §9 flow cellular automaton. Pure TS (no three) so vitest
-// drives it in node, mirroring how streaming.ts is tested. State (wlevel/wsource)
+// drives it in node, mirroring how streaming.ts is tested. State (wlevel/wsource/wflow)
 // lives in the chunk, so it streams with the chunk: a missing neighbour chunk reads
 // as dry and is not a spread escape; a falling cell whose destination is
 // out-of-band or missing is destroyed (falls out of the world).
+//
+// Model: SOURCES (wsource=1) are immortal and keep spreading. Sources are created ONLY by
+// placing a water block — water that falls from a source lands as FLOW (this is what
+// keeps a plugged cave drainable: the sea water that poured in through a hole carries no
+// source bit of its own). Everything that is not a source is FLOW: it spreads and rests,
+// and it is SUSTAINED (wflow=1) while it can reach a source through the water body
+// (6-neighbour reachability; the flag updates locally cell-by-cell and is re-derived
+// globally by runAudit after any water-removing edit). Flow that loses all reachability
+// — a plugged hole, a sealed pocket, a removed source — starves away at the slow-clock
+// pace, one cell per processed update: plug the hole and the cave you flooded empties
+// itself, visibly.
 
 const HXZ: ReadonlyArray<readonly [number, number]> = [[1, 0], [-1, 0], [0, 1], [0, -1]];
+const NB6: ReadonlyArray<readonly [number, number, number]> = [
+  [1, 0, 0], [-1, 0, 0], [0, 0, 1], [0, 0, -1], [0, 1, 0], [0, -1, 0],
+]; // 6-neighbour water adjacency: reachability (sustained-flow BFS) walks vertically too
 const SETTLE_GUARD = 20000; // safety valve: cap on cell updates one settle run may perform
 const MIN_CY = 0; // lowest GENERATED y band (streaming's CY_MIN): below it is ungenerated world floor — a fall through it drains (legitimate), a settle above it defers
 
-interface CellState { b: number; l: number; s: number }
-const DRY: CellState = { b: Block.Air, l: 0, s: 0 };
+interface CellState { b: number; l: number; s: number; f: number }
+const DRY: CellState = { b: Block.Air, l: 0, s: 0, f: 0 };
 
 export class WaterSim {
   private readonly world: World;
@@ -23,6 +37,7 @@ export class WaterSim {
   // re-marks self + 4 horizontal + above, the same closure writeCell re-marks).
   readonly stats = { seeds: 0, processes: 0, queueAdds: 0, equalizeFills: 0 };
   private settling: Chunk | null = null; // chunk whose settle is in flight (exempts its own water from the pristine-skip in process)
+  private auditPending = false; // a water-removing edit happened: re-derive sustained-flow flags globally on the next tick/settle
 
   constructor(world: World) {
     this.world = world;
@@ -38,22 +53,19 @@ export class WaterSim {
     const c = this.world.getChunk(chunkOf(wx), chunkOf(wy), chunkOf(wz));
     if (!c) return DRY;
     const i = localIndex(wx - c.cx * 16, wy - c.cy * 16, wz - c.cz * 16);
-    return { b: c.blocks[i], l: c.wlevel[i], s: c.wsource[i] };
-  }
-
-  private solid(b: number): boolean {
-    return b !== Block.Air && b !== Block.Water && BLOCKS[b].solid;
+    return { b: c.blocks[i], l: c.wlevel[i], s: c.wsource[i], f: c.wflow[i] };
   }
 
   // Write a cell's full state. Only records the chunk in `touched` when the *block*
   // actually changed (level changes alone never re-mesh: levels don't render).
-  private setState(wx: number, wy: number, wz: number, l: number, s: number, b: number): void {
+  private setState(wx: number, wy: number, wz: number, l: number, s: number, b: number, f: number): void {
     if (!this.inBand(wy)) return;
     const c = this.world.getChunk(chunkOf(wx), chunkOf(wy), chunkOf(wz));
     if (!c) return;
     const i = localIndex(wx - c.cx * 16, wy - c.cy * 16, wz - c.cz * 16);
     c.wlevel[i] = l;
     c.wsource[i] = s;
+    c.wflow[i] = f;
     if (c.blocks[i] !== b) {
       if (this.world.setBlock(wx, wy, wz, b)) this.touched.add(chunkKey(c.cx, c.cy, c.cz));
     }
@@ -62,10 +74,10 @@ export class WaterSim {
   // Write only when state differs, then re-mark the cell + 4 horizontal neighbours +
   // the cell above (a below cell is never re-marked from above: a resting level is a
   // function of horizontal + above, and a changing below re-triggers via this rule).
-  private writeCell(wx: number, wy: number, wz: number, l: number, s: number, b: number): void {
+  private writeCell(wx: number, wy: number, wz: number, l: number, s: number, b: number, f: number = 0): void {
     const c = this.cellState(wx, wy, wz);
-    if (c.b === b && c.l === l && c.s === s) return;
-    this.setState(wx, wy, wz, l, s, b);
+    if (c.b === b && c.l === l && c.s === s && c.f === f) return;
+    this.setState(wx, wy, wz, l, s, b, f);
     this.queue.add(`${wx},${wy},${wz}`);
     for (const [dx, dz] of HXZ) this.queue.add(`${wx + dx},${wy},${wz + dz}`);
     this.queue.add(`${wx},${wy + 1},${wz}`);
@@ -86,11 +98,10 @@ export class WaterSim {
   // chunk to (level 7, source) straight into the chunk arrays — no per-cell state read, no
   // queue write, no re-mark. Pass 2 enqueues ONLY a seeded cell whose rule would act on its
   // neighbours at seed time: a fall (below is Air) or a spread (an HXZ neighbour that is
-  // Air, or unseeded water at level 1..5 that a level-7 source would upgrade; a pristine
-  // l=0 neighbour is never upgraded — its own settle seeds it as (7,1)). Interior ocean
-  // cells trigger neither and are never processed. Every later state change still goes
-  // through writeCell (which re-marks dependents), so the worklist stays closed and
-  // converges to the same fixpoint as per-cell seeding did.
+  // Air). A pristine l=0 neighbour is never an action target (spread writes Air only), and
+  // interior ocean cells trigger neither and are never processed. Every later state change
+  // still goes through writeCell (which re-marks dependents), so the worklist stays closed
+  // and converges to the same fixpoint as per-cell seeding did.
   private settleSeed(c: Chunk): void {
     const bx = c.cx * 16, by = c.cy * 16, bz = c.cz * 16;
     for (let i = 0; i < c.blocks.length; i++) {
@@ -98,6 +109,7 @@ export class WaterSim {
       if (c.wlevel[i] === 7 && c.wsource[i] === 1) continue; // already a source
       c.wlevel[i] = 7;
       c.wsource[i] = 1;
+      c.wflow[i] = 0; // worldgen water becomes source; the sustained flag is flow-only
       this.stats.seeds++;
     }
     for (let lx = 0; lx < 16; lx++)
@@ -108,7 +120,7 @@ export class WaterSim {
           if (this.cellState(wx, wy - 1, wz).b === Block.Air) { this.enqueue(wx, wy, wz); continue; }
           for (const [dx, dz] of HXZ) {
             const m = this.cellState(wx + dx, wy, wz + dz);
-            if (m.b === Block.Air || (m.b === Block.Water && m.s === 0 && m.l >= 1 && m.l < 6)) { this.enqueue(wx, wy, wz); break; }
+            if (m.b === Block.Air) { this.enqueue(wx, wy, wz); break; }
           }
         }
   }
@@ -138,62 +150,63 @@ export class WaterSim {
       if (!belowKnown) return; // wait: the low band's settle (cascade) or a re-mark retries us
       this.writeCell(wx, wy, wz, 0, 0, Block.Air); // dry origin, re-marked
       if (wy - 1 >= MIN_CY * 16 && this.world.hasChunk(chunkOf(wx), chunkOf(wy - 1), chunkOf(wz))) {
-        this.writeCell(wx, wy - 1, wz, 7, C.s, Block.Water); // land at level 7, source bit carried
+        this.writeCell(wx, wy - 1, wz, 7, 0, Block.Water, C.f); // land at level 7 as FLOW: only placement creates sources (a source that fell is no longer its own supply)
       } // else: destination below the generated floor → destroyed (fell out of the world)
       return;
     }
 
-    // resting: below is solid or water.
-    const above = this.cellState(wx, wy + 1, wz);
-    let nL = C.l;
-    let nS = C.s;
-    if (C.s !== 1) {
-      if (this.solid(below.b)) {
-        nS = 1; // below solid → re-promote (level kept)
-      } else if (above.b === Block.Water && above.l === 7) {
-        nS = 1; // full-water support above → re-promote (level kept)
-      } else {
-        let best = -1;
-        for (const [dx, dz] of HXZ) {
-          const m = this.cellState(wx + dx, wy, wz + dz);
-          if (m.b === Block.Water && m.l >= 1) best = Math.max(best, m.l - 1);
-        }
-        if (best < 1) {
-          this.writeCell(wx, wy, wz, 0, 0, Block.Air); // starved: no support, no L7 above, no feed
-          return;
-        }
-        nL = best; // decay toward the strongest horizontal feed (a non-source cell ≤ 6)
+    // resting: below is not air. Levels are a constant 7 for every live water cell (cosmetic
+    // in the POC — they do not render, and nothing decays, so resting water is a zero-cost
+    // fixpoint). Sources (s=1) are immortal. A flow cell (s=0) is alive while sustained:
+    // some 6-neighbour is a source or a sustained flow cell (reachability through the
+    // water body; the wflow flag updates locally per cell and runAudit re-derives it
+    // globally after any water-removing edit). Without reachability — a plugged hole, a
+    // sealed pocket, a removed source — the cell starves away at the slow-clock pace:
+    // plug the hole and the cave you flooded empties itself, visibly.
+    let nF = C.f;
+    if (C.s !== 1 && C.l >= 1) {
+      let sus = 0;
+      for (const [dx, dy, dz] of NB6) {
+        const m = this.cellState(wx + dx, wy + dy, wz + dz);
+        if (m.b === Block.Water && (m.s === 1 || m.f === 1)) { sus = 1; break; }
       }
+      if (sus === 0) {
+        this.writeCell(wx, wy, wz, 0, 0, Block.Air, 0); // starved: cut off from every source
+        return;
+      }
+      nF = 1;
     }
-    this.writeCell(wx, wy, wz, nL, nS, Block.Water);
+    if (nF !== C.f) this.writeCell(wx, wy, wz, C.l, C.s, Block.Water, nF);
 
-    // spread to horizontal neighbours at level-1. Two guards keep the load path cheap:
-    // (1) never call writeCell into missing space — the state write there is a no-op, but
-    // writeCell still re-marks the target's closure (self + HXZ + above), which includes
-    // this cell; at a world edge that is a self-re-enqueue loop that sat every ocean
-    // settle at the SETTLE_GUARD ceiling. (2) never re-level a pristine (l=0, s=0)
-    // neighbour into a decaying slab that its own settle will discard — only water a
-    // prior spread/fall already wrote (l>=1) may be re-leveled.
-    if (nL >= 2) {
-      for (const [dx, dz] of HXZ) {
-        const tx = wx + dx, tz = wz + dz;
-        const m = this.cellState(tx, wy, tz);
-        if (m.b === Block.Air) {
-          if (this.world.hasChunk(chunkOf(tx), chunkOf(wy), chunkOf(tz))) {
-            this.writeCell(tx, wy, tz, nL - 1, 0, Block.Water);
-          }
-        } else if (m.b === Block.Water && m.s === 0 && m.l >= 1 && nL - 1 > m.l) {
-          this.writeCell(tx, wy, tz, nL - 1, 0, Block.Water);
+    // spread to horizontal AIR neighbours — unlimited range (water is always level 7;
+    // terrain and reachability, not levels, bound it). Two guards keep the load path
+    // cheap: (1) never call writeCell into missing space — a state write there is a
+    // no-op, but the re-mark of the target's closure (self + HXZ + above) includes this
+    // cell; at a world edge that is a self-re-enqueue loop that sat every ocean settle
+    // at the SETTLE_GUARD ceiling. (2) spread targets AIR only: a loaded-unsettled
+    // neighbour's pristine worldgen water is never touched — its own settle re-seeds it.
+    for (const [dx, dz] of HXZ) {
+      const tx = wx + dx, tz = wz + dz;
+      if (this.cellState(tx, wy, tz).b === Block.Air) {
+        if (this.world.hasChunk(chunkOf(tx), chunkOf(wy), chunkOf(tz))) {
+          this.writeCell(tx, wy, tz, 7, 0, Block.Water, 0);
         }
       }
     }
   }
 
   // Process up to `budget` queued cells (insertion order); the remainder persists.
-  // Does not clear `touched` — the caller drains it after re-meshing.
+  // Does not clear `touched` — the caller drains it after re-meshing. If a water-removing
+  // edit is pending, its reachability audit runs first (it is free work: the starves it
+  // schedules then drain through the normal budget, one cell per update).
   tick(budget: number): number {
     let n = 0;
     while (n < budget) {
+      if (this.auditPending) {
+        this.auditPending = false;
+        this.runAudit();
+        continue;
+      }
       const it = this.queue.values().next();
       if (it.done) break;
       const key = it.value as string;
@@ -203,6 +216,60 @@ export class WaterSim {
       n++;
     }
     return n;
+  }
+
+  // Re-derive the sustained-flow flags from scratch: BFS from every source through the
+  // water body (6-neighbour adjacency; pristine l=0 worldgen water counts as connectivity
+  // but is never touched — its own settle re-seeds it as a source). Flow cells that end
+  // up unreachable from every source get wflow=0 and are starved away by process() at
+  // the slow-clock pace. One sweep is exact for a removal event: the reachable set is
+  // stable under the deaths of the unreachable cells (a path through a dead cell never
+  // existed), so no further sweeps are needed for the cascade it schedules.
+  private runAudit(): void {
+    const seen = new Set<number>();
+    const stack: number[] = [];
+    const pack = (x: number, y: number, z: number): number => ((x + 8192) << 28) | ((y + 8192) << 14) | (z + 8192); // 14-bit fields: exact in a double for |coord| < 8192 (streaming world around the spawn)
+    for (const c of this.world.allChunks()) {
+      const bx = c.cx * 16, by = c.cy * 16, bz = c.cz * 16;
+      for (let i = 0; i < c.blocks.length; i++) {
+        if (c.blocks[i] === Block.Water && c.wsource[i] === 1) {
+          const k = pack(bx + (i % 16), by + ((i / 256) | 0), bz + (((i / 16) | 0) % 16));
+          if (!seen.has(k)) { seen.add(k); stack.push(k); }
+        }
+      }
+    }
+    while (stack.length > 0) {
+      const k = stack.pop()!;
+      const wz = (k & 16383) - 8192;
+      const wy = (((k >> 14) & 16383) - 8192);
+      const wx = (((k >> 28) & 16383) - 8192);
+      for (const [dx, dy, dz] of NB6) {
+        const nx = wx + dx, ny = wy + dy, nz = wz + dz;
+        if (ny < WORLD_Y_MIN || ny >= WORLD_Y_MAX) continue;
+        const ck = this.world.getChunk(chunkOf(nx), chunkOf(ny), chunkOf(nz));
+        if (!ck) continue;
+        const nloc = localIndex(nx - ck.cx * 16, ny - ck.cy * 16, nz - ck.cz * 16);
+        if (ck.blocks[nloc] !== Block.Water) continue;
+        const nk = pack(nx, ny, nz);
+        if (!seen.has(nk)) { seen.add(nk); stack.push(nk); }
+      }
+    }
+    // Apply the flags: reachable flow re-asserts wflow=1, unreachable flow drops to 0.
+    // The enqueue (no state write) re-marks each changed cell's closure so process()
+    // re-reaches it — starves then proceed through the slow-clock budget.
+    for (const c of this.world.allChunks()) {
+      const bx = c.cx * 16, by = c.cy * 16, bz = c.cz * 16;
+      for (let i = 0; i < c.blocks.length; i++) {
+        if (c.blocks[i] !== Block.Water || c.wsource[i] === 1 || c.wlevel[i] < 1) continue;
+        const wx = bx + (i % 16), wy = by + ((i / 256) | 0), wz = bz + (((i / 16) | 0) % 16);
+        const k = pack(wx, wy, wz);
+        const want = seen.has(k) ? 1 : 0;
+        if (c.wflow[i] !== want) {
+          c.wflow[i] = want;
+          this.enqueue(wx, wy, wz);
+        }
+      }
+    }
   }
 
   // On-load settle: bulk-seed every worldgen Water cell of the chunk as a level-7 source
@@ -216,6 +283,10 @@ export class WaterSim {
   settle(cx: number, cy: number, cz: number): Set<string> {
     const c = this.world.getChunk(cx, cy, cz);
     if (!c || c.settled) return this.touched;
+    if (this.auditPending) {
+      this.auditPending = false;
+      this.runAudit(); // a water-removing edit may have starved water this settle would re-seed
+    }
     // The band below must already exist (or we are the lowest generated band): settling this
     // chunk while its bottom neighbours read as missing space makes its bottom water
     // "fall" out of the still-unloaded world and be destroyed through a hole that does
@@ -253,6 +324,7 @@ export class WaterSim {
     const c = this.world.getChunk(chunkOf(wx), chunkOf(wy), chunkOf(wz));
     if (!c) return;
     const i = localIndex(wx - c.cx * 16, wy - c.cy * 16, wz - c.cz * 16);
+    const wasWater = c.wlevel[i] >= 1 || c.wsource[i] === 1;
     if (block === Block.Water) {
       c.wlevel[i] = 7;
       c.wsource[i] = 1;
@@ -260,8 +332,10 @@ export class WaterSim {
       c.wlevel[i] = 0;
       c.wsource[i] = 0;
     }
+    c.wflow[i] = 0;
     this.queue.add(`${wx},${wy},${wz}`);
     for (const [dx, dz] of HXZ) this.queue.add(`${wx + dx},${wy},${wz + dz}`);
     this.queue.add(`${wx},${wy + 1},${wz}`);
+    if (wasWater && block !== Block.Water) this.auditPending = true; // water removed: re-derive reachability on the next pulse
   }
 }
