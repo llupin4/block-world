@@ -17,11 +17,10 @@ export interface Chunk {
   cy: number;
   cz: number;
   blocks: Uint8Array; // D9: 10 block values fit in a byte
-  wlevel: Uint8Array;  // water flow level per cell: 0 dry, 1..7 water (7 = full source)
-  wsource: Uint8Array; // 0/1 per cell: this cell is a placed/fallen source (immortal)
-  wflow: Uint8Array;   // 0/1 per flow cell: sustained — reachable from a source through water; 0 → starves away (slow clock)
-  wplaced: Uint8Array; // 0/1 per source cell: created by the player PLACING water (a true spring: immortal, keeps pushing flow out). 0 = worldgen water that settle re-seeded as a source: it stands, falls and can pour, but never pushes/spreads — the sea is not a spring
-  wstream: Uint8Array; // 0/1 per flow cell: part of a falling stream column (over a stream cell, or over a pool sheet grounded one deep on solid). Stream cells are visible water that never spreads and never climbs — so a waterfall leaves a column + a floor pool, and water over sea/deep pools disappears into them instead of raising them
+  wlevel: Uint8Array;  // water flow level per cell: 0 dry, 1..7 water (7 = full). Render-cosmetic: re-derived from the neighbourhood on change (the "what state do I hold" of the local cellular rule)
+  wsource: Uint8Array; // 0/1 per cell: this cell is a source body — the worldgen sea/lake (settle re-seeds it), the player's placed water, or water regenerated within a placed body. Flow is never adopted into a source body (a body's level never rises and no flow can become an immortal source): sources are immortal, their level never rises or decays and they re-derive to themselves
+  wplaced: Uint8Array; // 0/1 per source cell: a PLACED source (spring) — created by the player placing water, or regenerated within a placed body. A placed source is a static block: it never falls, pours no column through itself, emits only a side halo into air, and is the only water the player can break (breaking it is how you stop its flow). 0 = worldgen water settle re-seeded as a source (the sea): it stands, falls and pours where its support goes, but never emits, grows or feeds flow — the sea is not a spring
+  wstream: Uint8Array; // 0/1 per flow cell: RIDING support (below is water over solid / another column / the void base) vs RESTING on its own (over solid or the void). Riding cells spread nothing — a waterfall column cannot climb a pool, fill a basin or raise the sea; a rider stays a rider only while alive flow holds it (water above, a spring or an active column alongside) — when nothing alive holds it the cell re-derives as resting water on its next pass, so a frozen column can never outlive its source
   dirty: boolean;
   settled: boolean;    // water sim has settled this chunk's worldgen water (makes settle idempotent)
   opaqueMesh: VoxelBuffer | null;
@@ -64,7 +63,6 @@ export class World {
       blocks: new Uint8Array(CHUNK_VOL),
       wlevel: new Uint8Array(CHUNK_VOL),
       wsource: new Uint8Array(CHUNK_VOL),
-      wflow: new Uint8Array(CHUNK_VOL),
       wplaced: new Uint8Array(CHUNK_VOL),
       wstream: new Uint8Array(CHUNK_VOL),
       dirty: true,

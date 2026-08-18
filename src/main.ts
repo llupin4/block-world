@@ -335,10 +335,26 @@ function onContextMenu(e: Event): void {
   e.preventDefault();
 }
 
-function castFromCamera(): RayHit | null {
+// A placed spring — water the player created (sim's `p` flag) — is the only water the
+// player can break (LMB); breaking it is the way to stop the flow it feeds (a live
+// spring is an eternal emitter; with it gone, the flow it fed re-derives away through
+// the dirty closure — except water that landed on solid, which stands as a pool).
+const springTarget = (x: number, y: number, z: number): boolean => {
+  const b = world.getBlock(x, y, z);
+  if (b !== Block.Air && b !== Block.Water) return true;
+  return b === Block.Water && sim.cellState(x, y, z).p === 1;
+};
+
+function castFromCamera(springs: boolean): RayHit | null {
   const dir = new THREE.Vector3();
   camera.getWorldDirection(dir); // view direction in world space, normalized
-  return raycastVoxel((x, y, z) => world.getBlock(x, y, z), camera.position, dir, REACH);
+  // `springs` cast = BREAK targeting (LMB + crosshair): a spring stops the ray.
+  // Plain cast = PLACE targeting (RMB): water stays pass-through, so aiming at a water
+  // column reaches the solid behind/below it and the placement lands on the water cell
+  // adjacent to that solid (cap or replace a surface cell) — the long-standing placement
+  // behavior, which spring-stop targeting would break (it would displace the target to
+  // the cell beyond the spring).
+  return raycastVoxel(world, camera.position, dir, REACH, springs ? springTarget : undefined);
 }
 
 // Rebuild the edited cell's chunk, plus — when the cell sits on a chunk face — the
@@ -363,14 +379,18 @@ function remeshAround(wx: number, wy: number, wz: number): void {
 }
 
 function onMouseDown(e: MouseEvent): void {
-  const hit = castFromCamera();
-  if (!hit) return;
   if (e.button === 0) {
-    // `hit` is always a breakable solid (water is pass-through in the raycast).
+    const hit = castFromCamera(true); // break targeting: placed springs are targetable
+    if (!hit) return;
+    // `hit` is a breakable solid or a placed spring (the only targetable water —
+    // see castFromCamera). Breaking a spring removes the emitter: the flow it fed
+    // re-derives to air through the dirty closure, so the player can always stop a flood.
     world.setBlock(hit.x, hit.y, hit.z, Block.Air);
     remeshAround(hit.x, hit.y, hit.z);
     sim.edit(hit.x, hit.y, hit.z, Block.Air); // clears the cell's water state + re-marks dependents (source/support removed)
   } else if (e.button === 2) {
+    const hit = castFromCamera(false); // place targeting: water stays pass-through
+    if (!hit) return;
     const tx = hit.x + hit.nx;
     const ty = hit.y + hit.ny;
     const tz = hit.z + hit.nz;
@@ -385,8 +405,9 @@ function onMouseDown(e: MouseEvent): void {
 }
 
 // Per-frame actions: re-target the wireframe from the just-synced camera (called after syncCamera).
+// Shows the BREAK target (same cast as LMB): a spring lights up where you can break it.
 function updateHitbox(): void {
-  const hit = pointerLocked ? castFromCamera() : null;
+  const hit = pointerLocked ? castFromCamera(true) : null;
   if (!hit) {
     hitbox.visible = false;
     return;
@@ -566,7 +587,7 @@ function setWireframe(on: boolean): void {
 
 const STEP = 1 / 60;
 const WATER_STEP = 0.5;   // slow-clock pulse interval (s): water takes one "tick" per pulse — placement and drain visibly take time
-const WATER_PULSE = 250;  // cell updates budgeted per pulse
+const WATER_PULSE = 1000; // cell updates budgeted per pulse: big enough that a cut-off body's re-stabilization cascade (level wave + drain) finishes within a pulse or two, so a stopped flow settles in ~1 s instead of crawling for many seconds (and visibly re-expanding before it drains); smaller pulses made that crawl read as "flow that keeps moving"
 
 let last = performance.now();
 let acc = 0;

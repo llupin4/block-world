@@ -15,18 +15,26 @@ export interface RayHit {
  * DDA ray-march through the voxel lattice (Amanatides & Woo): one iteration = one new
  * voxel, always entered through the nearest grid plane. A parallel axis is never
  * stepped (1/0 is Infinity in IEEE-754). `dir` must be normalized (t == meters).
+ * `target` overrides which blocks the ray stops on; the default treats water as
+ * pass-through (target = whatever you could break against).
  */
 export function raycastVoxel(
   world: { getBlock(x: number, y: number, z: number): number } | ((x: number, y: number, z: number) => number),
   origin: { x: number; y: number; z: number },
   dir: { x: number; y: number; z: number },
   maxDist: number,
+  target?: (x: number, y: number, z: number) => boolean,
 ): RayHit | null {
   // main.ts passes a bare callback, tests pass a World: normalize to one call shape.
   const getBlock = (x: number, y: number, z: number): number =>
     typeof world === 'function' ? world(x, y, z) : world.getBlock(x, y, z);
-  // Water is pass-through: the target is whatever you could break against.
-  const isTarget = (b: number) => b !== Block.Air && b !== Block.Water;
+  // Water is pass-through by default: the target is whatever you could break against.
+  // A caller may supply `target` to make specific water targetable (placed springs: the
+  // only water the player can remove; everything else keeps pass-through swimming aim).
+  const isTarget = target ?? ((x: number, y: number, z: number): boolean => {
+    const b = getBlock(x, y, z);
+    return b !== Block.Air && b !== Block.Water;
+  });
 
   let x = Math.floor(origin.x);
   let y = Math.floor(origin.y);
@@ -48,7 +56,7 @@ export function raycastVoxel(
   let nz = 0;
 
   for (;;) {
-    if (isTarget(getBlock(x, y, z))) return { x, y, z, nx, ny, nz };
+    if (isTarget(x, y, z)) return { x, y, z, nx, ny, nz };
     if (tMaxX <= tMaxY && tMaxX <= tMaxZ) {
       if (tMaxX > maxDist) return null;
       x += stepX;

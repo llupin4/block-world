@@ -9,7 +9,7 @@ import { meshChunk } from '../chunk-mesher';
 // Load-path budget: replays main.ts exactly — boot column (0,·,2), then a 10-second
 // session (600 frames at 60 fps) of streaming.update around the spawn (pcx=0, pcy=2,
 // pcz=2) with the frame loop's work: settle + remesh per rebuilt chunk, the slow
-// water clock (one pulse of 250 updates every 0.5 s), frame-end touched drain.
+// water clock (one pulse of 1000 updates every 0.5 s), frame-end touched drain.
 // Lineage of the process() count on this replay:
 //   old code (per-cell seeding, unguarded spread): 2,463,202 — every world-edge settle
 //     looped: a spread write into missing/out-of-band space is a state no-op, but
@@ -28,7 +28,7 @@ import { meshChunk } from '../chunk-mesher';
 //     loaded (and cascades upward once a low band settles); process() refuses to fall
 //     into not-yet-generated space (world floor excepted). Every ocean column converges
 //     to exactly one surface height (flatness probe below) and the replay relaxes in
-//     ~12.5k cell updates; the slow-clock pulse adds at most 20 x 250 in 10 s.
+//     ~12.5k cell updates; the slow-clock pulse adds at most 20 x 1000 in 10 s.
 //   + slow clock (water now pulses once per 0.5 s instead of every 5th frame): the
 //     per-frame sim work drops to ~zero and placement/drain take visible time.
 //   + placed-water split (sources are now only placed water; worldgen water is static
@@ -67,7 +67,7 @@ it('boot + a 10-second streaming session stays within the load-path work budget'
   let settleMs = 0, meshMs = 0;
   const tStart = performance.now();
   let waterAcc = 0;
-  const STEP = 1 / 60, WATER_STEP = 0.5, WATER_PULSE = 250; // main.ts slow-clock constants
+  const STEP = 1 / 60, WATER_STEP = 0.5, WATER_PULSE = 1000; // main.ts slow-clock constants
   for (let f = 0; f < 600; f++) { // 10 s at 60 fps
     waterAcc += STEP;
     const r = update(w, 0, 2, 2); // main.ts:528

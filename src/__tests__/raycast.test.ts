@@ -38,4 +38,20 @@ describe('raycastVoxel — DDA over the voxel lattice', () => {
     expect(hit).not.toBeNull();
     expect([hit!.x, hit!.y, hit!.z, hit!.nx, hit!.ny, hit!.nz]).toEqual([3, 0, 0, -1, 0, 0]);
   });
+
+  it('a target predicate can mark water targetable (placed springs): the ray stops at the water cell, others stay pass-through', () => {
+    const w = worldWith((w) => {
+      w.setBlock(2, 0, 0, Block.Water); // a placed spring (caller knows its state)
+      w.setBlock(3, 0, 0, Block.Stone);
+    });
+    const spring = (x: number, y: number, z: number) => x === 2 && y === 0 && z === 0;
+    const hit = raycastVoxel(w, { x: 0.5, y: 0.5, z: 0.5 }, { x: 1, y: 0, z: 0 }, 10, spring);
+    expect(hit).not.toBeNull();
+    expect([hit!.x, hit!.y, hit!.z, hit!.nx, hit!.ny, hit!.nz]).toEqual([2, 0, 0, -1, 0, 0]);
+    const hit2 = raycastVoxel(w, { x: 0.5, y: 0.5, z: 0.5 }, { x: 1, y: 0, z: 0 }, 10, (x, y, z) => {
+      const b = w.getBlock(x, y, z);
+      return b !== Block.Air && b !== Block.Water; // water not marked targetable: stays pass-through
+    });
+    expect([hit2!.x, hit2!.y, hit2!.z]).toEqual([3, 0, 0]);
+  });
 });
