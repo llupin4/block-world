@@ -23,6 +23,7 @@ describe('blocks', () => {
     expect(isOpaque(Block.Dirt)).toBe(true);
     expect(isOpaque(Block.Grass)).toBe(true);
     expect(isOpaque(Block.Sand)).toBe(true);
+    expect(isOpaque(Block.Wood)).toBe(true);
     expect(isOpaque(Block.Planks)).toBe(true);
     expect(isOpaque(Block.Leaves)).toBe(false); // transparent (still solid)
     expect(isOpaque(Block.Glass)).toBe(false);
@@ -95,7 +96,7 @@ describe('blocks', () => {
     expect(iconPosition(Block.Torch, 40)).toBe('-440px 0px'); // tile 11 (torchStem, via +Y face)
     expect(iconPosition(Block.DoorBottom, 40)).toBe('-520px 0px'); // tile 13 (door; tile 12 = flame, unused as icon)
     // must stay a number, not the raw expression text
-    expect(iconPosition(Block.Stone, 40)).not.toContain('iconPosition');
+    expect(iconPosition(Block.Stone, 40)).not.toContain('iconTile');
   });
 
   it('torch meta: 0 = floor post, otherwise 1 | (face << 1); round-trips', () => {
