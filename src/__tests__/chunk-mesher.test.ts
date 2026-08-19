@@ -289,7 +289,66 @@ describe('chunk-mesher special blocks', () => {
     expect(meshChunk(withNeighbor(Block.Stone), 0, 0, 0).opaque!.positions.length / 3).toBe((5 + 5) * 4);
   });
 
-  it('an all-special chunk renders both kinds in one opaque buffer (facing special cells hide each other)', () => {
+  it('an opaque neighbour on the FAR side does not over-cull an interior panel face (see-through slit)', () => {
+    // stone on the door's +X side, but the panel's +X end is INTERIOR at x=9.2 (panel hugs the
+    // min-X edge, x [9.0, 9.2]). The old cell-level rule deleted that interior face against
+    // the stone -> the panel read as a hollow box / slit. The new rule keeps it.
+    const w = new World();
+    const c = w.ensureChunk(0, 0, 0);
+    c.blocks[localIndex(10, 8, 8)] = Block.Stone;       // the door's +X neighbour (far side)
+    c.blocks[localIndex(9, 8, 8)] = Block.DoorBottom;   // closed X side 0: panel x [9.0, 9.2]
+    c.meta[localIndex(9, 8, 8)] = doorMeta(false, 0);
+    const { opaque } = meshChunk(w, 0, 0, 0);
+    // stone keeps 6 (a panel is not opaque); the door keeps ALL 6 faces (its far +X face is
+    // interior at 9.2 and is no longer culled against the stone) -> (6 + 6) * 4
+    expect(opaque!.positions.length / 3).toBe((6 + 6) * 4);
+  });
+
+  it('a door panel keeps its face against a special neighbour whose geometry cannot reach the shared plane', () => {
+    // floor torch (post) beside a door: the post reaches only the floor (-Y) plane, never the
+    // vertical plane the panel's -X face sits on, so it cannot cover the panel's face (old rule
+    // deleted both the panel's -X and the post's +X -> two see-through slits). Now both survive.
+    const w = new World();
+    const c = w.ensureChunk(0, 0, 0);
+    c.blocks[localIndex(8, 8, 8)] = Block.Torch;
+    c.meta[localIndex(8, 8, 8)] = torchMeta(0);         // floor post
+    c.blocks[localIndex(9, 8, 8)] = Block.DoorBottom;   // panel x [9.0, 9.2]
+    c.meta[localIndex(9, 8, 8)] = doorMeta(false, 0);
+    const { opaque } = meshChunk(w, 0, 0, 0);
+    expect(opaque!.positions.length / 3).toBe((6 + 6) * 4);
+  });
+
+  it('mirror-hinged doors meeting on a plane keep exactly one of the two coincident faces', () => {
+    // A (8,8,8) side 1: panel x [8.8, 9.0] (+X end on plane 9.0). B (9,8,8) side 0: panel
+    // x [9.0, 9.2] (-X end on plane 9.0). Both put a FULL face on plane 9.0 with equal
+    // coverage -> exactly one survives: the smaller lexicographic cell (A) keeps its +X and
+    // B culls its -X. NOTE: the task spec stated (5+5), but the "smaller keeps / bigger
+    // culls" rule the spec itself specifies yields A=6, B=5 = 11 faces -> assert 44 verts.
+    const w = new World();
+    const c = w.ensureChunk(0, 0, 0);
+    c.blocks[localIndex(8, 8, 8)] = Block.DoorBottom;
+    c.meta[localIndex(8, 8, 8)] = doorMeta(false, 0, 1); // A side 1: panel x [8.8, 9.0]
+    c.blocks[localIndex(9, 8, 8)] = Block.DoorBottom;
+    c.meta[localIndex(9, 8, 8)] = doorMeta(false, 0, 0); // B side 0: panel x [9.0, 9.2]
+    const { opaque } = meshChunk(w, 0, 0, 0);
+    expect(opaque!.positions.length / 3).toBe((6 + 5) * 4);
+  });
+
+  it('same-hinge doors meeting on a plane never z-fight: the interior end cannot cover the far face', () => {
+    // A side 0 (8,8,8): panel x [8.0, 8.2] -> its +X end is interior (8.2), not on the shared
+    // plane. B side 0 (9,8,8): panel x [9.0, 9.2] -> its -X face lands on the plane 9.0. A's
+    // interior +X end cannot cover B's -X face, so NOTHING is culled -> both keep 6, no z-fight.
+    const w = new World();
+    const c = w.ensureChunk(0, 0, 0);
+    c.blocks[localIndex(8, 8, 8)] = Block.DoorBottom;
+    c.meta[localIndex(8, 8, 8)] = doorMeta(false, 0, 0); // A side 0: panel x [8.0, 8.2]
+    c.blocks[localIndex(9, 8, 8)] = Block.DoorBottom;
+    c.meta[localIndex(9, 8, 8)] = doorMeta(false, 0, 0); // B side 0: panel x [9.0, 9.2]
+    const { opaque } = meshChunk(w, 0, 0, 0);
+    expect(opaque!.positions.length / 3).toBe((6 + 6) * 4);
+  });
+
+  it('an all-special chunk renders both kinds in one opaque buffer (a face hides only if the neighbour covers it)', () => {
     const w = new World();
     const c = w.ensureChunk(0, 0, 0);
     c.blocks[localIndex(8, 8, 8)] = Block.Torch;
@@ -299,10 +358,18 @@ describe('chunk-mesher special blocks', () => {
     c.blocks[localIndex(9, 9, 8)] = Block.DoorTop;
     c.meta[localIndex(9, 9, 8)] = doorMeta(false, 0);
     const { opaque } = meshChunk(w, 0, 0, 0);
-    // face accounting (a face is hidden iff its neighbor CELL is opaque or special):
-    //   torch (8,8,8):    +X faces the door (special)       -> hidden: 5 faces
-    //   door bottom (9,8,8): -X faces the torch, +Y faces the top half, both special -> 4 faces
-    //   door top (9,9,8):    -Y faces the bottom half (special) -> 5 faces
-    expect(opaque!.positions.length / 3).toBe((5 + 4 + 5) * 4);
+    // face accounting — a face is hidden iff ITS box end lies on the cell-boundary plane AND
+    // the neighbour covers that face's area (opaque neighbour, or a special neighbour reaching
+    // the same plane with equal-or-larger coverage; equal coverage -> the smaller cell keeps):
+    //   torch (8,8,8):     floor post reaches only the -Y (floor) plane, never a vertical
+    //                      plane -> no vertical face sits against a neighbour -> all 6 faces
+    //   door bottom (9,8,8): -X at 9.0 faces the post (post can't reach that plane) -> kept;
+    //                      +Y at 9.0 faces the top half (equal full x[0,0.2] strips) -> bottom
+    //                      is the smaller cell (y=8) -> KEEPS it; far +X interior -> 6 faces
+    //   door top (9,9,8):    -Y at 9.0 faces the bottom half (equal full-strip coverage) ->
+    //                      top is the bigger cell (y=9) -> culls its -Y; the other 5 remain
+    //   => (6 + 6 + 5) (old rule gave 5+4+5: it culled the post's +X and the panel's faces
+    //       merely because the neighbouring CELL was special, not because geometry covered)
+    expect(opaque!.positions.length / 3).toBe((6 + 6 + 5) * 4);
   });
 });

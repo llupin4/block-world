@@ -54,26 +54,113 @@ const TILE_DOOR = 13;
 // torch meta face -> FACES index of the stub's outward tip: 1:+X, 2:-X, 3:+Z, 4:-Z
 const TIP_FACE = [0, 0, 1, 4, 5];
 
-/** A special block's face is hidden when the neighboring CELL is opaque or special. */
-const makeHidden = (gb: (x: number, y: number, z: number) => number, wx: number, wy: number, wz: number) =>
-  (f: number): boolean => {
+const EPS = 1e-6;
+type Cov = { u0: number; u1: number; v0: number; v1: number };
+interface FaceGeom { reach: boolean; cov: Cov | null }
+
+/**
+ * Cell-local (0..1) box `[min, min+size]` for a special block, mirroring exactly what
+ * emitTorch/emitDoor feed to pushBox. The box lives inside ONE cell; which cell-boundary
+ * planes its ends sit on is what decides which faces can ever be hidden.
+ */
+function specialBox(b: number, meta: number): { min: [number, number, number]; size: [number, number, number] } {
+  if (b === Block.Torch) {
+    const face = torchFace(meta);
+    if (face === 0) return { min: [0.41, 0, 0.41], size: [0.18, 0.875, 0.18] }; // floor post
+    if (face === 1) return { min: [0, 0.41, 0.41], size: [0.375, 0.18, 0.18] }; // stub, +X tip
+    if (face === 2) return { min: [1 - 0.375, 0.41, 0.41], size: [0.375, 0.18, 0.18] }; // stub, -X tip
+    if (face === 3) return { min: [0.41, 0.41, 0], size: [0.18, 0.18, 0.375] };  // stub, +Z tip
+    return { min: [0.41, 0.41, 1 - 0.375], size: [0.18, 0.18, 0.375] };          // stub, -Z tip
+  }
+  const xThin = doorAxis(meta) === 0;
+  const side = doorSide(meta);
+  if (doorOpen(meta)) return { min: [0, 0, 0], size: xThin ? [1, 1, 0.2] : [0.2, 1, 1] };
+  if (xThin) return { min: side === 1 ? [0.8, 0, 0] : [0, 0, 0], size: [0.2, 1, 1] };
+  return { min: side === 1 ? [0, 0, 0.8] : [0, 0, 0], size: [1, 1, 0.2] };
+}
+
+/**
+ * For each FACES index: does the cell's geometry `reach` that cell-boundary plane, and if so
+ * the 2D `cov` coverage rect in that face's u/v space (derived from `FACES[f].axes` exactly
+ * like pushBox maps UVs). `reach === false` means the box end is INTERIOR to the cell, so the
+ * face never reaches the boundary plane and can never be cullled; `cov` is null in that case.
+ */
+function faceGeom(b: number, meta: number): FaceGeom[] {
+  const { min, size } = specialBox(b, meta);
+  const out: FaceGeom[] = [];
+  for (let f = 0; f < 6; f++) {
+    const axis = f >> 1; // 0:x, 1:y, 2:z
+    const reach = (f & 1) === 0 ? min[axis] + size[axis] >= 1 - EPS : min[axis] <= EPS;
+    let cov: Cov | null = null;
+    if (reach) {
+      const [au, av] = FACES[f].axes;
+      cov = { u0: min[au], u1: min[au] + size[au], v0: min[av], v1: min[av] + size[av] };
+    }
+    out.push({ reach, cov });
+  }
+  return out;
+}
+
+/** Does the `outer` rect cover the `inner` rect (within EPS on all four edges)? */
+function rectsCover(outer: Cov, inner: Cov): boolean {
+  return outer.u0 <= inner.u0 + EPS && outer.v0 <= inner.v0 + EPS
+    && outer.u1 >= inner.u1 - EPS && outer.v1 >= inner.v1 - EPS;
+}
+
+function rectsEqual(a: Cov, b: Cov): boolean {
+  return Math.abs(a.u0 - b.u0) <= EPS && Math.abs(a.u1 - b.u1) <= EPS
+    && Math.abs(a.v0 - b.v0) <= EPS && Math.abs(a.v1 - b.v1) <= EPS;
+}
+
+/** Lexicographic (x,y,z) cell order; true when `a` sorts strictly after `b`. */
+function indexGreater(a: [number, number, number], b: [number, number, number]): boolean {
+  for (let i = 0; i < 3; i++) if (a[i] !== b[i]) return a[i] > b[i];
+  return false;
+}
+
+/**
+ * A special block's face is hidden only when the box's end sits ON the cell-boundary plane
+ * of that face (interior ends are never culled — a thin door's far face is not deleted just
+ * because some opaque cell lies beyond it) AND the neighbouring cell covers the face's area:
+ * an opaque neighbour always covers; a special neighbour covers when its geometry reaches the
+ * SAME plane on its side AND its coverage rect covers mine (a strict superset). Exactly-equal
+ * coverage (two panels flush on one plane) keeps exactly ONE face: the smaller lexicographic
+ * cell keeps its face, the bigger culls its. `gb`/`gm` read the neighbour's block id / meta.
+ */
+const makeHidden = (
+  gb: (x: number, y: number, z: number) => number,
+  gm: (x: number, y: number, z: number) => number,
+  wx: number, wy: number, wz: number,
+  myB: number, myMeta: number,
+) => {
+  const myGeom = faceGeom(myB, myMeta);
+  return (f: number): boolean => {
+    const my = myGeom[f];
+    if (!my.reach) return false; // interior end: the face never reaches the boundary plane
     const d = FACES[f].dir;
-    const n = gb(wx + d[0], wy + d[1], wz + d[2]);
-    return isOpaque(n) || BLOCKS[n].kind !== 'cube';
+    const nx = wx + d[0], ny = wy + d[1], nz = wz + d[2];
+    const nB = gb(nx, ny, nz);
+    if (isOpaque(nB)) return true; // an opaque neighbour always covers a boundary face
+    if (BLOCKS[nB].kind === 'cube') return false; // air & transparent cubes never cover a special face
+    const nFace = faceGeom(nB, gm(nx, ny, nz))[f ^ 1]; // opposite face, same plane
+    if (!nFace.reach) return false; // the neighbour's geometry does not reach the shared plane
+    if (!rectsCover(nFace.cov!, my.cov!)) return false; // the face's area is not covered
+    return !rectsEqual(nFace.cov!, my.cov!) || indexGreater([wx, wy, wz], [nx, ny, nz]);
   };
+};
 
 /**
  * Partial-geometry box for special blocks (torch post/stub, door panel), written into
  * the opaque buffer. `min`/`size` are world-space (a box lives inside ONE cell, size
  * <= 1 per axis). `tiles` is per FACES order [+X, -X, +Y, -Y, +Z, -Z]; the tile is
  * stretched across the whole face — torch/door tiles are painted whole-material, so
- * the stretch still reads correctly on a 0.18-wide post. A face is hidden when the
- * neighbouring CELL in its direction is opaque OR special: a stub's back face vanishes
- * against its wall, and the two faces between stacked door halves (or a torch beside a
- * door) hide each other — the geometry at those boundaries never coincides, so no
- * coincident faces are culled — note that a facing face across a special-neighbour
- * gap can read see-through in narrow cases (accepted, per design). Shading =
- * FACE_SHADE[face]; no vertex AO on partial geometry.
+ * the stretch still reads correctly on a 0.18-wide post. A face is hidden only when the
+ * box's end for that face sits ON the cell-boundary plane AND the neighbour's geometry
+ * covers the face's area — see makeHidden: an opaque neighbour always covers; a special
+ * neighbour covers only when its own ends reach the same plane with an equal-or-larger
+ * coverage rect (equal coverage keeps exactly one face, by lexicographic cell order).
+ * Interior box ends are never culled, so a thin door's far face is not read as a slit.
+ * Shading = FACE_SHADE[face]; no vertex AO on partial geometry.
  */
 function pushBox(
   buf: Buf,
@@ -107,10 +194,11 @@ function pushBox(
 function emitTorch(
   buf: Buf,
   gb: (x: number, y: number, z: number) => number,
+  gm: (x: number, y: number, z: number) => number,
   wx: number, wy: number, wz: number,
   meta: number,
 ): void {
-  const hidden = makeHidden(gb, wx, wy, wz);
+  const hidden = makeHidden(gb, gm, wx, wy, wz, Block.Torch, meta);
   const face = torchFace(meta);
   if (face === 0) {
     pushBox(
@@ -144,10 +232,12 @@ function emitTorch(
 function emitDoor(
   buf: Buf,
   gb: (x: number, y: number, z: number) => number,
+  gm: (x: number, y: number, z: number) => number,
   wx: number, wy: number, wz: number,
   meta: number,
 ): void {
-  const hidden = makeHidden(gb, wx, wy, wz);
+  // Both halves emit the identical panel, so either door id yields the same geometry.
+  const hidden = makeHidden(gb, gm, wx, wy, wz, Block.DoorBottom, meta);
   const xThin = doorAxis(meta) === 0;
   const side = doorSide(meta);
   const tiles: [number, number, number, number, number, number] =
@@ -182,6 +272,12 @@ export function meshChunk(world: World, cx: number, cy: number, cz: number): Chu
     x >= bx && x < bx + 16 && y >= by && y < by + 16 && z >= bz && z < bz + 16
       ? chunk.blocks[localIndex(x - bx, y - by, z - bz)]
       : world.getBlock(x, y, z);
+  // Sibling of gb: the neighbour's meta byte (in-chunk fast path, else world.getMeta). Lets a
+  // special-block face be culled only when the neighbour's ACTUAL geometry covers it.
+  const gm = (x: number, y: number, z: number): number =>
+    x >= bx && x < bx + 16 && y >= by && y < by + 16 && z >= bz && z < bz + 16
+      ? chunk.meta[localIndex(x - bx, y - by, z - bz)]
+      : world.getMeta(x, y, z);
 
   for (let ly = 0; ly < 16; ly++) {
     for (let lz = 0; lz < 16; lz++) {
@@ -192,8 +288,8 @@ export function meshChunk(world: World, cx: number, cy: number, cz: number): Chu
         const wx = bx + lx, wy = by + ly, wz = bz + lz;
         if (kind !== 'cube') {
           // Special blocks are partial geometry, always in the opaque pass (never trans).
-          if (kind === 'torch') emitTorch(opaque, gb, wx, wy, wz, chunk.meta[localIndex(lx, ly, lz)]);
-          else emitDoor(opaque, gb, wx, wy, wz, chunk.meta[localIndex(lx, ly, lz)]);
+          if (kind === 'torch') emitTorch(opaque, gb, gm, wx, wy, wz, chunk.meta[localIndex(lx, ly, lz)]);
+          else emitDoor(opaque, gb, gm, wx, wy, wz, chunk.meta[localIndex(lx, ly, lz)]);
           continue;
         }
         const sOp = isOpaque(b);
