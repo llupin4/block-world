@@ -19,7 +19,7 @@ export type BlockKind = 'cube' | 'torch' | 'door';
 
 export interface BlockDef {
   name: string; // display name: palette rows, slot tooltips
-  solid: boolean;        // collides with player (doors: when CLOSED — open state via world.isSolid). The WATER SIM reads this same flag as UNCONDITIONALLY solid: a door blocks water even while open (PROJECT.md §16); player collision uses world.isSolid instead.
+  solid: boolean;        // solid to the WATER SIM (unconditionally — doors block water even while open; PROJECT.md §16); for doors this marks the closed state as well. Player collision uses world.isSolid, not this flag.
   transparent: boolean;  // culls neighbor faces? (never for torch/door — they are partial geometry)
   kind: BlockKind;
   /** tile indices, order [+X, -X, +Y, -Y, +Z, -Z]; see the atlas layout in main.ts. faces[2] doubles as the UI icon tile */

@@ -70,10 +70,10 @@ const makeHidden = (gb: (x: number, y: number, z: number) => number, wx: number,
  * the stretch still reads correctly on a 0.18-wide post. A face is hidden when the
  * neighbouring CELL in its direction is opaque OR special: a stub's back face vanishes
  * against its wall, and the two faces between stacked door halves (or a torch beside a
- * door) hide each other — the geometry at those boundaries never coincides, so
- * nothing that is visible to the player disappears (the special-special gap is
- * intentionally left open, per design). Shading = FACE_SHADE[face]; no vertex AO on
- * partial geometry.
+ * door) hide each other — the geometry at those boundaries never coincides, so no
+ * coincident faces are culled — note that a facing face across a special-neighbour
+ * gap can read see-through in narrow cases (accepted, per design). Shading =
+ * FACE_SHADE[face]; no vertex AO on partial geometry.
  */
 function pushBox(
   buf: Buf,

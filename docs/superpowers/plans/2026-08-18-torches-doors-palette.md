@@ -1195,7 +1195,7 @@ hotbar.onSelectChange = (i) => {
 };
 hotbar.onSlotChange = (i) => {
   placeIcon(hotbarSlotEls[i], hotbar.slots[i], 40); // the palette wrote into a slot
-  refreshPaletteSel(hotbar.slots[i]);
+  refreshPaletteSel(hotbar.block);
 };
 ```
 

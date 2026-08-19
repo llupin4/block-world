@@ -199,7 +199,12 @@ Edge cases accepted (POC):
   chunk streams back (data lives in the chunk);
 - no ceiling torches, no torch on a door face;
 - torches and doors are not placeable through water (target must be Air for
-  torches; doors over Water are allowed and dry it).
+  torches; doors over Water are allowed and dry it);
+- a torch whose support block is later broken stays mounted in mid-air (visual-only
+  blocks have no physics support check on edit; accepted for the POC);
+- placing a door pair while the partner cell's chunk is missing/unloaded: `setBlock`
+  no-ops on missing chunks, so a lone half can appear until the chunk streams back
+  (same family as the accepted streaming-orphan case).
 
 ## UI: scrollable palette (`index.html`, `src/ui.css`, `src/main.ts`)
 
@@ -256,8 +261,10 @@ Edge cases accepted (POC):
 | `TODO.md` | new Sky & lighting section (2 items) |
 | `PROJECT.md` | §16 special-blocks section; §15 pointer to TODO.md |
 
-`src/ui.ts` / `src/__tests__/ui.test.ts`, `src/water.ts` (core), `src/terrain.ts`,
-`src/streaming.ts`, `src/raycast.ts` are **unchanged**.
+`src/ui.ts` / `src/__tests__/ui.test.ts`, `src/water.ts` (core), `src/streaming.ts`,
+`src/raycast.ts` are **unchanged**; `src/terrain.ts` gains exactly one comment line — the
+fresh-chunk invariant ("must run only on fresh chunks — player's per-cell meta is not
+reset by generation").
 
 ## Verification
 
