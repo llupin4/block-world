@@ -8,6 +8,9 @@ import { meshChunk } from './chunk-mesher';
 import { Player, EYE, type MoveInput } from './player';
 import { raycastVoxel, REACH, type RayHit } from './raycast';
 import { WaterSim } from './water';
+import { WorldTime, formatClock } from './time';
+import { sampleSky, createSky } from './sky';
+import { createClouds } from './clouds';
 
 // === boot ===
 
@@ -19,13 +22,14 @@ app.append(renderer.domElement);
 // === scene ===
 
 const scene = new THREE.Scene();
-// T12: two "moods" — air (sky blue, faint distance fog) vs water (deep blue, dense fog).
-const BG_AIR = new THREE.Color(0x87ceeb);
+// T12: two "moods" — air vs water (submergence). The sky now paints both: the
+// air mood carries the time-of-day gradient sky (src/sky.ts), the water mood a
+// time-tinted deep blue (night underwater is darker). The mood still owns the
+// FOV squeeze and which fog/background objects are active.
 const BG_WATER = new THREE.Color(0x0a2a55);
 const FOG_AIR = new THREE.FogExp2(0xcfe8ff, 0.004);
 const FOG_WATER = new THREE.FogExp2(0x0a2a55, 0.35);
-scene.background = BG_AIR;
-scene.fog = FOG_AIR;
+renderer.setClearColor(0x101a33); // fallback clear (night horizon): the sky dome covers every pixel anyway
 const camera = new THREE.PerspectiveCamera(70, 1, 0.1, 512);
 const FOV_AIR = 70; // must equal the perspective camera fov above
 const FOV_WATER = 62;
@@ -186,6 +190,15 @@ const matTrans = new THREE.MeshBasicMaterial({
   depthWrite: false,
   side: THREE.DoubleSide, // lets water be seen from under-side/side as well
 });
+
+// === sky ===
+// World time is world state: advanced in the fixed substep loop below, then
+// sampled per frame for the sky (src/sky.ts) and clouds (src/clouds.ts).
+const worldTime = new WorldTime();
+const sky = createSky(scene, matOpaque, matTrans, FOG_AIR, FOG_WATER, BG_WATER);
+const clouds = createClouds(scene);
+const clockEl = document.getElementById('clock')!;
+let clockLabel = '';
 
 // === world-state ===
 
@@ -712,16 +725,15 @@ function tickStreaming(): void {
 
 // === water-fx ===
 
-// T12: when the eye voxel is water, the whole scene swaps to the water mood — background,
-// fog, and a slight FOV squeeze, in one frame, in both directions. Driven by
-// player.headInWater (T7 samples it each physics step); called per frame below.
+// T12: when the eye voxel is water the whole scene swaps to the water mood —
+// the FOV squeeze here; the time-driven sky (sky.apply) paints whichever
+// background/fog is active, in both moods. Driven by player.headInWater
+// (T7 samples it each physics step); called per frame below.
 let waterFx: 'air' | 'water' = 'air';
 function syncWaterFx(): void {
   const m: 'air' | 'water' = player.headInWater ? 'water' : 'air';
   if (m === waterFx) return; // stable: one swap per (de)submersion, not per frame
   waterFx = m;
-  scene.background = m === 'water' ? BG_WATER : BG_AIR;
-  scene.fog = m === 'water' ? FOG_WATER : FOG_AIR;
   camera.fov = m === 'water' ? FOV_WATER : FOV_AIR;
   camera.updateProjectionMatrix(); // a fov change only reaches the GPU via this call
 }
@@ -757,6 +769,7 @@ function frame(now: number): void {
   while (acc >= STEP) {
     acc -= STEP;
     player.update(STEP, readMove());
+    worldTime.advance(STEP);
     tickStreaming();
     if (player.pos.y < WORLD_Y_MIN) player.place(SPAWN); // fell out of the world (open cave / dug-away floor)
   }
@@ -776,6 +789,14 @@ function frame(now: number): void {
   syncCamera();
   updateHitbox();
   syncWaterFx();
+  const skySample = sampleSky(worldTime.dayPhase);
+  sky.apply(skySample, waterFx, camera);
+  clouds.update(camera.position.x, camera.position.z, worldTime.time, skySample.worldDim);
+  const label = formatClock(worldTime.day, worldTime.hour);
+  if (label !== clockLabel) {
+    clockLabel = label;
+    clockEl.textContent = label;
+  }
   renderer.render(scene, camera);
   requestAnimationFrame(frame);
 }

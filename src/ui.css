@@ -17,6 +17,17 @@ html, body { width: 100%; height: 100%; overflow: hidden; background: #0b0e14; }
 #crosshair::before { left: 50%; top: 0; width: 2px; height: 100%; transform: translateX(-50%); }
 #crosshair::after { top: 50%; left: 0; height: 2px; width: 100%; transform: translateY(-50%); }
 
+/* day/night clock: top-left (the top-right corner belongs to the palette strip) */
+#clock {
+  position: fixed; top: 12px; left: 12px;
+  padding: 5px 9px;
+  background: rgba(10, 14, 22, .55); border-radius: 6px;
+  color: #e8eef7;
+  font: 12px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace;
+  text-shadow: 0 1px 2px #000;
+  pointer-events: none;
+}
+
 /* hotbar: bottom-center, display-only (T11 fills it); palette: right strip, scrolling rows (icon + name), click targets */
 #hotbar {
   position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%);
