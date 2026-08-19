@@ -36,8 +36,13 @@ export function cloudCoverage(wx: number, wz: number, windX: number, windZ: numb
   return noise2D((wx + CELL / 2 + windX) / WAVE, (wz + CELL / 2 + windZ) / WAVE);
 }
 
-/** Pure: which of the WINDOW×WINDOW cells (row = +z) draw, for the window anchored at (ax, az) — both multiples of CELL. */
+/** Pure: which of the WINDOW×WINDOW cells (row = +z) draw, for the window anchored at (ax, az). Throws if the anchor is not a multiple of CELL — a misaligned anchor would break the world-lock (seam pops). */
 export function cloudMask(ax: number, az: number, windX: number, windZ: number): boolean[] {
+  const axRem = ((ax % CELL) + CELL) % CELL;
+  const azRem = ((az % CELL) + CELL) % CELL;
+  if (axRem !== 0 || azRem !== 0) {
+    throw new Error(`cloudMask: anchor (${ax}, ${az}) must be a multiple of CELL (${CELL})`);
+  }
   const out: boolean[] = [];
   for (let j = 0; j < WINDOW; j++)
     for (let i = 0; i < WINDOW; i++)

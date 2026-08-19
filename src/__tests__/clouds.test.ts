@@ -39,4 +39,33 @@ describe('clouds (pure coverage)', () => {
     expect(wx1).toBeGreaterThan(wx0);
     expect(wz1).toBeGreaterThan(wz0);
   });
+
+  it('cloudMask rejects anchors that are not CELL multiples (seam guard)', () => {
+    expect(() => cloudMask(2, 0, 0, 0)).toThrow();
+    expect(() => cloudMask(0, -2, 0, 0)).toThrow();
+    expect(() => cloudMask(-4, 8, 0, 0)).not.toThrow();
+    expect(() => cloudMask(8, -4, 0, 0)).not.toThrow();
+  });
+
+  it('re-anchoring: the whole shared overlap agrees, not just one column', () => {
+    const a = cloudMask(-4, 0, 7.3, 2.1);
+    const b = cloudMask(0, 0, 7.3, 2.1);
+    for (let j = 0; j < WINDOW; j++)
+      for (let i = 1; i < WINDOW; i++)
+        expect(a[j * WINDOW + i], `shared col ${i}, row ${j}`).toBe(b[j * WINDOW + i - 1]);
+  });
+
+  it('coverage is world-locked at the continuous value (not just the mask bit)', () => {
+    const shared = -4 + 23 * CELL; // 88: world cell shared by both windows below
+    const wz = 5 * CELL;
+    expect(cloudCoverage(shared, wz, 7.3, 2.1)).toBe(cloudCoverage(22 * CELL, wz, 7.3, 2.1));
+  });
+
+  it('drift via the windAt seam changes the mask (the interface main.ts will call)', () => {
+    const [wx0, wz0] = windAt(0);
+    const [wx1, wz1] = windAt(2000);
+    const a = cloudMask(0, 0, wx0, wz0);
+    const b = cloudMask(0, 0, wx1, wz1);
+    expect(a.some((v, i) => v !== b[i])).toBe(true);
+  });
 });
