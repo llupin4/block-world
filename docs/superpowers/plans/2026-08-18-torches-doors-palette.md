@@ -92,7 +92,7 @@ Post-plan user-feedback rounds (in-browser pass, 2026-08-18):
      punched in 0.2-thin panels next to torches/doors/far-side walls. Every
      door/torch face now carries its texture from any view angle.
 
-10. **Door axis follows the player's facing** (commit `<TBD>`): the door's thin axis
+10. **Door axis follows the player's facing** (commit `bed9f5b`): the door's thin axis
     no longer comes from the aimed wall face — it now comes from the player's level
     facing (the XZ-projected camera world direction, `(-sin yaw, -cos yaw)`, via the
     new pure `doorPlacementFromView(fx, fz, nx, nz)` in `src/blocks.ts`), so the
