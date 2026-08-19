@@ -61,6 +61,7 @@ import * as THREE from 'three';
 
 export interface Clouds {
   update(camX: number, camZ: number, timeSec: number, dim: number): void;
+  setVisible(visible: boolean): void; // the water mood hides the whole layer
 }
 
 /**
@@ -133,6 +134,9 @@ export function createClouds(scene: THREE.Scene): Clouds {
       // dim ∈ [0.33, 1] (0.33 is the sky's night floor); clamp guards a future mood
       const dtn = Math.max(0, Math.min(1, (1 - dim) / (1 - 0.33)));
       mat.color.copy(day).lerp(night, dtn);
+    },
+    setVisible(visible) {
+      mesh.visible = visible;
     },
   };
 }
