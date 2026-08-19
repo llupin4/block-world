@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { Block } from '../blocks';
+import { Block, torchMeta, doorMeta } from '../blocks';
 import { World, chunkOf, chunkKey } from '../world';
 import { WaterSim } from '../water';
 import { TerrainGen, generateRegion, SEA_LEVEL, TERRAIN_SEED } from '../terrain';
@@ -576,6 +576,28 @@ w.setBlock(4, 4, 4, Block.Water);
     sim.edit(4, 4, 4, Block.Stone);
     expect(sim.cellState(4, 4, 4)).toEqual({ b: Block.Stone, l: 0, s: 0, p: 0, st: 0 });
 });
+
+  it('replacing or breaking special blocks (torch/door) dries the cell like any solid — no sim special case needed', () => {
+    const w = makeWorld([[0, 0, 0]]);
+    slab(w, Block.Stone, 0, 15, 0, 0, 15); // floor at y=0
+    const sim = new WaterSim(w);
+    w.setBlock(8, 1, 8, Block.Water); sim.edit(8, 1, 8, Block.Water);
+    w.setBlock(9, 1, 8, Block.Water); sim.edit(9, 1, 8, Block.Water);
+    sim.settle(0, 0, 0);
+    drain(sim);
+    expect(sim.cellState(8, 1, 8).b).toBe(Block.Water);
+    // a torch takes the cell: its water state is gone, nothing regrows it
+    w.setBlock(8, 1, 8, Block.Torch, torchMeta(0));
+    sim.edit(8, 1, 8, Block.Torch);
+    drain(sim);
+    expect(sim.cellState(8, 1, 8)).toEqual({ b: Block.Torch, l: 0, s: 0, p: 0, st: 0 });
+    // a closed door takes the neighbouring cell the same way
+    w.setBlock(9, 1, 8, Block.DoorBottom, doorMeta(false, 0));
+    sim.edit(9, 1, 8, Block.DoorBottom);
+    drain(sim);
+    expect(sim.cellState(9, 1, 8)).toEqual({ b: Block.DoorBottom, l: 0, s: 0, p: 0, st: 0 });
+    assertInvariants(w);
+  });
 
   it('a placed source alone in the sky never falls or dries: it stays a static block with its drip running off each exposed side, and its side columns rest on the void at the world floor (stable, no per-pulse blink)', () => {
     const w = makeWorld([[0, 0, 0]]);
