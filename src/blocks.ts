@@ -110,3 +110,19 @@ export function doorSide(meta: number): number {
 export function isDoor(b: number): boolean {
   return b === Block.DoorBottom || b === Block.DoorTop;
 }
+
+/** Door axis (0 = panel thin in X, 1 = thin in Z) from the player's LEVEL FACING so the
+ * closed panel's wide face is perpendicular to where the player is looking (covers a
+ * hallway they're facing down); side (0 = min edge, 1 = max edge of the thin axis) from
+ * the aimed-face normal along the thin axis (a -X/aimed-far-side -> side 1). If the
+ * level facing is degenerate (looking straight down), fall back to the aimed normal. */
+export function doorPlacementFromView(fx: number, fz: number, nx: number, nz: number): { axis: 0 | 1; side: 0 | 1 } {
+  let axis: 0 | 1;
+  if (Math.abs(fx) >= 1e-3 || Math.abs(fz) >= 1e-3) {
+    axis = Math.abs(fx) >= Math.abs(fz) ? 0 : 1;
+  } else {
+    axis = nz !== 0 ? 1 : 0;
+  }
+  const side = (axis === 1 ? nz : nx) < 0 ? 1 : 0;
+  return { axis, side };
+}

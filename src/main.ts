@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import { Block, BLOCKS, isOpaque, PLACEABLE, iconPosition, torchMeta, doorMeta, doorOpen, doorAxis, doorSide, isDoor } from './blocks';
+import { Block, BLOCKS, isOpaque, PLACEABLE, iconPosition, torchMeta, doorMeta, doorOpen, doorAxis, doorSide, isDoor, doorPlacementFromView } from './blocks';
 import { World, chunkKey, chunkOf, CHUNK_SIZE, WORLD_Y_MAX, WORLD_Y_MIN, type VoxelBuffer } from './world';
 import { TERRAIN_SEED, TerrainGen, generateChunkTerrain } from './terrain';
 import * as streaming from './streaming';
@@ -389,6 +389,9 @@ function castFromCamera(springs: boolean): RayHit | null {
   return raycastVoxel(world, camera.position, dir, REACH, springs ? springTarget : undefined);
 }
 
+// Scratch vector: the door-placement branch projects this to the level (XZ) facing.
+const _doorFwd = new THREE.Vector3();
+
 // Placement-support normal -> torch meta face: +Y = 0 (floor post), +X = 1, -X = 2,
 // +Z = 3, -Z = 4. A -Y normal (ceiling) is rejected by the caller.
 function torchFaceFromNormal(nx: number, ny: number, nz: number): number {
@@ -502,12 +505,21 @@ function onMouseDown(e: MouseEvent): void {
       if (target !== Block.Air && target !== Block.Water) return;
       if (above !== Block.Air && above !== Block.Water) return;
       if (!player.noclip && (player.intersectsVoxel(tx, ty, tz) || player.intersectsVoxel(tx, ty + 1, tz))) return;
-      // +/-X face or a floor face -> the panel is thin in X; +/-Z face -> thin in Z.
-      // The panel hinges on the support-facing edge: for -X/-Z aimed normals the
-      // support sits on the target cell's max edge (side 1), otherwise min edge (side 0).
-      const thinInZ = hit.nz !== 0;
-      const side = (thinInZ ? hit.nz : hit.nx) < 0 ? 1 : 0;
-      const meta = doorMeta(false, thinInZ ? 1 : 0, side);
+      // Axis from the player's LEVEL FACING: the wide panel face goes perpendicular to
+      // the look direction (the XZ-projected camera world direction, normalized), so a
+      // door placed while facing down a hall covers it. Projecting collapses to 0 when
+      // aiming straight down, where doorPlacementFromView falls back to the aimed
+      // normal — the old face-based rule. The side (hinge edge) still comes from the
+      // aimed-face normal along the thin axis, so the panel hugs the side it was aimed
+      // against.
+      camera.getWorldDirection(_doorFwd);
+      const horiz = Math.hypot(_doorFwd.x, _doorFwd.z);
+      const { axis, side } = doorPlacementFromView(
+        horiz >= 1e-3 ? _doorFwd.x / horiz : 0,
+        horiz >= 1e-3 ? _doorFwd.z / horiz : 0,
+        hit.nx, hit.nz,
+      );
+      const meta = doorMeta(false, axis, side);
       world.setBlock(tx, ty, tz, Block.DoorBottom, meta);
       world.setBlock(tx, ty + 1, tz, Block.DoorTop, meta);
       remeshAround(tx, ty, tz);

@@ -92,6 +92,17 @@ Post-plan user-feedback rounds (in-browser pass, 2026-08-18):
      punched in 0.2-thin panels next to torches/doors/far-side walls. Every
      door/torch face now carries its texture from any view angle.
 
+10. **Door axis follows the player's facing** (commit `<TBD>`): the door's thin axis
+    no longer comes from the aimed wall face — it now comes from the player's level
+    facing (the XZ-projected camera world direction, `(-sin yaw, -cos yaw)`, via the
+    new pure `doorPlacementFromView(fx, fz, nx, nz)` in `src/blocks.ts`), so the
+    closed panel's wide face sits perpendicular to the look direction and covers a
+    hallway built in that direction. The old face-based rule mis-oriented the panel
+    (perpendicular to the hall) whenever the crosshair landed on a side wall or the
+    floor. The hinge `side` still derives from the aimed normal along the thin axis
+    (the panel still hugs the side it was aimed against); a straight-down aim
+    (degenerate facing) falls back to the aimed normal.
+
 ---
 
 ### Task 1: Block registry — new ids, names, kinds, meta helpers
@@ -1401,12 +1412,20 @@ function onMouseDown(e: MouseEvent): void {
       if (target !== Block.Air && target !== Block.Water) return;
       if (above !== Block.Air && above !== Block.Water) return;
       if (!player.noclip && (player.intersectsVoxel(tx, ty, tz) || player.intersectsVoxel(tx, ty + 1, tz))) return;
-      // +/-X face or a floor face -> the panel is thin in X; +/-Z face -> thin in Z
-      // (revision 3224a9a): side = which edge of the target cell the support sits on,
-      // from the aim normal (-X or -Z aim -> far edge -> side 1)
-      const thinInZ = hit.nz !== 0;
-      const side = (thinInZ ? hit.nz : hit.nx) < 0 ? 1 : 0;
-      const meta = doorMeta(false, thinInZ ? 1 : 0, side);
+      // Axis from the player's LEVEL FACING (the XZ-projected camera world
+      // direction, normalized), so the wide panel face is perpendicular to the look
+      // direction — a door placed while facing down a hall covers it.
+      // doorPlacementFromView falls back to the aimed normal when aiming straight
+      // down (the old face-based rule); the side (hinge edge) still comes from the
+      // aim normal along the thin axis (-X/-Z aim -> far edge -> side 1).
+      camera.getWorldDirection(_doorFwd);
+      const horiz = Math.hypot(_doorFwd.x, _doorFwd.z);
+      const { axis, side } = doorPlacementFromView(
+        horiz >= 1e-3 ? _doorFwd.x / horiz : 0,
+        horiz >= 1e-3 ? _doorFwd.z / horiz : 0,
+        hit.nx, hit.nz,
+      );
+      const meta = doorMeta(false, axis, side);
       world.setBlock(tx, ty, tz, Block.DoorBottom, meta);
       world.setBlock(tx, ty + 1, tz, Block.DoorTop, meta);
       remeshAround(tx, ty, tz);

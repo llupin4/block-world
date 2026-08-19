@@ -178,9 +178,13 @@ targets them and RMB's existing face math already yields the mount cell.
    both be Air **or** Water (water cells are dried by `sim.edit` on
    placement), `T+1 < WORLD_Y_MAX`, and neither cell may intersect the
 player's AABB (while closed the door is a full solid block in both
-    cells). Axis from the face: `±X → X-thin`, `±Z → Z-thin`, floor (`+Y`) →
-    X-thin. Side from the aim: aim along a `−X` or `−Z` face → side 1 (support
-    on the target's far edge), otherwise side 0. Writes `DoorBottom`@`T`,
+     cells). Axis from the player's **level facing** — the dominant component of
+     `(-sin yaw, -cos yaw)`, i.e. the XZ-projected look direction — so the wide,
+     flat panel face sits perpendicular to where the player is looking and covers
+     the hallway they're facing down; a straight-down aim (degenerate facing) falls
+     back to the aimed face's normal (the old rule). Side from the aimed normal
+     along the thin axis: a `−X`/`−Z` aim → side 1 (support on the target's far
+     edge), otherwise side 0. Writes `DoorBottom`@`T`,
     `DoorTop`@`T+1`, both with `packDoorMeta(open=false, axis, side)`;
     `sim.edit` on both cells.
 4. **Hold a normal block** `B`: `T` may be Air, Water, **Torch** (the torch

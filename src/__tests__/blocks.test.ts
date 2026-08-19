@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest';
 import {
   Block, BLOCKS, isOpaque, PLACEABLE, iconPosition,
   torchMeta, torchFace, doorMeta, doorOpen, doorAxis, doorSide, isDoor,
+  doorPlacementFromView,
 } from '../blocks';
 
 describe('blocks', () => {
@@ -121,5 +122,21 @@ describe('blocks', () => {
     expect(doorSide(doorMeta(true, 1, 1))).toBe(1); // side survives the open+axis bits
     for (const axis of [0, 1])
       expect(doorSide(doorMeta(false, axis)), `two-arg axis ${axis}`).toBe(0); // default side 0
+  });
+
+  it('doorPlacementFromView: axis follows the player facing, side the aim normal', () => {
+    // facing +X (level) with the aim on any wall/floor axis is X-thin: the wide, flat
+    // face stays perpendicular to travel so it covers an X hallway.
+    expect(doorPlacementFromView(1, 0, 0, 0)).toEqual({ axis: 0, side: 0 }); // aim floor
+    expect(doorPlacementFromView(1, 0, 0, 1)).toEqual({ axis: 0, side: 0 }); // aim +Z side wall (the old bug flipped this to Z)
+    expect(doorPlacementFromView(1, 0, -1, 0)).toEqual({ axis: 0, side: 1 }); // aim -X side wall -> hinges on the far edge
+    // facing +Z -> Z-thin, regardless of what it happens to hit
+    expect(doorPlacementFromView(0, 1, 0, 0)).toEqual({ axis: 1, side: 0 }); // aim floor
+    expect(doorPlacementFromView(0, 1, 0, -1)).toEqual({ axis: 1, side: 1 }); // aim -Z wall
+    // diagonal facing: dominant component (a tie breaks toward X). fx===fz -> axis 0
+    expect(doorPlacementFromView(0.707, 0.707, 0, 0).axis).toBe(0); // NE -> X
+    expect(doorPlacementFromView(0.707, -0.707, 0, 0)).toEqual({ axis: 0, side: 0 }); // SE -> X (aim floor)
+    // degenerate level facing (looking straight down) -> fall back to the aimed normal, the old rule
+    expect(doorPlacementFromView(0, 0, 0, -1)).toEqual({ axis: 1, side: 1 }); // aim -Z wall
   });
 });
