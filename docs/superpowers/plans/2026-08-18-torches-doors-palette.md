@@ -14,6 +14,68 @@
 
 ---
 
+## Execution notes (2026-08-18, branch `feat/torches-doors-palette`)
+
+All 9 tasks implemented subagent-driven from `ba4612e`. Automated verification green at the
+end of Task 9: `npm test` → 10 files / 95 tests; `npm run build` (tsc + vite) clean.
+The Task 9 manual in-browser pass (Step 3) is pending — run `npm run dev` and drive
+the checklist; extra edges to look for (from the Task 7 review): water standing
+beside/above a door **stays put when the door is opened** (water sim keeps the flat
+per-id `solid` truth — POC-accepted asymmetry, PROJECT.md §16); toggle a door half
+whose partner sits in a chunk that streams out, walk away and back — the partner may
+show the stale state until the next toggle (id-matched, self-normalizing); break/
+toggle a pair across a y-band chunk seam (y≡15/0) and confirm both halves move
+atomically (wireframe `C`); a falling column landing exactly on a torch cell leaves
+a cosmetic sheet resting on the thin post.
+
+Per-task commits (plan → code → fixes):
+
+| Task | Commits |
+|------|---------|
+| 1 registry | `b2943a5`, `0a0482b`, (doc reconciliations in `840b802`) |
+| 2 world meta | `1b7fa21`, `51915d7` |
+| 3 player isSolidAt | `3ee196d`, `13cc93d` |
+| 4 mesher | `91d4eb8`, `270b90a` (plan fixup), `c8b7c98` |
+| 5 water pin | `8e34e02` |
+| 6 visuals | `0963485`, `6486135` (plan fixup), `65d1ed2` |
+| 7 interactions | `0e83183` |
+| 8 docs | `7592a18`, `3158e1d` (PROJECT.md wording fix) |
+
+Deviations from the written plan, all reconciled (plan/spec text patched so it now
+matches the code):
+
+1. **`DoorTop.name` = `'doorTop'`**, not `'door'` (Task 1): the plan's uniqueness test
+   demanded 13 distinct names while naming both halves `'door'`. DoorTop is internal
+   (never UI-visible), so it got its own name.
+2. **`world.isSolid` cube fallback = `isOpaque`, not `BLOCKS[.].solid`** (Task 2):
+   the plan's comment "solid == opaque on every kind" was false for leaves/glass
+   (`solid:true` for the water sim, walkable for the player). Keeping `isOpaque`
+   preserves legacy gameplay; the rule is documented in `world.isSolid`'s docblock
+   and pinned by tests (leaves/glass → `isSolid` false).
+3. **Task 3 red phase** failed behaviorally (player walks through the "closed" door)
+   rather than with the anticipated TS arity error — vitest transpiles without
+   typechecking, so the extra ctor arg was silently ignored.
+4. **Task 4 wall-torch UV test**: the plan checked the stub tip's flame uvs at
+   indices 0..7; impossible, because the supporting stone emits before the torch
+   (buffer order ly→lz→lx) — the tip sits at global verts 24..27 (uv u indices
+   48..54). Test corrected in place (and in the plan, `270b90a`).
+5. **Task 4 tuple annotations**: the plan's bare `const tiles = [...]` infers
+   `number[]` and would fail `tsc` against `pushBox`'s 6-tuple parameter — the
+   implementation adds explicit tuple annotations (type-only).
+6. **Task 6 scrollbar styling**: the design spec's file table requires in-panel
+   scrollbar styling but the plan never had a step for it — re-added as plan Edit C
+   (`6486135`) and implemented with the review fixes (`65d1ed2`), which also
+   ellipsize the name cell and unify `refreshPaletteSel` on `hotbar.block`.
+7. **`doorPartner` matches on block id only** (Task 7; spec said "same axis"): the
+   looser check is strictly better — placement/toggle always write identical meta to
+   both halves, and a next toggle self-normalizes a corrupted partner.
+8. **Task 8 §15 lines adapted** to PROJECT.md's actual wording; the torch placement
+   bullet was corrected to "aimed cell empty, backed by a solid opaque face"
+   (`water/door/glass/leaves rejected`) — the plan's "air above the target"
+   phrasing did not match the real floor-case rule.
+
+---
+
 ### Task 1: Block registry — new ids, names, kinds, meta helpers
 
 **Files:**
