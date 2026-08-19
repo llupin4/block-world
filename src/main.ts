@@ -273,7 +273,12 @@ function removeChunkMesh(cx: number, cy: number, cz: number): void {
 // === camera ===
 
 // Camera = the player's eyes (feet + EYE). Rotation order YXZ: yaw first, then pitch.
-const player = new Player((x, y, z) => world.getBlock(x, y, z));
+// Second callback: collision reads WORLD STATE (open doors walkable, closed doors solid) —
+// the flat per-id rule in BLOCKS cannot see door open/closed meta.
+const player = new Player(
+  (x, y, z) => world.getBlock(x, y, z),
+  (x, y, z) => world.isSolid(x, y, z),
+);
 player.place(SPAWN);
 player.yaw = -Math.PI / 2; // face +x (east), at the sea — the shoreline starts ~6 m from spawn
 camera.rotation.order = 'YXZ';
@@ -384,6 +389,47 @@ function castFromCamera(springs: boolean): RayHit | null {
   return raycastVoxel(world, camera.position, dir, REACH, springs ? springTarget : undefined);
 }
 
+// Placement-support normal -> torch meta face: +Y = 0 (floor post), +X = 1, -X = 2,
+// +Z = 3, -Z = 4. A -Y normal (ceiling) is rejected by the caller.
+function torchFaceFromNormal(nx: number, ny: number, nz: number): number {
+  if (ny > 0) return 0;
+  if (nx > 0) return 1;
+  if (nx < 0) return 2;
+  if (nz > 0) return 3;
+  return 4; // -Z
+}
+
+/** The other half of the door at (x, y, z), or null (an orphaned half). */
+function doorPartner(x: number, y: number, z: number): [number, number, number] | null {
+  const b = world.getBlock(x, y, z);
+  if (b === Block.DoorBottom && world.getBlock(x, y + 1, z) === Block.DoorTop) return [x, y + 1, z];
+  if (b === Block.DoorTop && world.getBlock(x, y - 1, z) === Block.DoorBottom) return [x, y - 1, z];
+  return null;
+}
+
+/** Right-click on a door: flip open/closed on BOTH halves, keeping the axis (instant snap). */
+function toggleDoorPair(x: number, y: number, z: number): void {
+  const b = world.getBlock(x, y, z);
+  const meta = doorMeta(!doorOpen(world.getMeta(x, y, z)), doorAxis(world.getMeta(x, y, z)));
+  world.setBlock(x, y, z, b, meta);
+  remeshAround(x, y, z);
+  const p = doorPartner(x, y, z);
+  if (p) {
+    // the partner's block id is unchanged by the toggle; its meta is forced to match
+    world.setBlock(p[0], p[1], p[2], world.getBlock(p[0], p[1], p[2]), meta);
+    remeshAround(p[0], p[1], p[2]);
+  }
+}
+
+/** Remove ONLY the partner half of the door at (x, y, z); the caller handles that cell itself. */
+function clearDoorPartner(x: number, y: number, z: number): void {
+  const p = doorPartner(x, y, z);
+  if (!p) return;
+  world.setBlock(p[0], p[1], p[2], Block.Air);
+  remeshAround(p[0], p[1], p[2]);
+  sim.edit(p[0], p[1], p[2], Block.Air);
+}
+
 // Rebuild the edited cell's chunk, plus — when the cell sits on a chunk face — the
 // touched neighbor, so faces on the shared border are regenerated (setBlock only
 // marks data dirty; the static build has no dirty consumer until T10's streaming scan).
@@ -409,25 +455,71 @@ function onMouseDown(e: MouseEvent): void {
   if (e.button === 0) {
     const hit = castFromCamera(true); // break targeting: placed springs are targetable
     if (!hit) return;
-    // `hit` is a breakable solid or a placed spring (the only targetable water —
-    // see castFromCamera). Breaking a spring removes the emitter: the flow it fed
-    // re-derives to air through the dirty closure, so the player can always stop a flood.
+    // `hit` is a breakable solid, a torch, a door half (breaks as a PAIR — the partner
+    // is cleared first, while the aimed cell still identifies it), or a placed spring
+    // (the only targetable water — see castFromCamera).
+    const hb = world.getBlock(hit.x, hit.y, hit.z);
+    if (isDoor(hb)) clearDoorPartner(hit.x, hit.y, hit.z);
     world.setBlock(hit.x, hit.y, hit.z, Block.Air);
     remeshAround(hit.x, hit.y, hit.z);
-    sim.edit(hit.x, hit.y, hit.z, Block.Air); // clears the cell's water state + re-marks dependents (source/support removed)
+    sim.edit(hit.x, hit.y, hit.z, Block.Air); // clears the cell's water state + re-marks dependents
   } else if (e.button === 2) {
     const hit = castFromCamera(false); // place targeting: water stays pass-through
     if (!hit) return;
+    const hb = world.getBlock(hit.x, hit.y, hit.z);
     const tx = hit.x + hit.nx;
     const ty = hit.y + hit.ny;
     const tz = hit.z + hit.nz;
     if (ty < WORLD_Y_MIN || ty >= WORLD_Y_MAX) return;
     const target = world.getBlock(tx, ty, tz);
-    if (target !== Block.Air && target !== Block.Water) return; // empty or water (filling pools)
-    if (!player.noclip && player.intersectsVoxel(tx, ty, tz)) return; // no placing through yourself
-    world.setBlock(tx, ty, tz, hotbar.block);
+    const held = hotbar.block;
+
+    // 1) A door under the crosshair TOGGLES — always wins over placement.
+    if (isDoor(hb)) {
+      toggleDoorPair(hit.x, hit.y, hit.z);
+      return;
+    }
+
+    // 2) Torch: AIR target + a solid opaque face behind it. No water, no ceilings,
+    //    no door faces (doors are not opaque -> invalid support), no mid-air.
+    if (held === Block.Torch) {
+      if (target !== Block.Air) return;
+      if (hit.ny < 0) return;
+      if (!isOpaque(hb)) return;
+      if (!player.noclip && player.intersectsVoxel(tx, ty, tz)) return;
+      world.setBlock(tx, ty, tz, Block.Torch, torchMeta(torchFaceFromNormal(hit.nx, hit.ny, hit.nz)));
+      remeshAround(tx, ty, tz);
+      sim.edit(tx, ty, tz, Block.Torch);
+      return;
+    }
+
+    // 3) Door: both cells clearable (Air or Water — water dries on placement), within
+    //    height, not overlapping the player in either cell.
+    if (held === Block.DoorBottom) {
+      if (ty + 1 >= WORLD_Y_MAX) return;
+      const above = world.getBlock(tx, ty + 1, tz);
+      if (target !== Block.Air && target !== Block.Water) return;
+      if (above !== Block.Air && above !== Block.Water) return;
+      if (!player.noclip && (player.intersectsVoxel(tx, ty, tz) || player.intersectsVoxel(tx, ty + 1, tz))) return;
+      // +/-X face or a floor face -> the panel is thin in X; +/-Z face -> thin in Z
+      const meta = doorMeta(false, hit.nz !== 0 ? 1 : 0);
+      world.setBlock(tx, ty, tz, Block.DoorBottom, meta);
+      world.setBlock(tx, ty + 1, tz, Block.DoorTop, meta);
+      remeshAround(tx, ty, tz);
+      remeshAround(tx, ty + 1, tz);
+      sim.edit(tx, ty, tz, Block.DoorBottom);
+      sim.edit(tx, ty + 1, tz, Block.DoorTop);
+      return;
+    }
+
+    // 4) A plain block may replace Air/Water, a TORCH (meta clears with it), or a DOOR
+    //    (the whole pair is removed first). Player-overlap guard before any removal.
+    if (target !== Block.Air && target !== Block.Water && target !== Block.Torch && !isDoor(target)) return;
+    if (!player.noclip && player.intersectsVoxel(tx, ty, tz)) return;
+    if (isDoor(target)) clearDoorPartner(tx, ty, tz);
+    world.setBlock(tx, ty, tz, held); // meta = 0 clears any torch state in the cell
     remeshAround(tx, ty, tz);
-    sim.edit(tx, ty, tz, hotbar.block); // Water → a level-7 source; any other block dries this cell (surrounding water re-relaxes on the next tick)
+    sim.edit(tx, ty, tz, held); // Water -> a level-7 source; any other block dries this cell
   }
 }
 
