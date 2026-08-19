@@ -789,6 +789,7 @@ function frame(now: number): void {
   syncCamera();
   updateHitbox();
   syncWaterFx();
+  clouds.setVisible(waterFx === 'air');
   const skySample = sampleSky(worldTime.dayPhase);
   sky.apply(skySample, waterFx, camera);
   clouds.update(camera.position.x, camera.position.z, worldTime.time, skySample.worldDim);
