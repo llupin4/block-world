@@ -78,7 +78,10 @@ export function iconPosition(b: Block, px: number): string {
 // Torch meta: 0 = a floor post; a wall stub is 1 | (face << 1) where `face` is the
 // normal of the support face the player aimed at: 1:+X, 2:-X, 3:+Z, 4:-Z (no ceilings).
 // Door meta (stored in BOTH halves, identical): bit 0 = open, bit 1 = axis
-// (0 = panel thin in X, 1 = panel thin in Z).
+// (0 = panel thin in X, 1 = panel thin in Z), bit 2 = side (0 = the panel hinges on
+// the thin axis's MIN edge of the cell, 1 = its MAX edge). The closed panel hugs that
+// edge, flush against the support wall the player aimed at; the open state is the SAME
+// full-size panel swung 90 degrees about the hinge corner — never clamped.
 
 export function torchMeta(face: number): number {
   return face === 0 ? 0 : 1 | (face << 1);
@@ -88,8 +91,8 @@ export function torchFace(meta: number): number {
   return meta === 0 ? 0 : (meta >> 1) & 7;
 }
 
-export function doorMeta(open: boolean, axis: number): number {
-  return (open ? 1 : 0) | ((axis & 1) << 1);
+export function doorMeta(open: boolean, axis: number, side = 0): number {
+  return (open ? 1 : 0) | ((axis & 1) << 1) | ((side & 1) << 2);
 }
 
 export function doorOpen(meta: number): boolean {
@@ -98,6 +101,10 @@ export function doorOpen(meta: number): boolean {
 
 export function doorAxis(meta: number): number {
   return (meta >> 1) & 1;
+}
+
+export function doorSide(meta: number): number {
+  return (meta >> 2) & 1;
 }
 
 export function isDoor(b: number): boolean {

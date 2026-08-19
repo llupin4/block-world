@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import { Block, BLOCKS, isOpaque, PLACEABLE, iconPosition, torchMeta, doorMeta, doorOpen, doorAxis, isDoor } from './blocks';
+import { Block, BLOCKS, isOpaque, PLACEABLE, iconPosition, torchMeta, doorMeta, doorOpen, doorAxis, doorSide, isDoor } from './blocks';
 import { World, chunkKey, chunkOf, CHUNK_SIZE, WORLD_Y_MAX, WORLD_Y_MIN, type VoxelBuffer } from './world';
 import { TERRAIN_SEED, TerrainGen, generateChunkTerrain } from './terrain';
 import * as streaming from './streaming';
@@ -407,10 +407,11 @@ function doorPartner(x: number, y: number, z: number): [number, number, number] 
   return null;
 }
 
-/** Right-click on a door: flip open/closed on BOTH halves, keeping the axis (instant snap). */
+/** Right-click on a door: flip open/closed on BOTH halves, keeping axis and side (instant snap). */
 function toggleDoorPair(x: number, y: number, z: number): void {
   const b = world.getBlock(x, y, z);
-  const meta = doorMeta(!doorOpen(world.getMeta(x, y, z)), doorAxis(world.getMeta(x, y, z)));
+  const m = world.getMeta(x, y, z);
+  const meta = doorMeta(!doorOpen(m), doorAxis(m), doorSide(m)); // all three bits preserved
   world.setBlock(x, y, z, b, meta);
   remeshAround(x, y, z);
   const p = doorPartner(x, y, z);
@@ -501,8 +502,12 @@ function onMouseDown(e: MouseEvent): void {
       if (target !== Block.Air && target !== Block.Water) return;
       if (above !== Block.Air && above !== Block.Water) return;
       if (!player.noclip && (player.intersectsVoxel(tx, ty, tz) || player.intersectsVoxel(tx, ty + 1, tz))) return;
-      // +/-X face or a floor face -> the panel is thin in X; +/-Z face -> thin in Z
-      const meta = doorMeta(false, hit.nz !== 0 ? 1 : 0);
+      // +/-X face or a floor face -> the panel is thin in X; +/-Z face -> thin in Z.
+      // The panel hinges on the support-facing edge: for -X/-Z aimed normals the
+      // support sits on the target cell's max edge (side 1), otherwise min edge (side 0).
+      const thinInZ = hit.nz !== 0;
+      const side = (thinInZ ? hit.nz : hit.nx) < 0 ? 1 : 0;
+      const meta = doorMeta(false, thinInZ ? 1 : 0, side);
       world.setBlock(tx, ty, tz, Block.DoorBottom, meta);
       world.setBlock(tx, ty + 1, tz, Block.DoorTop, meta);
       remeshAround(tx, ty, tz);

@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import {
   Block, BLOCKS, isOpaque, PLACEABLE, iconPosition,
-  torchMeta, torchFace, doorMeta, doorOpen, doorAxis, isDoor,
+  torchMeta, torchFace, doorMeta, doorOpen, doorAxis, doorSide, isDoor,
 } from '../blocks';
 
 describe('blocks', () => {
@@ -107,12 +107,19 @@ describe('blocks', () => {
     expect(torchFace(0)).toBe(0);
   });
 
-  it('door meta: bit0 = open, bit1 = axis; round-trips', () => {
+  it('door meta: bit0 = open, bit1 = axis, bit2 = side; round-trips', () => {
     for (const open of [false, true])
-      for (const axis of [0, 1]) {
-        expect(doorOpen(doorMeta(open, axis)), `${open}/${axis}`).toBe(open);
-        expect(doorAxis(doorMeta(open, axis)), `${open}/${axis}`).toBe(axis);
-      }
+      for (const axis of [0, 1])
+        for (const side of [0, 1]) {
+          expect(doorOpen(doorMeta(open, axis, side)), `${open}/${axis}/${side}: open`).toBe(open);
+          expect(doorAxis(doorMeta(open, axis, side)), `${open}/${axis}/${side}: axis`).toBe(axis);
+          expect(doorSide(doorMeta(open, axis, side)), `${open}/${axis}/${side}: side`).toBe(side);
+        }
     expect(doorMeta(false, 0)).toBe(0); // a fresh closed X-thin door carries 0
+    expect(doorSide(doorMeta(false, 0, 0))).toBe(0);
+    expect(doorSide(doorMeta(false, 0, 1))).toBe(1);
+    expect(doorSide(doorMeta(true, 1, 1))).toBe(1); // side survives the open+axis bits
+    for (const axis of [0, 1])
+      expect(doorSide(doorMeta(false, axis)), `two-arg axis ${axis}`).toBe(0); // default side 0
   });
 });

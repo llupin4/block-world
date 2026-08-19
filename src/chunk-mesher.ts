@@ -1,4 +1,4 @@
-import { Block, BLOCKS, isOpaque, torchFace, doorOpen, doorAxis } from './blocks';
+import { Block, BLOCKS, isOpaque, torchFace, doorOpen, doorAxis, doorSide } from './blocks';
 import { World, localIndex, type VoxelBuffer } from './world';
 
 export interface ChunkMesh {
@@ -134,10 +134,12 @@ function emitTorch(
 
 /**
  * Door: BOTH halves emit the identical panel inside their own cell (stacked cells read
- * as one panel; the shared seam hides against the special neighbor cell). Closed = a
- * full-height thin panel, axis X or Z; open = a slab swung to the cell's x=0,z=0
- * corner and clamped inside the cell (a true 90 degrees swing of a full-width panel
- * would overhang by half a cell).
+ * as one panel; the shared seam hides against the special neighbor cell). The panel
+ * hinges on its `side` edge (bit 2 of the meta: 0 = min, 1 = max along the thin axis)
+ * — the edge flush against the support wall the player aimed at. Closed = the thin
+ * panel (0.2 x 1 x 1) hugging that edge; open = the SAME full-size panel swung 90
+ * degrees about the hinge corner, so both states are congruent 1 x 0.2 boxes sitting
+ * in the cell's min corner for side 0 and are never clamped or squished.
  */
 function emitDoor(
   buf: Buf,
@@ -147,12 +149,15 @@ function emitDoor(
 ): void {
   const hidden = makeHidden(gb, wx, wy, wz);
   const xThin = doorAxis(meta) === 0;
+  const side = doorSide(meta);
   const tiles: [number, number, number, number, number, number] =
     [TILE_DOOR, TILE_DOOR, TILE_DOOR, TILE_DOOR, TILE_DOOR, TILE_DOOR];
   if (doorOpen(meta)) {
-    pushBox(buf, [wx, wy, wz], xThin ? [0.55, 1, 0.2] : [0.2, 1, 0.55], tiles, hidden);
+    pushBox(buf, [wx, wy, wz], xThin ? [1, 1, 0.2] : [0.2, 1, 1], tiles, hidden);
+  } else if (xThin) {
+    pushBox(buf, side === 1 ? [wx + 0.8, wy, wz] : [wx, wy, wz], [0.2, 1, 1], tiles, hidden);
   } else {
-    pushBox(buf, xThin ? [wx + 0.4, wy, wz] : [wx, wy, wz + 0.4], xThin ? [0.2, 1, 1] : [1, 1, 0.2], tiles, hidden);
+    pushBox(buf, side === 1 ? [wx, wy, wz + 0.8] : [wx, wy, wz], [1, 1, 0.2], tiles, hidden);
   }
 }
 

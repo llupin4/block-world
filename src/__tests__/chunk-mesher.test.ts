@@ -215,39 +215,61 @@ describe('chunk-mesher special blocks', () => {
     expect(meshChunk(w, 0, 0, 0).trans).toBeNull();
   });
 
-  it('a closed X-thin door emits its full-height panel (x [0.4, 0.6] of the cell)', () => {
+  it('a closed X-thin door hugs its side edge: side 0 = x [0, 0.2], side 1 = x [0.8, 1] of the cell', () => {
     const w = new World();
     const c = w.ensureChunk(0, 0, 0);
     c.blocks[localIndex(8, 8, 8)] = Block.DoorBottom;
-    c.meta[localIndex(8, 8, 8)] = doorMeta(false, 0); // closed, axis X
+    c.meta[localIndex(8, 8, 8)] = doorMeta(false, 0, 0); // closed, axis X, side 0 (min-X edge)
     const { opaque, trans } = meshChunk(w, 0, 0, 0);
     expect(trans).toBeNull();
-    expect(opaque!.positions.length / 3).toBe(6 * 4);
-    const b = posBounds(opaque!);
-    expect(b.xMin).toBeCloseTo(8.4); expect(b.xMax).toBeCloseTo(8.6);
+    expect(opaque!.positions.length / 3).toBe(6 * 4); // all 6 faces in open air
+    let b = posBounds(opaque!);
+    expect(b.xMin).toBeCloseTo(8); expect(b.xMax).toBeCloseTo(8.2); // panel flush against the min-X cell edge
     expect(b.zMin).toBeCloseTo(8); expect(b.zMax).toBeCloseTo(9); // panel spans the full cell width
+    expect(b.yMin).toBeCloseTo(8); expect(b.yMax).toBeCloseTo(9);
+    c.meta[localIndex(8, 8, 8)] = doorMeta(false, 0, 1); // side 1 (max-X edge)
+    b = posBounds(meshChunk(w, 0, 0, 0).opaque!);
+    expect(b.xMin).toBeCloseTo(8.8); expect(b.xMax).toBeCloseTo(9);
+    expect(b.zMin).toBeCloseTo(8); expect(b.zMax).toBeCloseTo(9);
     expect(b.yMin).toBeCloseTo(8); expect(b.yMax).toBeCloseTo(9);
   });
 
-  it('an open X-thin door emits a corner slab (x [0, 0.55], z [0, 0.2]); the Z axis mirrors it', () => {
+  it('a closed Z-thin door hugs its side edge: side 0 = z [0, 0.2], side 1 = z [0.8, 1]', () => {
     const w = new World();
     const c = w.ensureChunk(0, 0, 0);
     c.blocks[localIndex(8, 8, 8)] = Block.DoorBottom;
-    c.meta[localIndex(8, 8, 8)] = doorMeta(true, 0);
+    c.meta[localIndex(8, 8, 8)] = doorMeta(false, 1, 0);
     let b = posBounds(meshChunk(w, 0, 0, 0).opaque!);
-    expect(b.xMin).toBeCloseTo(8); expect(b.xMax).toBeCloseTo(8.55);
+    expect(b.xMin).toBeCloseTo(8); expect(b.xMax).toBeCloseTo(9); // panel spans the full cell width
     expect(b.zMin).toBeCloseTo(8); expect(b.zMax).toBeCloseTo(8.2);
+    c.meta[localIndex(8, 8, 8)] = doorMeta(false, 1, 1);
+    b = posBounds(meshChunk(w, 0, 0, 0).opaque!);
+    expect(b.xMin).toBeCloseTo(8); expect(b.xMax).toBeCloseTo(9);
+    expect(b.zMin).toBeCloseTo(8.8); expect(b.zMax).toBeCloseTo(9);
+  });
 
+  it('an open door is the full-size panel swung 90 degrees: no clamping, extent set identical to closed side 0', () => {
+    const w = new World();
+    const c = w.ensureChunk(0, 0, 0);
+    c.blocks[localIndex(8, 8, 8)] = Block.DoorBottom;
+    c.meta[localIndex(8, 8, 8)] = doorMeta(true, 0); // open, axis X
+    let b = posBounds(meshChunk(w, 0, 0, 0).opaque!);
+    expect(b.xMin).toBeCloseTo(8); expect(b.xMax).toBeCloseTo(9);    // x full
+    expect(b.zMin).toBeCloseTo(8); expect(b.zMax).toBeCloseTo(8.2); // the 0.2 thickness sits at the min corner
     c.meta[localIndex(8, 8, 8)] = doorMeta(true, 1); // open, axis Z
     b = posBounds(meshChunk(w, 0, 0, 0).opaque!);
     expect(b.xMin).toBeCloseTo(8); expect(b.xMax).toBeCloseTo(8.2);
-    expect(b.zMin).toBeCloseTo(8); expect(b.zMax).toBeCloseTo(8.55);
-
-    // a closed Z-thin panel is thin in z instead
-    c.meta[localIndex(8, 8, 8)] = doorMeta(false, 1);
-    b = posBounds(meshChunk(w, 0, 0, 0).opaque!);
-    expect(b.xMin).toBeCloseTo(8); expect(b.xMax).toBeCloseTo(9);
-    expect(b.zMin).toBeCloseTo(8.4); expect(b.zMax).toBeCloseTo(8.6);
+    expect(b.zMin).toBeCloseTo(8); expect(b.zMax).toBeCloseTo(9);    // z full
+    // The open panel is the closed side-0 panel rotated 90 degrees about the hinge
+    // corner: the same two extents ({0.2, 1.0}) swap axes, so the swing is never
+    // clamped (an old squished slab would have read 0.55 on the full axis).
+    for (const m of [doorMeta(true, 0), doorMeta(true, 1)]) {
+      c.meta[localIndex(8, 8, 8)] = m;
+      const ob = posBounds(meshChunk(w, 0, 0, 0).opaque!);
+      const spans = [ob.xMax - ob.xMin, ob.zMax - ob.zMin].sort((p, q) => p - q);
+      expect(spans[0], `open meta ${m} thin extent`).toBeCloseTo(0.2);
+      expect(spans[1], `open meta ${m} full extent`).toBeCloseTo(1);
+    }
   });
 
   it('a door never culls neighbor faces, while a stone neighbor still does', () => {
