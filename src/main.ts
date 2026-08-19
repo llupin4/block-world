@@ -503,7 +503,7 @@ hotbar.onSelectChange = (i) => {
 };
 hotbar.onSlotChange = (i) => {
   placeIcon(hotbarSlotEls[i], hotbar.slots[i], 40); // the palette wrote into a slot
-  refreshPaletteSel(hotbar.slots[i]);
+  refreshPaletteSel(hotbar.block); // hotbar.block is the selected slot's block — same source both callbacks
 };
 
 let paletteOpen = false;
