@@ -11,7 +11,7 @@
 Working branch: `day-night-clouds` (already created). No other branch or worktree needed. No secrets involved.
 
 **Deviation notes (recorded up front):**
-- HUD clock is **top-left**, not the spec's top-right — the palette strip owns the top-right corner (`#palette` in `src/ui.css`), and an open palette would cover the clock.
+- HUD clock is **top-left** (the spec was updated to match) — the palette strip owns the top-right corner (`#palette` in `src/ui.css`), and an open palette would cover the clock.
 - The clock font uses `ui-monospace` per spec; the rest of the UI uses `system-ui`.
 
 ---

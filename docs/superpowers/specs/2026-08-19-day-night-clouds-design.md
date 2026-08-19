@@ -44,11 +44,12 @@ WebGL, so it tests without a browser.
 
 - `class WorldTime` holds two counters, deliberately separate:
   - `time` — total simulation time (seconds) since load;
-  - `dayPhase` — position in the day/night cycle, `[0, 1)`. Normally
-    advanced 1:1 with `time` (via `DAY_LENGTH`), but it is its own stored
-    value, not a derived one, so the daylight cycle can later be frozen,
+  - `phaseTotal` — the raw day-cycle position, normally advanced 1:1 with
+    `time` (via `DAY_LENGTH`). It is its own stored counter, not a value
+    derived from `time`, so the daylight cycle can later be frozen,
     rescaled, or set independently of the simulation clock (server-style
     "doDaylightCycle / time set" semantics, without any extra machinery).
+    The public `dayPhase` ([0, 1)) is its read-wrapped view: `phaseTotal % 1`.
   - `day` — day number; session starts at **noon of day 1**
     (`time = 0, dayPhase = 0, day = 1`).
 - `advance(dt)`: `time += dt`; an unbounded raw phase total accumulates
@@ -76,8 +77,9 @@ WebGL, so it tests without a browser.
 
 - `advance(240)` wraps `dayPhase` to 0 and lands on **day 2** (one midnight
   passed).
-- `advance(120)` reaches exactly phase 0.5 with `day` still 1; one more
-  substep increments to day 2 (midnight boundary, not the noon wrap).
+- `advance(120)` reaches exactly phase 0.5, which is the day boundary
+  itself: `day` is already 2 at midnight (the increment happens on the
+  midnight boundary, not at the noon wrap).
 - `hour` reads 12.0 at phase 0, 18.0 at 0.25, 0.0 at 0.5, 6.0 at 0.75.
 - Determinism: two clocks advanced through identical `dt` sequences stay
   bit-identical (phase, time, day) — no wall-clock reads anywhere in the
@@ -127,7 +129,7 @@ starAlpha, sunDir, moonDir, waterBg, waterFogColor, waterFogDensity }`
 ### Renderer
 
 Constructed once (`createSky(...)`), re-applied each frame via
-`sky.apply(sample, mood)` where `mood` is the existing air/water value:
+`sky.apply(sample, mood, camera)` where `mood` is the existing air/water value:
 
 - **Sky dome** (replaces the flat `scene.background` colour): a large
   inverted sphere `SphereGeometry(400, 32, 16)` — inside the 512 far plane —
@@ -162,8 +164,9 @@ Constructed once (`createSky(...)`), re-applied each frame via
   Torch flame tiles dim with everything — they stay visually the brightest
   things around by tile colour; an actual glow is that project's scope.)
 - **Underwater mood keeps priority, but is time-tinted**: the existing
-  `syncWaterFx()` still owns the swap (which fog object, FOV squeeze), and
-  `sky.apply` paints *time-driven* values into whatever is active — the
+  `syncWaterFx()` still owns the mood state and the FOV squeeze, while
+  `sky.apply` installs which fog/background is active and paints
+  *time-driven* values into them — the
   underwater columns of the keyframe table. In the water mood the dome,
   stars, sun and moon are hidden (dense fog would swallow them anyway).
   The cloud layer is hidden in that mood too (same 100%-fogged logic — and
