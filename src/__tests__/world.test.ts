@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { World, CHUNK_SIZE, CHUNK_VOL, chunkKey, localIndex, chunkOf } from '../world';
-import { Block } from '../blocks';
+import { Block, torchMeta, doorMeta } from '../blocks';
 
 describe('world', () => {
   it('exposes chunk constants (cubic 16^3)', () => {
@@ -77,5 +77,51 @@ describe('world', () => {
     expect(w.removeChunk(0, 0, 0)).toBe(false);
     w.clear();
     expect(w.count()).toBe(0);
+  });
+
+  it('setBlock stores and clears per-cell meta (torch mount / door state)', () => {
+    const w = new World();
+    const c = w.ensureChunk(0, 0, 0);
+    w.setBlock(5, 5, 5, Block.DoorBottom, doorMeta(false, 1));
+    expect(c.blocks[localIndex(5, 5, 5)]).toBe(Block.DoorBottom);
+    expect(c.meta[localIndex(5, 5, 5)]).toBe(doorMeta(false, 1));
+    expect(w.getMeta(5, 5, 5)).toBe(doorMeta(false, 1));
+    // same block + a DIFFERENT meta is a change (a door toggle) -> true + dirty
+    c.dirty = false;
+    expect(w.setBlock(5, 5, 5, Block.DoorBottom, doorMeta(true, 1))).toBe(true);
+    expect(c.dirty).toBe(true);
+    expect(w.getMeta(5, 5, 5)).toBe(doorMeta(true, 1));
+    // a plain block clears the cell's meta (default meta = 0)
+    w.setBlock(5, 5, 5, Block.Stone);
+    expect(w.getMeta(5, 5, 5)).toBe(0);
+    // torch: meta rides the block, gone when the torch is removed
+    w.setBlock(6, 5, 5, Block.Torch, torchMeta(2));
+    expect(w.getMeta(6, 5, 5)).toBe(torchMeta(2));
+    w.setBlock(6, 5, 5, Block.Air);
+    expect(w.getMeta(6, 5, 5)).toBe(0);
+    // missing chunk reads as 0 (mirror of getBlock = Air)
+    expect(w.getMeta(64, 5, 5)).toBe(0);
+  });
+
+  it('isSolid: closed doors block, open doors and torches do not', () => {
+    const w = new World();
+    w.ensureChunk(0, 0, 0);
+    w.setBlock(1, 0, 1, Block.Stone);
+    w.setBlock(2, 0, 1, Block.Air);
+    w.setBlock(3, 0, 1, Block.Torch);
+    w.setBlock(4, 0, 1, Block.DoorBottom, doorMeta(false, 0)); // closed
+    w.setBlock(5, 0, 1, Block.DoorBottom, doorMeta(true, 0));  // open
+    w.setBlock(6, 0, 1, Block.DoorTop, doorMeta(false, 1));    // closed top half
+    w.setBlock(7, 0, 1, Block.Leaves); // solid:true (water sim) but player-passable — pin the legacy rule
+    w.setBlock(8, 0, 1, Block.Glass);  // same for glass
+    expect(w.isSolid(1, 0, 1)).toBe(true);
+    expect(w.isSolid(2, 0, 1)).toBe(false);
+    expect(w.isSolid(3, 0, 1)).toBe(false);
+    expect(w.isSolid(4, 0, 1)).toBe(true);
+    expect(w.isSolid(5, 0, 1)).toBe(false);
+    expect(w.isSolid(6, 0, 1)).toBe(true);
+    expect(w.isSolid(7, 0, 1)).toBe(false);
+    expect(w.isSolid(8, 0, 1)).toBe(false);
+    expect(w.isSolid(64, 0, 0)).toBe(false); // missing chunk -> Air -> not solid
   });
 });

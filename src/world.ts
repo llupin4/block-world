@@ -1,4 +1,4 @@
-import { Block } from './blocks';
+import { Block, isOpaque, isDoor, doorOpen } from './blocks';
 
 export const CHUNK_SIZE = 16;
 export const CHUNK_VOL = CHUNK_SIZE * CHUNK_SIZE * CHUNK_SIZE; // 4096
@@ -16,7 +16,8 @@ export interface Chunk {
   cx: number;
   cy: number;
   cz: number;
-  blocks: Uint8Array; // D9: 10 block values fit in a byte
+  blocks: Uint8Array; // D9: block ids fit in a byte (13 values now: cubes + torch + door halves)
+  meta: Uint8Array; // per-cell state for special blocks: torch mount face (torchMeta), door open/axis (doorMeta, BOTH halves). Always 0 for cube blocks
   wlevel: Uint8Array;  // water flow level per cell: 0 dry, 1..7 water (7 = full). Render-cosmetic: re-derived from the neighbourhood on change (the "what state do I hold" of the local cellular rule)
   wsource: Uint8Array; // 0/1 per cell: this cell is a source body — the worldgen sea/lake (settle re-seeds it), the player's placed water, or water regenerated within a placed body. Flow is never adopted into a source body (a body's level never rises and no flow can become an immortal source): sources are immortal, their level never rises or decays and they re-derive to themselves
   wplaced: Uint8Array; // 0/1 per source cell: a PLACED source (spring) — created by the player placing water, or regenerated within a placed body. A placed source is a static block: it never falls, pours no column through itself, emits only a side halo into air, and is the only water the player can break (breaking it is how you stop its flow). 0 = worldgen water settle re-seeded as a source (the sea): it stands, falls and pours where its support goes, but never emits, grows or feeds flow — the sea is not a spring
@@ -61,6 +62,7 @@ export class World {
     const n: Chunk = {
       cx, cy, cz,
       blocks: new Uint8Array(CHUNK_VOL),
+      meta: new Uint8Array(CHUNK_VOL),
       wlevel: new Uint8Array(CHUNK_VOL),
       wsource: new Uint8Array(CHUNK_VOL),
       wplaced: new Uint8Array(CHUNK_VOL),
@@ -84,13 +86,26 @@ export class World {
     return c.blocks[localIndex(lx, ly, lz)];
   }
 
-  /** Returns false when the chunk is missing or the value is unchanged. Marks the chunk and any existing 6 face-neighbors dirty. */
-  setBlock(wx: number, wy: number, wz: number, b: number): boolean {
+  /** Per-cell special-block state (torchMeta/doorMeta); missing chunks read as 0, mirroring getBlock = Air. */
+  getMeta(wx: number, wy: number, wz: number): number {
+    const c = this.getChunk(chunkOf(wx), chunkOf(wy), chunkOf(wz));
+    if (!c) return 0;
+    return c.meta[localIndex(wx - c.cx * CHUNK_SIZE, wy - c.cy * CHUNK_SIZE, wz - c.cz * CHUNK_SIZE)];
+  }
+
+  /**
+   * Returns false when the chunk is missing or the value is unchanged (block AND meta).
+   * meta defaults to 0 — writing any plain block clears the cell's torch/door state.
+   * Marks the chunk and any existing 6 face-neighbors dirty: a door closing/opening
+   * changes both what is solid and which neighbor faces its panel hides.
+   */
+  setBlock(wx: number, wy: number, wz: number, b: number, meta = 0): boolean {
     const c = this.getChunk(chunkOf(wx), chunkOf(wy), chunkOf(wz));
     if (!c) return false;
     const i = localIndex(wx - c.cx * CHUNK_SIZE, wy - c.cy * CHUNK_SIZE, wz - c.cz * CHUNK_SIZE);
-    if (c.blocks[i] === b) return false;
+    if (c.blocks[i] === b && c.meta[i] === meta) return false;
     c.blocks[i] = b;
+    c.meta[i] = meta;
     c.dirty = true;
     const n = [
       [c.cx + 1, c.cy, c.cz], [c.cx - 1, c.cy, c.cz],
@@ -102,6 +117,22 @@ export class World {
       if (nc) nc.dirty = true;
     }
     return true;
+  }
+
+  /**
+   * The single collision truth: air and torches are never solid; a door is solid
+   * while CLOSED (both halves, full block) and walkable while open. Cube blocks
+   * keep the legacy player rule (isOpaque): leaves/glass are solid in BLOCKS
+   * (the water sim's blocking truth) but pass-through for the player. Do NOT
+   * "fix" the fallback to BLOCKS[.].solid — that would wall off glass/leaves,
+   * a gameplay change this feature does not make.
+   */
+  isSolid(wx: number, wy: number, wz: number): boolean {
+    const b = this.getBlock(wx, wy, wz);
+    if (b === Block.Air) return false;
+    if (b === Block.Torch) return false;
+    if (isDoor(b)) return !doorOpen(this.getMeta(wx, wy, wz));
+    return isOpaque(b);
   }
 
   removeChunk(cx: number, cy: number, cz: number): boolean {
