@@ -564,3 +564,42 @@ pattern as the water flag arrays:
   through (collision uses `world.isSolid`), but water does not flow through.
 - The **palette (E)** is a scrolling list of every `PLACEABLE` entry (icon + name),
   generated in `src/main.ts` from the registry, so new blocks appear in it for free.
+
+## 17. Sky — day/night, sun/moon, stars, clouds (post-POC, 2026-08-19)
+
+Spec: `docs/superpowers/specs/2026-08-19-day-night-clouds-design.md`.
+
+- `src/time.ts` — `WorldTime`, world-level state advanced in the **fixed 60 Hz
+  physics substep** (never wall-clock): a lagging frame drops frames, it never
+  stretches the day. `time` (total sim time) and the raw `phaseTotal` are
+  stored counters of their own — `dayPhase` ([0,1); 0 = noon, 0.5 = midnight)
+  is `phaseTotal % 1` read per access — so the daylight cycle can later be
+  frozen/rescaled/set independently (the backlog item "align all simulation
+  clocks on one tick system", TODO.md, also covers the water sim's slow
+  clock). 240 s cycle; `day` increments at midnight.
+- `src/sky.ts` — pure `sampleSky(phase)` (keyframe table in phase space,
+  mirror-symmetric about midnight; sun/moon one angle `θ = 2π·phase` apart,
+  180° out of phase) + `createSky` renderer: a camera-locked inverted-sphere
+  sky dome (16×256 gradient canvas, redrawn only while the palette moves),
+  ~400 fixed stars fading in after dusk, sun/moon sprite discs at r≈380
+  (inside the 400 dome, all `fog: false`). `worldDim` 1.0 → 0.33 is applied
+  per frame as `material.color` on the two shared chunk materials — one
+  uniform update dims the whole world with zero remeshing. It is the
+  documented stand-in until the dynamic-lighting item bakes per-block
+  skylight into the vertex colour buffer.
+- `src/clouds.ts` — instanced 4-block-cell quads at y = 96 in a 24×24 window
+  anchored to the camera's 4-block grid cell; per-cell coverage is one
+  2D-simplex sample (12-block wavelength, threshold 0.05), wind = a slow
+  (~0.1 block/s) shift of the sample offset, re-evaluated only on
+  re-anchoring. `fog: false`, tinted white → faint blue-grey by `worldDim`.
+  The layer is hidden while the underwater mood is active (the dense water
+  fog would physically 100% fog a y=96 layer; an un-fogged one would instead
+  flicker in/out of the water column as the window re-anchors while
+  swimming).
+- The T12 air/water mood swap survives: it owns the FOV squeeze and which
+  fog/background objects are active; the **values** they show are now
+  time-driven, so night comes underwater too.
+- HUD: `Day N · hh:mm` top-left (top-right is the palette strip's).
+- Renderer note: everything added is O(1) per frame apart from rare mask
+  rebuilds and the dusk/dawn gradient redraws; the §9 streaming budget is
+  untouched.

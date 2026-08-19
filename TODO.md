@@ -85,14 +85,20 @@ Items deliberately not done in the POC. Rough order of value.
 
 Items requested 2026-08-18 (with the torch/door work), deferred by design:
 
-- **Clouds and a sun/moon in the sky with a day/night cycle.** A world-time clock
-  driving sky background/fog (the `BG_AIR`/mood swap in `src/main.ts` becomes
-  time-of-day driven), a sun/moon that crosses the sky, and instanced cloud
-  layers. Torches already exist as placeable blocks, so the night falls on a
-  world that can carry lights.
+- ~~Clouds and a sun/moon in the sky with a day/night cycle.~~ **Resolved
+  (2026-08-19, branch `day-night-clouds`):** `src/time.ts` (a `WorldTime`
+  advanced in the fixed substep), `src/sky.ts` (phase-keyframed sampler +
+  dome/stars/sun-moon renderer + a global `worldDim`), `src/clouds.ts`
+  (instanced 4-block-cell layer at y=96 with wind drift); the sky moods —
+  including the underwater one — are time-driven. See
+  `docs/superpowers/specs/2026-08-19-day-night-clouds-design.md`. `worldDim`
+  is the stand-in that the next item replaces.
 - **Dynamic lighting with light levels** (for torch / sun / moon positions).
   Block-light + skylight propagation into the chunk buffers, with the
   de-propagation pass on block edits (the deferred skylight item from
   PROJECT.md §15 — the hard part). Torch meta (wall-mount face) already stores
   where a light source sits; a torch's light level will be read from there.
   Until this lands, torches are **visual only** — a bright tile, no glow.
+  This item consumes `WorldTime` (src/time.ts) for time-of-day/sun position —
+  and `sampleSky().sunDir` for the sun — and lands per-block skylight in the
+  vertex colour buffer, replacing the global `worldDim`.

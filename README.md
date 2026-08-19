@@ -13,7 +13,8 @@ Preview here [https://llupin4.github.io/block-world/](https://llupin4.github.io/
 - **Block editing** — DDA (Amanatides & Woo) voxel raycast targets the block under your crosshair; left-click breaks, right-click places from the hotbar.
 - **Water simulation** — a cellular automaton over level/source/stream flags: placed water is an immortal spring that pours through gaps and floods reachable caves; cut it off from its source and it starves away cell by cell. Runs on a slow ~2 Hz clock independent of physics.
 - **Creative controls** — fly mode, noclip, hotbar + click-to-assign palette, wireframe debug view, and a help overlay.
-- **Underwater mood** — submerging your head swaps background, fog, and FOV to sell the dive.
+- **Underwater mood** — submerging your head swaps background, fog, and FOV to sell the dive; its palette tracks time of day, so night underwater is darker.
+- **Day/night cycle** — a world-time clock (noon start, 4-minute cycle) drives a gradient sky, a sun and moon crossing the sky, stars after dusk, a world that dims at night, and a slowly drifting cloud layer; a small HUD clock shows the time.
 
 ## Requirements
 
@@ -59,7 +60,7 @@ npm run preview   # serve the production bundle locally
 
 ## Tests
 
-Unit tests are written with [Vitest](https://vitest.dev/) and live in `src/__tests__/`. They cover the block registry, chunk mesher, player controller, voxel raycast, chunk streaming, terrain generator, UI, and both the water simulation and its chunk-load path (the latter includes a replay test that boots the world and plays for ten seconds to pin the settle performance budget).
+Unit tests are written with [Vitest](https://vitest.dev/) and live in `src/__tests__/`. They cover the block registry, chunk mesher, player controller, voxel raycast, chunk streaming, terrain generator, world time, sky sampler, cloud coverage, UI, and both the water simulation and its chunk-load path (the latter includes a replay test that boots the world and plays for ten seconds to pin the settle performance budget).
 
 Run them with:
 
@@ -80,6 +81,9 @@ src/
   player.ts        AABB collision + fly/noclip controller
   raycast.ts       DDA voxel raycast (targeting)
   water.ts         water flow cellular automaton
+  time.ts          world-time clock (day/night phase, advanced in the fixed substep)
+  sky.ts           sky sampler (phase → palette/sun/moon) + dome/stars/sprites renderer
+  clouds.ts        cloud layer (world-locked noise coverage + wind drift)
   ui.ts            hotbar + palette state
 index.html         app shell + DOM overlays
 PROJECT.md         the original POC design doc (stack, algorithms, known traps)

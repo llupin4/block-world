@@ -976,11 +976,11 @@ Run: `npm run build`
 Expected: passes (in particular: no remaining references to `BG_AIR`, and `syncWaterFx` no longer touches `scene.background`/`scene.fog`).
 
 Run: `npm test`
-Expected: all suites pass (101 pre-existing + 18 new tests: 6 time, 7 sky, 5 clouds).
+Expected: all suites pass (124 tests total: 101 pre-existing + 23 new).
 
 Run: `npm run dev`, open the printed URL, click the canvas to lock the pointer, and do a 60-second smoke check:
 - The sky reads as a gradient (zenith → horizon), not a flat colour; the sun disc is visible in the sky.
-- The top-left clock shows `Day 1 · 12:xx` and advances one minute every ~10 real seconds.
+- The top-left clock shows `Day 1 · 12:xx` and visibly ticks (a 4-minute day = 10 real seconds per in-game hour).
 - Walking around shows the cloud layer high overhead; it does not pop or jitter as the camera crosses grid cells.
 Expected: all four observed. If the sun/moon are misplaced or the horizon is banded wrong, re-check the dome texture row order before moving on.
 

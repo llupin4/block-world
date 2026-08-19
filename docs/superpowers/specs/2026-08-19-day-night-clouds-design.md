@@ -51,9 +51,12 @@ WebGL, so it tests without a browser.
     "doDaylightCycle / time set" semantics, without any extra machinery).
   - `day` — day number; session starts at **noon of day 1**
     (`time = 0, dayPhase = 0, day = 1`).
-- `advance(dt)`: `time += dt`; `dayPhase = (dayPhase + dt / DAY_LENGTH) % 1`;
-  `day` increments exactly when `dayPhase` crosses **midnight** (0.5), never
-  at the noon wrap.
+- `advance(dt)`: `time += dt`; an unbounded raw phase total accumulates
+  (`phaseTotal += dt / DAY_LENGTH`) and the public `dayPhase` is read as
+  `phaseTotal % 1`; `day` (= `1 + floor(phaseTotal + 0.5)`) increments
+  exactly when the raw total crosses an integer **+ 0.5** — i.e. a
+  **midnight** boundary (phase 0.5) — never at the noon wrap (integer raw
+  total).
 - `DAY_LENGTH = 240` seconds — a 4-minute cycle: 2 min of day, 2 min of
   night (phase 0.0 noon → 0.25 sunset → 0.5 midnight → 0.75 sunrise).
 - `hour: number` (display hour) = `(12 + 24 · dayPhase) mod 24` — phase 0.0
@@ -139,17 +142,20 @@ Constructed once (`createSky(...)`), re-applied each frame via
   horizon value as a fallback). The gradient canvas is **redrawn only when
   `skyTop`/`skyHorizon` move** (i.e. during the dusk/dawn bands, ~15 s per
   cycle); stable phases reuse the texture with zero uploads.
-- **Stars**: one `THREE.Points` of ~400 fixed random directions on a
-  sphere of radius ~360, generated once with a seeded PRNG (same style as the
-  atlas painters), `fog: false`, `sizeAttenuation: false`, tiny white
-  points with a few tinted pale-blue; material opacity = `starAlpha`, the
-  whole object hidden below ~0.01. Camera-follows, like the dome.
+- **Stars**: one `THREE.Points` of ~400 fixed random directions on the
+  **upper hemisphere** of a radius-~360 sphere, generated once with a
+  seeded PRNG (same style as the atlas painters), `fog: false`,
+  `sizeAttenuation: false`, tiny white points with a few tinted pale-blue;
+  material opacity = `starAlpha`, the whole object hidden below ~0.01.
+  Camera-follows, like the dome.
 - **Sun & moon**: two `THREE.Sprite`s (soft radial-gradient canvas discs —
   the sun warm yellow with a broad glow, the moon pale with a faint halo),
   `fog: false`, positioned at `camera + dir · 380`, hidden when their
   elevation is below the horizon.
 - **`worldDim`**: per frame, `matOpaque.color.setScalar(dim)`,
-  `matTrans.color.setScalar(dim)` and the cloud material's colour. One
+  `matTrans.color.setScalar(dim)` and the cloud material's colour (the split:
+  `sky.apply` tints the two chunk materials; `clouds` tints its own;
+  `frame()` in `main.ts` is the call site). One
   uniform update on the shared materials dims the entire world with **zero
   remeshing**. (Stance: this is the accepted stand-in until the dynamic
   lighting project bakes real skylight into the per-vertex colour buffer.
@@ -160,6 +166,9 @@ Constructed once (`createSky(...)`), re-applied each frame via
   `sky.apply` paints *time-driven* values into whatever is active — the
   underwater columns of the keyframe table. In the water mood the dome,
   stars, sun and moon are hidden (dense fog would swallow them anyway).
+  The cloud layer is hidden in that mood too (same 100%-fogged logic — and
+  its un-fogged material would otherwise flicker in/out of the water
+  column as the 24×24 window re-anchors while swimming).
 
 ### Tests (`src/__tests__/sky.test.ts`)
 
@@ -188,8 +197,8 @@ Also a pure-consumer module: it reads `WorldTime` (for wind) and the
   a 4-block boundary. Quads live at fixed world positions inside the window,
   so there is no per-frame matrix work; instances are (re)built only on
   anchor changes.
-- **Coverage**: per cell, `c = simplex2d((wx + windX) / 12,
-  (wz + windZ) / 12)` using the existing `simplex-noise` dependency, on a
+- **Coverage**: per cell, `c = simplex2d((wx + 2 + windX) / 12,
+  (wz + 2 + windZ) / 12)` using the existing `simplex-noise` dependency, on a
   12-block wavelength (features ~4–24 blocks wide, sparser than the terrain
   noise scales). A cell draws its quad when `c > 0.05` — on/off at the cell
   level; the *intra-cell* softness comes from the quad's texture, a
@@ -226,19 +235,26 @@ Also a pure-consumer module: it reads `WorldTime` (for wind) and the
 
 ## HUD clock & integration
 
-- **HUD**: a small semi-transparent monospace readout in the top-right
-  corner — `Day 2 · 19:41` — a div built in `main.ts` with existing `ui.css`
-  conventions (same family as the hotbar/help text). Built from
+- **HUD**: a small semi-transparent monospace readout in the top-LEFT
+  corner (top-right belongs to the palette strip) — `Day 2 · 19:41` — a
+  static `#clock` div in `index.html`, styled in `ui.css` (same family as
+  the hotbar/help text). Built from
   `worldTime.day` + `hour` (minutes = `floor((hour mod 1) · 60)`, zero-padded).
   The text node is rewritten only when the rendered string changes.
 - **`main.ts` wiring** (owner of all instances; sky/cloud modules never
   import from `main.ts`):
-  - boot: `const time = new WorldTime()`, `const sky = createSky(scene,
-    matOpaque, matTrans)`, `const clouds = createClouds(scene)`, HUD div;
-  - inside the fixed substep loop: `time.advance(STEP)` (tick discipline,
-    above);
-  - per frame, after `syncWaterFx()`: `sky.apply(sampleSky(time.dayPhase),
-    mood)` then `clouds.update(camera, time, sample)`.
+  - boot: `const worldTime = new WorldTime()`,
+    `const sky = createSky(scene, matOpaque, matTrans, fogAir, fogWater,
+    bgWater)`, `const clouds = createClouds(scene)` (the HUD is the static
+    `#clock` div in `index.html`);
+  - inside the fixed substep loop: `worldTime.advance(STEP)` (tick
+    discipline, above);
+  - per frame, after `syncWaterFx()`:
+    `clouds.setVisible(waterFx === 'air')` (the underwater mood hides the
+    layer), then
+    `sky.apply(sampleSky(worldTime.dayPhase), waterFx, camera)` then
+    `clouds.update(camera.position.x, camera.position.z, worldTime.time,
+    skySample.worldDim)`.
 - No changes to world storage, mesher, water sim, or player code. The
   streaming/remesh frame budget (PROJECT.md §9) is untouched: everything
   added is O(1) per frame apart from the rare mask rebuilds and the
