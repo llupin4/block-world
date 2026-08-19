@@ -156,7 +156,7 @@ The `+ 1e-9` guards float error at exact minute boundaries (e.g. `formatClock(2,
 - [ ] **Step 4: Run tests to verify they pass**
 
 Run: `npx vitest run src/__tests__/time.test.ts`
-Expected: PASS — 5 tests.
+Expected: PASS — 6 tests.
 
 - [ ] **Step 5: Type-check and commit**
 
