@@ -94,13 +94,13 @@ export function createClouds(scene: THREE.Scene): Clouds {
     opacity: 0.85,
     depthWrite: false,
     side: THREE.DoubleSide,
-    fog: false, // a 40-block distance overhead would otherwise fog the layer out
+    fog: false, // sits ~95 blocks overhead; without this, night fog would fade the layer to ~57%
   });
   const geo = new THREE.PlaneGeometry(CELL, CELL);
   geo.rotateX(-Math.PI / 2); // flat in XZ (DoubleSide → normal sign irrelevant)
   const mesh = new THREE.InstancedMesh(geo, mat, WINDOW * WINDOW);
   mesh.count = 0;
-  mesh.frustumCulled = false; // the layer spans the sky around the camera; the origin bounding box would cull it
+  mesh.frustumCulled = false; // instance bounds are computed once and go stale as the window migrates with the camera
   scene.add(mesh);
 
   const m4 = new THREE.Matrix4();
@@ -128,8 +128,11 @@ export function createClouds(scene: THREE.Scene): Clouds {
         }
         mesh.count = n;
         mesh.instanceMatrix.needsUpdate = true;
+        mesh.computeBoundingSphere(); // instances migrate with the camera; the sort key is derived from this bound
       }
-      mat.color.copy(day).lerp(night, (1 - dim) / (1 - 0.33));
+      // dim ∈ [0.33, 1] (0.33 is the sky's night floor); clamp guards a future mood
+      const dtn = Math.max(0, Math.min(1, (1 - dim) / (1 - 0.33)));
+      mat.color.copy(day).lerp(night, dtn);
     },
   };
 }
