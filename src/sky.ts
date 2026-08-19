@@ -273,8 +273,8 @@ export function createSky(
       ) {
         drawDome(sample.skyTop, sample.skyHorizon);
         gradTex.needsUpdate = true;
-        lastTop = sample.skyTop;
-        lastHorizon = sample.skyHorizon;
+        lastTop = [...sample.skyTop];
+        lastHorizon = [...sample.skyHorizon];
       }
     },
   };
