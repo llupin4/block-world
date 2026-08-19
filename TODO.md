@@ -69,3 +69,19 @@ Items deliberately not done in the POC. Rough order of value.
 - The `TODO` probe methodology that found the water stutters (a moving-camera vitest replay
   logging per-phase ms) was deleted with the fix; if more frame-time work is needed, recreate
   it — a 400-frame walk over open ocean with load/mesh/settle/tick split beats guessing.
+
+## Sky & lighting
+
+Items requested 2026-08-18 (with the torch/door work), deferred by design:
+
+- **Clouds and a sun/moon in the sky with a day/night cycle.** A world-time clock
+  driving sky background/fog (the `BG_AIR`/mood swap in `src/main.ts` becomes
+  time-of-day driven), a sun/moon that crosses the sky, and instanced cloud
+  layers. Torches already exist as placeable blocks, so the night falls on a
+  world that can carry lights.
+- **Dynamic lighting with light levels** (for torch / sun / moon positions).
+  Block-light + skylight propagation into the chunk buffers, with the
+  de-propagation pass on block edits (the deferred skylight item from
+  PROJECT.md §15 — the hard part). Torch meta (wall-mount face) already stores
+  where a light source sits; a torch's light level will be read from there.
+  Until this lands, torches are **visual only** — a bright tile, no glow.

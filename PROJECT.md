@@ -518,11 +518,11 @@ These are all real and all worth doing eventually. None belong in v1.
 
 - Web Workers for generation and meshing
 - Greedy meshing
-- Flood-fill skylight and blocklight propagation (the de-propagation pass on block removal is the hard part)
+- ~~Flood-fill skylight and blocklight propagation (the de-propagation pass on block removal is the hard part)~~ and ~~day/night cycle~~ — moved to `TODO.md` → **Sky & lighting** (2026-08-18)
 - `DataArrayTexture` instead of an atlas
 - Biomes beyond a surface-block swap
 - Survival mechanics: health, mining time, item stacks, crafting
-- Entities, mobs, day/night cycle
+- Entities, mobs
 - Multiplayer
 
 ---
@@ -530,3 +530,29 @@ These are all real and all worth doing eventually. None belong in v1.
 ## Appendix: alternative starting point
 
 If the engine layer isn't the part you want to build, `noa-engine` is an open-source voxel engine that gives you chunks, meshing, and physics out of the box so you can go straight to gameplay. For a POC where you want to learn the internals, rolling it yourself is more useful — the meshing and raycast code above is genuinely most of the hard part.
+
+## 16. Special blocks — torch, door (post-POC, 2026-08-18)
+
+`Torch`, `DoorBottom`, `DoorTop` (ids 10–12) ride the ordinary block id; their
+per-cell state lives in a parallel `meta` byte per chunk (`src/world.ts`), the same
+pattern as the water flag arrays:
+
+- **Torch meta:** `0` = floor post; `1 | (face << 1)` for a wall stub, face
+  `1:+X 2:-X 3:+Z 4:-Z` (no ceiling mounts). Placement needs air above the target
+  and a solid opaque face behind it; the mesher emits a thin post/stub with a flame
+  tile on top (floor) or on the outward tip (wall). Emits no light — that is the
+  deferred "dynamic lighting" item.
+- **Door meta** (stored in **both** halves): bit 0 = open, bit 1 = axis (panel thin
+  in X or Z, chosen by the aimed face). Placement writes the pair (bottom at the
+  target cell, top above) into two Air/Water cells; **RMB on either half toggles the
+  whole pair** (instant snap, no swing animation); breaking either half removes both.
+  Closed = solid in both halves and rendered as a full-height thin panel; open = a
+  slab swung to the cell corner, walkable.
+- `world.isSolid()` is the single collision truth (closed door blocks, open door and
+  torch walk); the mesher emits their partial geometry in the opaque pass. Torches
+  and doors are never opaque, so they never cull neighbor faces.
+- **Water asymmetry (POC-accepted):** the water sim keeps the flat per-id `solid`
+  truth, so a door cell blocks water even while the door is OPEN — a player walks
+  through (collision uses `world.isSolid`), but water does not flow through.
+- The **palette (E)** is a scrolling list of every `PLACEABLE` entry (icon + name),
+  generated in `src/main.ts` from the registry, so new blocks appear in it for free.
