@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import { Block, isOpaque, PLACEABLE, iconPosition } from './blocks';
+import { Block, BLOCKS, isOpaque, PLACEABLE, iconPosition, torchMeta, doorMeta, doorOpen, doorAxis, isDoor } from './blocks';
 import { World, chunkKey, chunkOf, CHUNK_SIZE, WORLD_Y_MAX, WORLD_Y_MIN, type VoxelBuffer } from './world';
 import { TERRAIN_SEED, TerrainGen, generateChunkTerrain } from './terrain';
 import * as streaming from './streaming';
@@ -41,7 +41,7 @@ onResize();
 
 // === textures ===
 
-// 256x256 canvas atlas: 11 tiles, all in the top row (cols 0..10, row 0).
+// 256x256 canvas atlas: 14 tiles, all in the top row (cols 0..13, row 0).
 const atlasCanvas = document.createElement('canvas');
 atlasCanvas.width = 256;
 atlasCanvas.height = 256;
@@ -134,6 +134,33 @@ const TILES: TilePainter[] = [
         px(g, x, y, [base[0] + d, base[1] + d, base[2] + d]);
       }
     }
+  },
+  (g, r) => {                                 // 11 torchStem (whole-tile wood: the post stretches the tile in-world, so every pixel must read as wood)
+    for (let y = 0; y < 16; y++)
+      for (let x = 0; x < 16; x++) {
+        const base: readonly [number, number, number] = x < 2 || x > 13 ? [74, 50, 28] : [112, 78, 44];
+        const d = (r() - 0.5) * 14;
+        px(g, x, y, [base[0] + d, base[1] + d, base[2] + d]);
+      }
+  },
+  (g) => {                                     // 12 torchFlame
+    g.fillStyle = 'rgb(255,150,40)';
+    g.fillRect(3, 4, 10, 10);
+    g.fillStyle = 'rgb(255,214,80)';
+    g.fillRect(5, 6, 6, 7);
+    g.fillStyle = 'rgb(255,246,205)';
+    g.fillRect(7, 8, 2, 4);
+  },
+  (g, r) => {                                  // 13 door (plank panel, darker frame, latch)
+    speck(g, [150, 108, 62], 10, r);
+    g.fillStyle = 'rgba(70,48,28,.9)';
+    g.fillRect(0, 0, 16, 2);
+    g.fillRect(0, 14, 16, 2);
+    g.fillRect(0, 0, 2, 16);
+    g.fillRect(14, 0, 2, 16);
+    g.fillRect(7, 3, 2, 10);
+    g.fillStyle = 'rgb(220,200,120)';
+    g.fillRect(11, 8, 2, 2);
   },
 ];
 
@@ -418,8 +445,10 @@ function updateHitbox(): void {
 
 // === ui ===
 
-// T11: hotbar (bottom, display-only) + palette (top-right, click targets). The nine `.slot`
-// divs are pre-placed in index.html; each is painted with the atlas crop of the block it holds.
+// T11: hotbar (bottom, display-only) + palette (right strip, click targets). The nine hotbar
+// `.slot` divs are pre-placed in index.html; the palette rows (icon + name) are generated below
+// — one per PALETTE_BLOCKS entry — so the strip grows with the registry. Each is painted with
+// the atlas crop of the block it holds.
 const PALETTE_BLOCKS = [...PLACEABLE];
 const hotbar = new Hotbar(PALETTE_BLOCKS);
 const atlasURL = atlasCanvas.toDataURL();
@@ -430,33 +459,51 @@ function placeIcon(el: HTMLElement, b: number, px: number): void {
   el.style.backgroundImage = `url(${atlasURL})`;
   el.style.backgroundSize = `${px * 16}px ${px * 16}px`;
   el.style.backgroundPosition = iconPosition(b, px);
-  el.title = String(Block[b]);
+  el.title = BLOCKS[b].name; // real names (was: the numeric block id)
 }
 
 const hotbarEl = document.getElementById('hotbar')!;
 const paletteEl = document.getElementById('palette')!;
 const hotbarSlotEls = Array.from(hotbarEl.children) as HTMLElement[];
-const paletteSlotEls = Array.from(paletteEl.children) as HTMLElement[];
+
+// The palette is a generated scrolling list: one .slot row per PLACEABLE entry
+// (icon + name), so it grows with the registry. index.html holds no static rows.
+const paletteSlotEls: HTMLElement[] = PALETTE_BLOCKS.map((b) => {
+  const el = document.createElement('div');
+  el.className = 'slot';
+  const icon = document.createElement('div');
+  icon.className = 'icon';
+  placeIcon(icon, b, 40); // the icon div is 40px square (no border of its own)
+  const name = document.createElement('span');
+  name.className = 'name';
+  name.textContent = BLOCKS[b].name;
+  el.append(icon, name);
+  el.addEventListener('click', () => hotbar.setSlot(hotbar.selected, b)); // the arrow reads the *current* selection
+  paletteEl.append(el);
+  return el;
+});
+// Rows holding the selected slot's block highlight (several rows can match one block).
+const refreshPaletteSel = (b: number): void => {
+  paletteSlotEls.forEach((el, j) => el.classList.toggle('sel', PALETTE_BLOCKS[j] === b));
+};
 
 hotbarSlotEls.forEach((el, i) => placeIcon(el, hotbar.slots[i], 40)); // 44px box minus 2px border each side
 hotbarEl.classList.remove('hidden');
-// Select-key keycap on each slot (1-9); palette slots are clicked, so they stay unnumbered.
+// Select-key keycap on each slot (1-9); palette rows are clicked, so they stay unnumbered.
 hotbarSlotEls.forEach((el, i) => {
   const num = document.createElement('span');
   num.className = 'num';
   num.textContent = String(i + 1);
   el.append(num);
 });
-paletteSlotEls.forEach((el, i) => {
-  placeIcon(el, PALETTE_BLOCKS[i], 44); // 48px box minus 2px border each side
-  el.addEventListener('click', () => hotbar.setSlot(hotbar.selected, PALETTE_BLOCKS[i])); // the arrow reads the *current* selection
-});
 
 hotbar.onSelectChange = (i) => {
   hotbarSlotEls.forEach((el, j) => el.classList.toggle('sel', j === i));
+  refreshPaletteSel(hotbar.block);
 };
 hotbar.onSlotChange = (i) => {
   placeIcon(hotbarSlotEls[i], hotbar.slots[i], 40); // the palette wrote into a slot
+  refreshPaletteSel(hotbar.slots[i]);
 };
 
 let paletteOpen = false;
