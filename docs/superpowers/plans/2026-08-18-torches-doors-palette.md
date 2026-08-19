@@ -1189,9 +1189,19 @@ New:
 }
 #palette .slot .icon { width: 40px; height: 40px; flex: none; }
 #palette .slot .name {
-  flex: 1; color: #e8eef7; font: 13px/1.4 system-ui, sans-serif;
+  flex: 1; overflow: hidden; text-overflow: ellipsis;
+  color: #e8eef7; font: 13px/1.4 system-ui, sans-serif;
   text-shadow: 0 1px 2px #000; white-space: nowrap;
 }
+```
+
+Edit C — scrollbar styling within the panel (the design spec's file table requires it; the strip actually scrolls, so match the dark translucent panels):
+
+```css
+#palette { scrollbar-width: thin; scrollbar-color: rgba(150, 170, 200, .45) transparent; }
+#palette::-webkit-scrollbar { width: 8px; }
+#palette::-webkit-scrollbar-thumb { background: rgba(150, 170, 200, .4); border-radius: 4px; }
+#palette::-webkit-scrollbar-track { background: transparent; }
 ```
 
 - [ ] **Step 5: Typecheck + build**
