@@ -77,7 +77,10 @@ One byte of state per cell, same pattern as the existing water flag arrays:
 - New `isSolid(x, y, z): boolean` — the single truth for collision:
   - air → false, torch → false, missing data → false
   - door → `!open` (meta bit 0)
-  - otherwise → `BLOCKS[b].solid`
+  - otherwise → `isOpaque(b)` — the legacy player rule (leaves/glass are
+    `solid` for the water sim's blocking checks but pass-through for the
+    player; `BLOCKS[b].solid` is **not** the collision truth, or glass and
+    leaves would become walls — a gameplay change this feature doesn't make)
 
 ## Player (`src/player.ts`)
 

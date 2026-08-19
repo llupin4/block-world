@@ -50,6 +50,7 @@ describe('blocks', () => {
     expect(isOpaque(Block.Dirt)).toBe(true);
     expect(isOpaque(Block.Grass)).toBe(true);
     expect(isOpaque(Block.Sand)).toBe(true);
+    expect(isOpaque(Block.Wood)).toBe(true);
     expect(isOpaque(Block.Planks)).toBe(true);
     expect(isOpaque(Block.Leaves)).toBe(false); // transparent (still solid)
     expect(isOpaque(Block.Glass)).toBe(false);
@@ -122,7 +123,7 @@ describe('blocks', () => {
     expect(iconPosition(Block.Torch, 40)).toBe('-440px 0px'); // tile 11 (torchStem, via +Y face)
     expect(iconPosition(Block.DoorBottom, 40)).toBe('-520px 0px'); // tile 13 (door; tile 12 = flame, unused as icon)
     // must stay a number, not the raw expression text
-    expect(iconPosition(Block.Stone, 40)).not.toContain('iconPosition');
+    expect(iconPosition(Block.Stone, 40)).not.toContain('iconTile');
   });
 
   it('torch meta: 0 = floor post, otherwise 1 | (face << 1); round-trips', () => {
@@ -194,7 +195,7 @@ export const BLOCKS: Record<number, BlockDef> = {
   [Block.Planks]:     { name: 'planks', solid: true,  transparent: false, kind: 'cube',  faces: [10, 10, 10, 10, 10, 10] },
   [Block.Torch]:      { name: 'torch',  solid: false, transparent: true,  kind: 'torch', faces: [11, 11, 11, 11, 11, 11] },
   [Block.DoorBottom]: { name: 'door',   solid: true,  transparent: true,  kind: 'door',  faces: [13, 13, 13, 13, 13, 13] },
-  [Block.DoorTop]:    { name: 'door',   solid: true,  transparent: true,  kind: 'door',  faces: [13, 13, 13, 13, 13, 13] },
+  [Block.DoorTop]:    { name: 'doorTop', solid: true,  transparent: true,  kind: 'door',  faces: [13, 13, 13, 13, 13, 13] },
 };
 
 export const TILE_NAMES = [
@@ -333,12 +334,16 @@ Then append these two `it` blocks inside the existing `describe('world', ...)` (
     w.setBlock(4, 0, 1, Block.DoorBottom, doorMeta(false, 0)); // closed
     w.setBlock(5, 0, 1, Block.DoorBottom, doorMeta(true, 0));  // open
     w.setBlock(6, 0, 1, Block.DoorTop, doorMeta(false, 1));    // closed top half
+    w.setBlock(7, 0, 1, Block.Leaves); // solid:true (water sim) but player-passable — pin the legacy rule
+    w.setBlock(8, 0, 1, Block.Glass);  // same for glass
     expect(w.isSolid(1, 0, 1)).toBe(true);
     expect(w.isSolid(2, 0, 1)).toBe(false);
     expect(w.isSolid(3, 0, 1)).toBe(false);
     expect(w.isSolid(4, 0, 1)).toBe(true);
     expect(w.isSolid(5, 0, 1)).toBe(false);
     expect(w.isSolid(6, 0, 1)).toBe(true);
+    expect(w.isSolid(7, 0, 1)).toBe(false);
+    expect(w.isSolid(8, 0, 1)).toBe(false);
     expect(w.isSolid(64, 0, 0)).toBe(false); // missing chunk -> Air -> not solid
   });
 ```
@@ -432,8 +437,11 @@ Edit E — insert after the (new) `setBlock` method, before `removeChunk`:
 ```ts
   /**
    * The single collision truth: air and torches are never solid; a door is solid
-   * while CLOSED (both halves, full block) and walkable while open. For cube blocks
-   * solid == opaque on every kind, so isOpaque is the exact rule.
+   * while CLOSED (both halves, full block) and walkable while open. Cube blocks
+   * keep the legacy player rule (isOpaque): leaves/glass are solid in BLOCKS
+   * (the water sim's blocking truth) but pass-through for the player. Do NOT
+   * "fix" the fallback to BLOCKS[.].solid — that would wall off glass/leaves,
+   * a gameplay change this feature does not make.
    */
   isSolid(wx: number, wy: number, wz: number): boolean {
     const b = this.getBlock(wx, wy, wz);
