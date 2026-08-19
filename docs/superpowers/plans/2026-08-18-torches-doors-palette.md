@@ -627,9 +627,11 @@ describe('chunk-mesher special blocks', () => {
     expect(opaque!.positions.length / 3).toBe(6 * 4 + 5 * 4);
     const b = posBounds(opaque!); // stub: x reaches 9.375 (stone bounds 8..9 merged in)
     expect(b.xMax).toBeCloseTo(9.375);
-    // the tip: FACES[0] (+X) is the first face emitted (verts 0..3) -> flame tile 12
+    // the tip: FACES[0] (+X) is the stub's first face emitted. The stone's 6 faces precede it
+    // in the buffer (emission order ly -> lz -> lx), so the stub's +X face sits at global
+    // verts 24..27 -> its u coords are uv indices 48, 50, 52, 54 -> flame tile 12
     const uvs = opaque!.uvs;
-    for (let i = 0; i < 8; i += 2) {
+    for (let i = 48; i < 56; i += 2) {
       expect(uvs[i] >= 12 / 16 - 1e-6 && uvs[i] <= 13 / 16 + 1e-6, `uv ${uvs[i]}`).toBe(true);
     }
   });
