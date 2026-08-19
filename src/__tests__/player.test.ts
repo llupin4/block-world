@@ -112,8 +112,23 @@ describe('player', () => {
     p.yaw = -Math.PI / 2; // face +x, straight into the closed door
     run(p, 90, { forward: 1 });
     expect(p.pos.x).toBeLessThan(10); // held back by the closed door, like a wall
+    expect(p.pos.x).toBeGreaterThan(9.6); // stopped flush, matching the wall test's bounds
     state.closed = false; // right-click: the door opens
     run(p, 90, { forward: 1 });
     expect(p.pos.x).toBeGreaterThan(13); // walked straight through the open door
+  });
+
+  it('isSolidAt is the sole collision truth: an opaque id the callback deems walkable does not block', () => {
+    // Stone is opaque; if collision still OR-ed in isOpaque(getBlock(...)), the
+    // player would stop here. Post-Task-7 world.isSolid makes a door walkable
+    // while keeping ids unchanged-ish, so the callback must be authoritative.
+    const getBlock = (_x: number, _y: number, z: number): number =>
+      z >= 2 && z <= 5 ? Block.Stone : Block.Air;
+    const isSolidAt = () => false;
+    const p = new Player(getBlock, isSolidAt);
+    p.place({ x: 0, y: 5, z: 0 });
+    p.yaw = Math.PI; // face +z (yaw 0 faces -z; see Player)
+    run(p, 90, { forward: 1 });
+    expect(p.pos.z).toBeGreaterThan(5);
   });
 });
