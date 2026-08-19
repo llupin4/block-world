@@ -538,8 +538,9 @@ per-cell state lives in a parallel `meta` byte per chunk (`src/world.ts`), the s
 pattern as the water flag arrays:
 
 - **Torch meta:** `0` = floor post; `1 | (face << 1)` for a wall stub, face
-  `1:+X 2:-X 3:+Z 4:-Z` (no ceiling mounts). Placement needs air above the target
-  and a solid opaque face behind it; the mesher emits a thin post/stub with a flame
+  `1:+X 2:-X 3:+Z 4:-Z` (no ceiling mounts). Placement needs the aimed cell
+  (adjacent to a solid opaque face — water/door/glass/leaves are rejected) empty;
+  the mesher emits a thin post/stub with a flame
   tile on top (floor) or on the outward tip (wall). Emits no light — that is the
   deferred "dynamic lighting" item.
 - **Door meta** (stored in **both** halves): bit 0 = open, bit 1 = axis (panel thin
