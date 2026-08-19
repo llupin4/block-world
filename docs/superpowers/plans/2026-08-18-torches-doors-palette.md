@@ -74,6 +74,24 @@ matches the code):
    (`water/door/glass/leaves rejected`) — the plan's "air above the target"
    phrasing did not match the real floor-case rule.
 
+Post-plan user-feedback rounds (in-browser pass, 2026-08-18):
+
+9. **Door edge-hinge + fully-textured faces** (commits `3224a9a`, `9be9d73`):
+   - Closed door panels now hinge on a cell EDGE chosen by the aimed wall face
+     (new `doorMeta(open, axis, side)` bit 2; side 1 for `−X`/`−Z` aims), not
+     the cell center — the open state is the SAME full-size 1×0.2 panel swung
+     90° about the hinge corner, so it is never the old squished clamped slab.
+     (Known cosmetic: a side-1 door's true swing would leave the cell, so its
+     open state clamps to the min corner and reads as a small reposition.)
+   - Special-block face culling is now **geometry-coverage-aware**: a face is
+     culled only when the box end of it actually reaches the cell-boundary
+     plane AND the neighbour is opaque, or a special neighbour whose own
+     geometry on the shared plane covers the face's area (equal coverage →
+     exactly one face kept, by lexicographic cell index). This removes the
+     see-through slits/hollow panels the old "neighbour cell is special" rule
+     punched in 0.2-thin panels next to torches/doors/far-side walls. Every
+     door/torch face now carries its texture from any view angle.
+
 ---
 
 ### Task 1: Block registry — new ids, names, kinds, meta helpers
@@ -698,40 +716,26 @@ describe('chunk-mesher special blocks', () => {
     }
   });
 
-  it('a closed X-thin door emits its full-height panel (x [0.4, 0.6] of the cell)', () => {
-    const w = new World();
-    const c = w.ensureChunk(0, 0, 0);
-    c.blocks[localIndex(8, 8, 8)] = Block.DoorBottom;
-    c.meta[localIndex(8, 8, 8)] = doorMeta(false, 0); // closed, axis X
-    const { opaque, trans } = meshChunk(w, 0, 0, 0);
-    expect(trans).toBeNull();
-    expect(opaque!.positions.length / 3).toBe(6 * 4);
-    const b = posBounds(opaque!);
-    expect(b.xMin).toBeCloseTo(8.4); expect(b.xMax).toBeCloseTo(8.6);
-    expect(b.zMin).toBeCloseTo(8); expect(b.zMax).toBeCloseTo(9); // panel spans the full cell width
-    expect(b.yMin).toBeCloseTo(8); expect(b.yMax).toBeCloseTo(9);
-  });
-
-  it('an open X-thin door emits a corner slab (x [0, 0.55], z [0, 0.2]); the Z axis mirrors it', () => {
-    const w = new World();
-    const c = w.ensureChunk(0, 0, 0);
-    c.blocks[localIndex(8, 8, 8)] = Block.DoorBottom;
-    c.meta[localIndex(8, 8, 8)] = doorMeta(true, 0);
-    let b = posBounds(meshChunk(w, 0, 0, 0).opaque!);
-    expect(b.xMin).toBeCloseTo(8); expect(b.xMax).toBeCloseTo(8.55);
-    expect(b.zMin).toBeCloseTo(8); expect(b.zMax).toBeCloseTo(8.2);
-
-    c.meta[localIndex(8, 8, 8)] = doorMeta(true, 1); // open, axis Z
-    b = posBounds(meshChunk(w, 0, 0, 0).opaque!);
-    expect(b.xMin).toBeCloseTo(8); expect(b.xMax).toBeCloseTo(8.2);
-    expect(b.zMin).toBeCloseTo(8); expect(b.zMax).toBeCloseTo(8.55);
-
-    // a closed Z-thin panel is thin in z instead
-    c.meta[localIndex(8, 8, 8)] = doorMeta(false, 1);
-    b = posBounds(meshChunk(w, 0, 0, 0).opaque!);
-    expect(b.xMin).toBeCloseTo(8); expect(b.xMax).toBeCloseTo(9);
-    expect(b.zMin).toBeCloseTo(8.4); expect(b.zMax).toBeCloseTo(8.6);
-  });
+  // REVISION (user feedback 2026-08-18, commit 3224a9a): the plan's original
+  // tests below pinned a CENTERED closed panel (x [0.4, 0.6]) and a clamped
+  // 0.55 open slab. The door now hinges on a side edge (new meta bit 2):
+  //   closed X side 0: x [0, 0.2]; side 1: x [0.8, 1]; closed Z mirrors on z;
+  //   open = the SAME full-size 1 x 0.2 panel swung 90deg about the hinge corner
+  //   (open X: x [0, 1], z [0, 0.2]; open Z mirrored) — never squished.
+  // See the 'closed X-thin door hugs its side edge…', 'closed Z-thin…',
+  // 'open door is the full-size panel swung 90 degrees…' tests in the repo.
+  //
+  // REVISION (commit 9be9d73): `hidden` no longer means "neighbour cell is
+  // opaque or special" — a face is culled only when the box END of that face
+  // reaches the cell-boundary plane AND the neighbour is opaque, or a special
+  // neighbour whose own geometry on the opposite face covers the face's area
+  // (strict superset -> cull; exactly equal -> the smaller lexicographic cell
+  // index keeps its face, the other culls). Interior box ends are never culled,
+  // so a far-side opaque block cannot punch a slit in a 0.2-thin panel and a
+  // torch post cannot eat a door face it never touches. See the repo tests
+  // 'far side over-cull', 'keeps its face against a special neighbour…',
+  // 'mirror-hinged… exactly one…', 'same-hinge… never z-fight', and the
+  // all-special recount (6+6+5).
 
   it('a door never culls neighbor faces, while a stone neighbor still does', () => {
     const withNeighbor = (neighbor: number, meta = 0) => {
@@ -760,11 +764,12 @@ describe('chunk-mesher special blocks', () => {
     c.blocks[localIndex(9, 9, 8)] = Block.DoorTop;
     c.meta[localIndex(9, 9, 8)] = doorMeta(false, 0);
     const { opaque } = meshChunk(w, 0, 0, 0);
-    // face accounting (a face is hidden iff its neighbor CELL is opaque or special):
-    //   torch (8,8,8):    +X faces the door (special)       -> hidden: 5 faces
-    //   door bottom (9,8,8): -X faces the torch, +Y faces the top half, both special -> 4 faces
-    //   door top (9,9,8):    -Y faces the bottom half (special) -> 5 faces
-    expect(opaque!.positions.length / 3).toBe((5 + 4 + 5) * 4);
+    // face accounting (recounted for the coverage rule, 9be9d73):
+    //   torch (8,8,8):    post reaches no vertical plane -> its +X face is kept: 6 faces
+    //   door bottom (9,8,8): -X kept (post can't cover), +Y kept (smaller index vs the
+    //                        top half's equal coverage) -> 6 faces
+    //   door top (9,9,8):    -Y culled (equal coverage, bigger index) -> 5 faces
+    expect(opaque!.positions.length / 3).toBe((6 + 6 + 5) * 4);
   });
 });
 ```
@@ -803,11 +808,13 @@ const TIP_FACE = [0, 0, 1, 4, 5];
  * the opaque buffer. `min`/`size` are world-space (a box lives inside ONE cell, size
  * <= 1 per axis). `tiles` is per FACES order [+X, -X, +Y, -Y, +Z, -Z]; the tile is
  * stretched across the whole face — torch/door tiles are painted whole-material, so
- * the stretch still reads correctly on a 0.18-wide post. A face is hidden when the
- * neighbouring CELL in its direction is opaque OR special: a stub's back face vanishes
- * against its wall, and the two faces between stacked door halves (or a torch beside a
- * door) hide each other — the geometry at those boundaries never coincides, so no
- * visible face is lost. Shading = FACE_SHADE[face]; no vertex AO on partial geometry.
+ * the stretch still reads correctly on a 0.18-wide post.
+ * A face is hidden only if the box END of it reaches the cell-boundary plane AND
+ * the neighbouring cell is opaque, or a special block whose geometry covers the
+ * face's area (strict superset culls; exactly equal -> keep one by lexicographic
+ * cell index). Interior ends are never culled (revision 9be9d73): a stub's back
+ * face vanishes against its wall, but a panel face is never eaten by a neighbour
+ * whose geometry can't reach that plane. Shading = FACE_SHADE[face]; no vertex AO on partial geometry.
  */
 function pushBox(
   buf: Buf,
@@ -870,11 +877,12 @@ function emitTorch(
 }
 
 /**
- * Door: BOTH halves emit the identical panel inside their own cell (stacked cells read
- * as one panel; the shared seam hides against the special neighbor cell). Closed = a
- * full-height thin panel, axis X or Z; open = a slab swung to the cell's x=0,z=0
- * corner and clamped inside the cell (a true 90 degrees swing of a full-width panel
- * would overhang by half a cell).
+* Door: BOTH halves emit the identical panel inside their own cell (side-aware,
+     * post-revision 2026-08-18): closed = a 0.2-thin full-height panel hugging the
+     * side edge from its meta side bit (side 0 -> min edge, side 1 -> max edge of
+     * the thin axis); open = the SAME 1 x 0.2 panel swung 90 degrees about the
+     * hinge corner (min-corner; a side-1 swing would overhang, so it is clamped
+     * in-cell) — congruent to the closed panel, never squished.
  */
 function emitDoor(
   buf: Buf,
@@ -889,11 +897,15 @@ function emitDoor(
   };
   const xThin = doorAxis(meta) === 0;
   const tiles = [TILE_DOOR, TILE_DOOR, TILE_DOOR, TILE_DOOR, TILE_DOOR, TILE_DOOR];
-  if (doorOpen(meta)) {
-    pushBox(buf, [wx, wy, wz], xThin ? [0.55, 1, 0.2] : [0.2, 1, 0.55], tiles, hidden);
-  } else {
-    pushBox(buf, xThin ? [wx + 0.4, wy, wz] : [wx, wy, wz + 0.4], xThin ? [0.2, 1, 1] : [1, 1, 0.2], tiles, hidden);
-  }
+// REVISION (3224a9a): side-aware edges; open = congruent full-size swing (never clamped 0.55).
+    const side = doorSide(meta);
+    if (doorOpen(meta)) {
+      pushBox(buf, [wx, wy, wz], xThin ? [1, 1, 0.2] : [0.2, 1, 1], tiles, hidden);
+    } else if (xThin) {
+      pushBox(buf, side ? [wx + 0.8, wy, wz] : [wx, wy, wz], [0.2, 1, 1], tiles, hidden);
+    } else {
+      pushBox(buf, side ? [wx, wy, wz + 0.8] : [wx, wy, wz], [1, 1, 0.2], tiles, hidden);
+    }
 }
 ```
 
@@ -1310,10 +1322,10 @@ function doorPartner(x: number, y: number, z: number): [number, number, number] 
   return null;
 }
 
-/** Right-click on a door: flip open/closed on BOTH halves, keeping the axis (instant snap). */
+/** Right-click on a door: flip open/closed on BOTH halves, keeping axis AND side (instant snap). */
 function toggleDoorPair(x: number, y: number, z: number): void {
   const b = world.getBlock(x, y, z);
-  const meta = doorMeta(!doorOpen(world.getMeta(x, y, z)), doorAxis(world.getMeta(x, y, z)));
+  const meta = doorMeta(!doorOpen(world.getMeta(x, y, z)), doorAxis(world.getMeta(x, y, z)), doorSide(world.getMeta(x, y, z)));
   world.setBlock(x, y, z, b, meta);
   remeshAround(x, y, z);
   const p = doorPartner(x, y, z);
@@ -1390,7 +1402,11 @@ function onMouseDown(e: MouseEvent): void {
       if (above !== Block.Air && above !== Block.Water) return;
       if (!player.noclip && (player.intersectsVoxel(tx, ty, tz) || player.intersectsVoxel(tx, ty + 1, tz))) return;
       // +/-X face or a floor face -> the panel is thin in X; +/-Z face -> thin in Z
-      const meta = doorMeta(false, hit.nz !== 0 ? 1 : 0);
+      // (revision 3224a9a): side = which edge of the target cell the support sits on,
+      // from the aim normal (-X or -Z aim -> far edge -> side 1)
+      const thinInZ = hit.nz !== 0;
+      const side = (thinInZ ? hit.nz : hit.nx) < 0 ? 1 : 0;
+      const meta = doorMeta(false, thinInZ ? 1 : 0, side);
       world.setBlock(tx, ty, tz, Block.DoorBottom, meta);
       world.setBlock(tx, ty + 1, tz, Block.DoorTop, meta);
       remeshAround(tx, ty, tz);

@@ -53,13 +53,13 @@ One byte of state per cell, same pattern as the existing water flag arrays:
 | kind  | bit 0         | remaining bits                                |
 |-------|---------------|-----------------------------------------------|
 | torch | wall-mounted? | bits 1–3: if wall-mounted, face `1:+X, 2:-X, 3:+Z, 4:-Z` (no ceiling mounts); if floor-mounted, unused |
-| door  | open?         | bit 1: axis — `0` = panel thin in X, `1` = panel thin in Z |
+| door  | open?         | bit 1: axis — `0` = panel thin in X, `1` = panel thin in Z; bit 2: side — `0` = panel hinges on the cell's min edge of its thin axis, `1` = max edge (chosen by which wall face was aimed: `−X`/`−Z` aim → side 1) |
 
 - Stored in **both** door cells, identically. The mesher reads strictly the
   local cell, so a door pair spanning a chunk seam renders correctly from
   either side.
 - Pack/unpack helpers (`packTorchMeta(face | 'floor')`, `packDoorMeta(open,
-  axis)`, and their decoders) are pure functions in `blocks.ts`, testable
+  axis, side)`, and their decoders) are pure functions in `blocks.ts`, testable
   without the world.
 - Ordinary (cube) blocks always carry meta 0.
 
@@ -118,9 +118,15 @@ prng). `TILE_NAMES` extended accordingly.
 - `'torch'` / `'door'` → new pure emitters writing into the **opaque**
   buffer, built on a small `pushBox(buf, x0..x1, y0..y1, z0..z1, perFaceTile)`
   helper in `chunk-mesher.ts`:
-  - a box face is emitted unless the neighboring *cell* in the face direction
-    is opaque **or** special (torch/door) — a torch stub's back face vanishes
-    against the wall it mounts on;
+  - a (partial-geometry) box face is culled only when the box **end** of that
+    face sits on the cell-boundary plane AND the neighbour is opaque, OR the
+    neighbour is a special block whose own geometry on its opposite face
+    *covers that face's area* (rect coverage: a strict superset always culls;
+    with exactly equal coverage the pair keeps exactly ONE face, by the
+    smaller lexicographic cell index). A face whose box end is interior — or a
+    neighbour whose geometry never touches that plane (e.g. a torch post
+    beside a door panel) — is never culled, so panels stay textured from every
+    angle instead of developing see-through slits;
   - shading reuses `FACE_SHADE` per face direction; **no vertex AO** on
     partial geometry;
   - UVs map the face's 16×16 tile (same as cubes).
@@ -132,14 +138,20 @@ in their own cell):
 |---|---|---|---|
 | torch | floor-mounted | stem `x,z ∈ [0.41, 0.59]`, `y ∈ [0, 0.875]` | sides/bottom = stem, top = flame |
 | torch | wall-mounted (`f`) | stub along `+f` from the wall face: `0 → 0.375` in `f`, centered `0.41–0.59` on the face's other two axes | all faces stem **except** the outward tip (`+f`) = flame |
-| door (both halves) | closed, axis X | `x ∈ [0.4, 0.6]`, `z ∈ [0, 1]`, `y ∈ [0, 1]` | all = door |
-| door (both halves) | closed, axis Z | `z ∈ [0.4, 0.6]`, `x ∈ [0, 1]`, `y ∈ [0, 1]` | all = door |
-| door (both halves) | open, axis X | `x ∈ [0, 0.55]`, `z ∈ [0, 0.2]`, `y ∈ [0, 1]` (panel swung to the `x=0,z=0` corner) | all = door |
-| door (both halves) | open, axis Z | `z ∈ [0, 0.55]`, `x ∈ [0, 0.2]`, `y ∈ [0, 1]` | all = door |
+| door (both halves) | closed, axis X, side 0 | `x ∈ [0, 0.2]`, `z ∈ [0, 1]`, `y ∈ [0, 1]` (panel flush on the support edge) | all = door |
+| door (both halves) | closed, axis X, side 1 | `x ∈ [0.8, 1]`, `z ∈ [0, 1]`, `y ∈ [0, 1]` | all = door |
+| door (both halves) | closed, axis Z, side 0 | `z ∈ [0, 0.2]`, `x ∈ [0, 1]`, `y ∈ [0, 1]` | all = door |
+| door (both halves) | closed, axis Z, side 1 | `z ∈ [0.8, 1]`, `x ∈ [0, 1]`, `y ∈ [0, 1]` | all = door |
+| door (both halves) | open, axis X | `x ∈ [0, 1]`, `z ∈ [0, 0.2]`, `y ∈ [0, 1]` | all = door |
+| door (both halves) | open, axis Z | `x ∈ [0, 0.2]`, `z ∈ [0, 1]`, `y ∈ [0, 1]` | all = door |
 
-The open-door slab is clamped inside the cell (a true 90° swing of a
-full-width panel would overhang by half a cell); it reads as a door open
-against the wall. State changes are an instant snap — no animation.
+The open panel is the **closed panel rotated 90° about its hinge corner** —
+the same full-size 1×0.2 panel in both states, never a squished slab (the
+2026-08-18 user-feedback revision; the original centred/corner-clamped
+geometry made the open state read as "squished"). A side-1 door's true swing
+would overhang the cell's far edge, so its open state is clamped to the cell
+and reads as a small reposition rather than a continuous in-place swing
+(accepted, POC). State changes are an instant snap — no animation.
 
 Raycast needs **no changes**: torch/door are non-air/water, so LMB already
 targets them and RMB's existing face math already yields the mount cell.
@@ -154,9 +166,9 @@ targets them and RMB's existing face math already yields the mount cell.
 1. **Aim at a door half** (`DoorBottom`/`DoorTop`, any state): **toggle**
    open/closed, regardless of the held item. New meta written to the aimed
    cell **and** the partner cell (half above/below, if loaded and actually a
-   matching half with the same axis); remesh around both cells; water sim not
-   involved (block ids unchanged, so no new water can appear). Axis and mount
-   face never change.
+   matching half); remesh around both cells; water sim not
+   involved (block ids unchanged, so no new water can appear). Axis and side
+   never change — only the open bit flips.
 2. **Hold torch** (logical `Torch`): place only if the target cell `T` is
    **Air** *and* the face cell behind it (the cast hit) is a solid opaque
    block. No torches in water, on ceilings (`ny = -1`), on door faces (doors
@@ -165,10 +177,12 @@ targets them and RMB's existing face math already yields the mount cell.
 3. **Hold door** (logical `DoorBottom`): `T` and `T+1` (the cell above) must
    both be Air **or** Water (water cells are dried by `sim.edit` on
    placement), `T+1 < WORLD_Y_MAX`, and neither cell may intersect the
-   player's AABB (while closed the door is a full solid block in both
-   cells). Axis from the face: `±X → X-thin`, `±Z → Z-thin`, floor (`+Y`) →
-   X-thin. Writes `DoorBottom`@`T`, `DoorTop`@`T+1`, both with
-   `packDoorMeta(open=false, axis)`; `sim.edit` on both cells.
+player's AABB (while closed the door is a full solid block in both
+    cells). Axis from the face: `±X → X-thin`, `±Z → Z-thin`, floor (`+Y`) →
+    X-thin. Side from the aim: aim along a `−X` or `−Z` face → side 1 (support
+    on the target's far edge), otherwise side 0. Writes `DoorBottom`@`T`,
+    `DoorTop`@`T+1`, both with `packDoorMeta(open=false, axis, side)`;
+    `sim.edit` on both cells.
 4. **Hold a normal block** `B`: `T` may be Air, Water, **Torch** (the torch
    is replaced — `setBlock(T, B)` with meta 0 clears its state), or a **door
    half** (the whole pair is removed first — the partner cell, if loaded, is
@@ -204,7 +218,10 @@ Edge cases accepted (POC):
   blocks have no physics support check on edit; accepted for the POC);
 - placing a door pair while the partner cell's chunk is missing/unloaded: `setBlock`
   no-ops on missing chunks, so a lone half can appear until the chunk streams back
-  (same family as the accepted streaming-orphan case).
+  (same family as the accepted streaming-orphan case);
+- a side-1 door (placed on a `−X`/`−Z` wall face) opens into the min-corner
+  slab — a true in-place swing would leave the cell — so that orientation reads
+  as a small reposition on open (accepted, POC);
 
 ## UI: scrollable palette (`index.html`, `src/ui.css`, `src/main.ts`)
 

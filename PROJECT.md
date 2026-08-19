@@ -544,14 +544,20 @@ pattern as the water flag arrays:
   tile on top (floor) or on the outward tip (wall). Emits no light — that is the
   deferred "dynamic lighting" item.
 - **Door meta** (stored in **both** halves): bit 0 = open, bit 1 = axis (panel thin
-  in X or Z, chosen by the aimed face). Placement writes the pair (bottom at the
-  target cell, top above) into two Air/Water cells; **RMB on either half toggles the
-  whole pair** (instant snap, no swing animation); breaking either half removes both.
-  Closed = solid in both halves and rendered as a full-height thin panel; open = a
-  slab swung to the cell corner, walkable.
+  in X or Z, chosen by the aimed face), bit 2 = side (which edge of the cell the
+  panel hinges on; a `−X`/`−Z` aim hinges on the far edge). Placement writes the
+  pair (bottom at the target cell, top above) into two Air/Water cells; **RMB on
+  either half toggles the whole pair** (instant snap, no swing animation); breaking
+  either half removes both. Closed = solid in both halves, rendered as a full-height
+  0.2-thin panel hugging its hinge edge (flush against the aimed wall); open = the
+  **same** full-size panel swung 90° about the hinge corner (never a squished slab),
+  walkable.
 - `world.isSolid()` is the single collision truth (closed door blocks, open door and
   torch walk); the mesher emits their partial geometry in the opaque pass. Torches
-  and doors are never opaque, so they never cull neighbor faces.
+  and doors are never opaque, so they never cull neighbor faces; and a thin panel's
+  own face is culled only when the neighbour's **geometry** actually covers that
+  area (coverage rule), so a door/torch next to a door keeps its textured faces
+  instead of developing see-through slits.
 - **Water asymmetry (POC-accepted):** the water sim keeps the flat per-id `solid`
   truth, so a door cell blocks water even while the door is OPEN — a player walks
   through (collision uses `world.isSolid`), but water does not flow through.
