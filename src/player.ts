@@ -34,9 +34,19 @@ export class Player {
   noclip = false;       // N toggle
 
   private getBlock: (x: number, y: number, z: number) => number;
+  private isSolidAt: (x: number, y: number, z: number) => boolean;
 
-  constructor(getBlock: (x: number, y: number, z: number) => number) {
+  /**
+   * getBlock feeds the water probes (body/eye-voxel sampling); isSolidAt feeds
+   * collision. Without one, the pre-door per-id rule (isOpaque(getBlock(...)))
+   * applies — correct for every existing test that constructs Player with one arg.
+   */
+  constructor(
+    getBlock: (x: number, y: number, z: number) => number,
+    isSolidAt?: (x: number, y: number, z: number) => boolean,
+  ) {
     this.getBlock = getBlock;
+    this.isSolidAt = isSolidAt ?? ((x, y, z) => isOpaque(this.getBlock(x, y, z)));
   }
 
   place(p: Vec3): void {
@@ -59,7 +69,7 @@ export class Player {
     for (let y = y0; y <= y1; y++)
       for (let z = z0; z <= z1; z++)
         for (let x = x0; x <= x1; x++)
-          if (isOpaque(this.getBlock(x, y, z))) return true;
+          if (this.isSolidAt(x, y, z)) return true;
     return false;
   }
 

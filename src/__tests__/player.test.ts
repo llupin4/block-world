@@ -97,4 +97,23 @@ describe('player', () => {
     expect(rise.vel.y).toBeCloseTo(3, 0);  // SWIM_SPEED cap
     expect(rise.pos.y).toBeCloseTo(2.3, 1);
   });
+
+  it('door state drives collision via isSolidAt: a closed door blocks, opening it lets the player through', () => {
+    // A full-height door column stands in for a door pair: collision only asks "is this
+    // cell solid", and the answer flips with the door's state.
+    const state = { closed: true };
+    const inDoorColumn = (x: number, z: number) =>
+      x >= 10 && x <= 13 && z >= 4 && z <= 7;
+    const getBlock = (x: number, _y: number, z: number): number =>
+      inDoorColumn(x, z) ? Block.DoorBottom : Block.Air;
+    const isSolidAt = (x: number, _y: number, z: number) => inDoorColumn(x, z) && state.closed;
+    const p = new Player(getBlock, isSolidAt);
+    p.place({ x: 8, y: 5, z: 8 });
+    p.yaw = -Math.PI / 2; // face +x, straight into the closed door
+    run(p, 90, { forward: 1 });
+    expect(p.pos.x).toBeLessThan(10); // held back by the closed door, like a wall
+    state.closed = false; // right-click: the door opens
+    run(p, 90, { forward: 1 });
+    expect(p.pos.x).toBeGreaterThan(13); // walked straight through the open door
+  });
 });
