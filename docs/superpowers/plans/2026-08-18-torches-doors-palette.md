@@ -1523,7 +1523,9 @@ pattern as the water flag arrays:
   tile on top (floor) or on the outward tip (wall). Emits no light — that is the
   deferred "dynamic lighting" item.
 - **Door meta** (stored in **both** halves): bit 0 = open, bit 1 = axis (panel thin
-  in X or Z, chosen by the aimed face). Placement writes the pair (bottom at the
+  in X or Z, chosen by the player's FACING (post-plan revision `bed9f5b`: the panel's
+  wide face goes perpendicular to the look direction, so a door covers the hallway you
+  face down; an aimed-face axis was the original rule). Placement writes the pair (bottom at the
   target cell, top above) into two Air/Water cells; **RMB on either half toggles the
   whole pair** (instant snap, no swing animation); breaking either half removes both.
   Closed = solid in both halves and rendered as a full-height thin panel; open = a
