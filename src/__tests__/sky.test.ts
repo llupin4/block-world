@@ -90,4 +90,18 @@ describe('sampleSky', () => {
       expect(s.moonDir[2]).toBeCloseTo(-s.sunDir[2], 6);
     }
   });
+
+  it('wraps any phase into [0, 1): 1.0 == 0.0, negatives and out-of-range equivalent', () => {
+    const wrap = (x: number, y: number, what: string): void => {
+      const a = sampleSky(x);
+      const b = sampleSky(y);
+      expect(a.worldDim, `${what} dim`).toBeCloseTo(b.worldDim, 9);
+      expect(a.starAlpha, `${what} stars`).toBeCloseTo(b.starAlpha, 9);
+      expect(a.sunDir[0], `${what} sunx`).toBeCloseTo(b.sunDir[0], 9);
+      expect(a.sunDir[1], `${what} suny`).toBeCloseTo(b.sunDir[1], 9);
+    };
+    wrap(1.0, 0.0, 'full cycle');
+    wrap(-0.25, 0.75, 'negative');
+    wrap(2.5, 0.5, 'out-of-range');
+  });
 });
