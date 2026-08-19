@@ -87,3 +87,195 @@ export function sampleSky(phase: number): SkySample {
     waterFogDensity: lerp(a.waterFogDens, b.waterFogDens, t),
   };
 }
+
+import * as THREE from 'three';
+
+// --- renderer: the thin three.js side, applied per frame by src/main.ts ---
+
+const prng = (seed: number): (() => number) => {
+  let a = seed >>> 0;
+  return () => {
+    a = (a + 0x6d2b79f5) | 0;
+    let t = Math.imul(a ^ (a >>> 15), 1 | a);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+};
+
+const css = (c: RGB): string =>
+  `rgb(${Math.round(c[0] * 255)},${Math.round(c[1] * 255)},${Math.round(c[2] * 255)})`;
+
+const dist3 = (a: RGB, b: RGB): number =>
+  Math.abs(a[0] - b[0]) + Math.abs(a[1] - b[1]) + Math.abs(a[2] - b[2]);
+
+export interface Sky {
+  apply(sample: SkySample, mood: 'air' | 'water', camera: THREE.PerspectiveCamera): void;
+}
+
+/**
+ * Builds the sky objects (dome, stars, sun, moon) into `scene` and returns an
+ * `apply` handle. The renderer mutates the fog-object / background objects
+ * passed in from main.ts — it never re-allocates per frame. The dome is the
+ * only texture that can change: its gradient canvas redraws when the palette
+ * moves (dusk/dawn bands), never while a phase is stable.
+ */
+export function createSky(
+  scene: THREE.Scene,
+  matOpaque: THREE.MeshBasicMaterial,
+  matTrans: THREE.MeshBasicMaterial,
+  fogAir: THREE.FogExp2,
+  fogWater: THREE.FogExp2,
+  bgWater: THREE.Color,
+): Sky {
+  // Sky dome: big inverted sphere, re-centred on the camera each frame.
+  // CanvasTexture keeps flipY=true and SphereGeometry gives v=1 at the top
+  // pole, so canvas row 0 (zenith) lands at the top pole.
+  const gradCanvas = document.createElement('canvas');
+  gradCanvas.width = 16;
+  gradCanvas.height = 256;
+  const gctx = gradCanvas.getContext('2d')!;
+  const gradTex = new THREE.CanvasTexture(gradCanvas);
+  const drawDome = (top: RGB, horizon: RGB): void => {
+    // rows 0..127: zenith → horizon (the equator is row ~128); below: flat horizon
+    for (let y = 0; y < 128; y++) {
+      const t = y / 127;
+      gctx.fillStyle = css([
+        top[0] + (horizon[0] - top[0]) * t,
+        top[1] + (horizon[1] - top[1]) * t,
+        top[2] + (horizon[2] - top[2]) * t,
+      ]);
+      gctx.fillRect(0, y, 16, 1);
+    }
+    gctx.fillStyle = css(horizon);
+    gctx.fillRect(0, 128, 16, 128);
+  };
+  const dome = new THREE.Mesh(
+    new THREE.SphereGeometry(400, 32, 16),
+    new THREE.MeshBasicMaterial({ map: gradTex, side: THREE.BackSide, fog: false, depthWrite: false }),
+  );
+  scene.add(dome);
+
+  // Stars: ~400 fixed points on the upper celestial sphere, camera-following.
+  const N_STARS = 400;
+  const starPos = new Float32Array(N_STARS * 3);
+  const starCol = new Float32Array(N_STARS * 3);
+  {
+    const r = prng(0x51a77e);
+    for (let i = 0; i < N_STARS; i++) {
+      const y = r(); // uniform over the upper hemisphere
+      const a = r() * Math.PI * 2;
+      const rr = Math.sqrt(1 - y * y);
+      starPos[i * 3] = rr * Math.cos(a) * 360;
+      starPos[i * 3 + 1] = y * 360;
+      starPos[i * 3 + 2] = rr * Math.sin(a) * 360;
+      const blue = r() < 0.3; // a few pale-blue, the rest white
+      starCol[i * 3] = blue ? 0.72 : 1.0;
+      starCol[i * 3 + 1] = blue ? 0.78 : 1.0;
+      starCol[i * 3 + 2] = 1.0;
+    }
+  }
+  const starGeo = new THREE.BufferGeometry();
+  starGeo.setAttribute('position', new THREE.BufferAttribute(starPos, 3));
+  starGeo.setAttribute('color', new THREE.BufferAttribute(starCol, 3));
+  const starMat = new THREE.PointsMaterial({
+    size: 2,
+    sizeAttenuation: false,
+    vertexColors: true,
+    transparent: true,
+    opacity: 0,
+    fog: false,
+    depthWrite: false,
+  });
+  const stars = new THREE.Points(starGeo, starMat);
+  scene.add(stars);
+
+  // Sun & moon: soft radial-gradient sprite discs.
+  const glowTexture = (inner: string, mid: string, outer: string): THREE.CanvasTexture => {
+    const c = document.createElement('canvas');
+    c.width = 64;
+    c.height = 64;
+    const g = c.getContext('2d')!;
+    const grad = g.createRadialGradient(32, 32, 0, 32, 32, 32);
+    grad.addColorStop(0, inner);
+    grad.addColorStop(0.25, inner);
+    grad.addColorStop(0.5, mid);
+    grad.addColorStop(1, outer);
+    g.fillStyle = grad;
+    g.fillRect(0, 0, 64, 64);
+    return new THREE.CanvasTexture(c);
+  };
+  const sun = new THREE.Sprite(
+    new THREE.SpriteMaterial({
+      map: glowTexture('rgba(255,246,205,1)', 'rgba(255,196,80,0.8)', 'rgba(255,150,40,0)'),
+      fog: false,
+      transparent: true,
+    }),
+  );
+  sun.scale.set(46, 46, 1);
+  scene.add(sun);
+  const moon = new THREE.Sprite(
+    new THREE.SpriteMaterial({
+      map: glowTexture('rgba(244,244,232,1)', 'rgba(190,198,228,0.7)', 'rgba(150,160,205,0)'),
+      fog: false,
+      transparent: true,
+    }),
+  );
+  moon.scale.set(34, 34, 1);
+  scene.add(moon);
+
+  const tmp = new THREE.Vector3();
+  let lastTop: RGB | null = null;
+  let lastHorizon: RGB | null = null;
+
+  return {
+    apply(sample, mood, camera) {
+      // worldDim: one scalar on the shared materials dims the whole world,
+      // zero remeshing. The clouds tint it the same way (see src/clouds.ts).
+      matOpaque.color.setScalar(sample.worldDim);
+      matTrans.color.setScalar(sample.worldDim);
+
+      if (mood === 'water') {
+        // the underwater mood keeps priority, but is time-tinted
+        scene.background = bgWater;
+        scene.fog = fogWater;
+        bgWater.setRGB(sample.waterBg[0], sample.waterBg[1], sample.waterBg[2]);
+        fogWater.color.setRGB(sample.waterFogColor[0], sample.waterFogColor[1], sample.waterFogColor[2]);
+        fogWater.density = sample.waterFogDensity;
+        dome.visible = false;
+        stars.visible = false;
+        sun.visible = false;
+        moon.visible = false;
+        return;
+      }
+
+      scene.background = null; // the dome covers the screen; clear colour is a fallback
+      scene.fog = fogAir;
+      fogAir.color.setRGB(sample.airFogColor[0], sample.airFogColor[1], sample.airFogColor[2]);
+      fogAir.density = sample.airFogDensity;
+
+      dome.visible = true;
+      dome.position.copy(camera.position);
+
+      stars.visible = sample.starAlpha > 0.01;
+      starMat.opacity = sample.starAlpha;
+      stars.position.copy(camera.position);
+
+      sun.position.copy(camera.position).addScaledVector(tmp.set(sample.sunDir[0], sample.sunDir[1], sample.sunDir[2]), 380);
+      sun.visible = sample.sunDir[1] > -0.03;
+      moon.position.copy(camera.position).addScaledVector(tmp.set(sample.moonDir[0], sample.moonDir[1], sample.moonDir[2]), 380);
+      moon.visible = sample.moonDir[1] > -0.03;
+
+      if (
+        lastTop === null ||
+        lastHorizon === null ||
+        dist3(sample.skyTop, lastTop) > 0.003 ||
+        dist3(sample.skyHorizon, lastHorizon) > 0.003
+      ) {
+        drawDome(sample.skyTop, sample.skyHorizon);
+        gradTex.needsUpdate = true;
+        lastTop = sample.skyTop;
+        lastHorizon = sample.skyHorizon;
+      }
+    },
+  };
+}
