@@ -70,6 +70,17 @@ Items deliberately not done in the POC. Rough order of value.
   logging per-phase ms) was deleted with the fix; if more frame-time work is needed, recreate
   it — a 400-frame walk over open ocean with load/mesh/settle/tick split beats guessing.
 
+## World time & simulation clocks
+
+- **Align the simulation clocks on one tick system.** The day/night project (branch
+  `day-night-clouds`) introduces `src/time.ts` — a canonical `WorldTime` advanced in the fixed
+  60 Hz physics substep — which the sky/cloud systems read, but the water sim keeps its own
+  independent slow clock (`WATER_STEP`/`waterAcc` in `src/main.ts`). Backlog: converge on a
+  single heartbeat that every simulation system derives from (water's pulse as one stride on
+  the shared tick; world time, cloud wind, and future weather/lighting as siblings). Worth it
+  eventually for determinism and for multiplayer, where a shared tick basis is what lets a
+  server own the simulation.
+
 ## Sky & lighting
 
 Items requested 2026-08-18 (with the torch/door work), deferred by design:
