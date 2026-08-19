@@ -54,3 +54,82 @@ export function cloudMask(ax: number, az: number, windX: number, windZ: number):
 export function windAt(timeSec: number): [number, number] {
   return [WIND_X * timeSec, WIND_Z * timeSec + WIND_Z_OFFSET];
 }
+
+import * as THREE from 'three';
+
+// --- renderer: an InstancedMesh of flat quads, grid-locked to the world ---
+
+export interface Clouds {
+  update(camX: number, camZ: number, timeSec: number, dim: number): void;
+}
+
+/**
+ * Builds the cloud layer into `scene`. Instances live at fixed world
+ * positions inside a 24×24-cell window anchored to the camera's 4-block grid
+ * cell; the window re-anchors (and the mask re-evaluates) only when the
+ * camera crosses a cell boundary — no per-frame matrix writes. `dim` is the
+ * sky's worldDim: clouds tint white → faint blue-grey as night falls.
+ */
+export function createClouds(scene: THREE.Scene): Clouds {
+  // Pre-baked soft puff texture: blurred white blobs on transparency (deterministic).
+  const canvas = document.createElement('canvas');
+  canvas.width = 64;
+  canvas.height = 64;
+  {
+    const g = canvas.getContext('2d')!;
+    const r = prng(CLOUD_SEED ^ 0x9e3779b9);
+    g.filter = 'blur(5px)';
+    for (let i = 0; i < 14; i++) {
+      g.globalAlpha = 0.45 + r() * 0.5;
+      g.fillStyle = '#ffffff';
+      g.beginPath();
+      g.arc(r() * 64, r() * 64, 8 + r() * 14, 0, Math.PI * 2);
+      g.fill();
+    }
+  }
+  const tex = new THREE.CanvasTexture(canvas); // default linear filter: soft edges
+  const mat = new THREE.MeshBasicMaterial({
+    map: tex,
+    transparent: true,
+    opacity: 0.85,
+    depthWrite: false,
+    side: THREE.DoubleSide,
+    fog: false, // a 40-block distance overhead would otherwise fog the layer out
+  });
+  const geo = new THREE.PlaneGeometry(CELL, CELL);
+  geo.rotateX(-Math.PI / 2); // flat in XZ (DoubleSide → normal sign irrelevant)
+  const mesh = new THREE.InstancedMesh(geo, mat, WINDOW * WINDOW);
+  mesh.count = 0;
+  mesh.frustumCulled = false; // the layer spans the sky around the camera; the origin bounding box would cull it
+  scene.add(mesh);
+
+  const m4 = new THREE.Matrix4();
+  const day = new THREE.Color(0xffffff);
+  const night = new THREE.Color(0x707a9c);
+  let anchorX = NaN;
+  let anchorZ = NaN;
+
+  return {
+    update(camX, camZ, timeSec, dim) {
+      const ax = Math.floor(camX / CELL) * CELL;
+      const az = Math.floor(camZ / CELL) * CELL;
+      if (ax !== anchorX || az !== anchorZ) {
+        anchorX = ax;
+        anchorZ = az;
+        const [wx, wz] = windAt(timeSec);
+        const mask = cloudMask(ax, az, wx, wz);
+        let n = 0;
+        for (let j = 0; j < WINDOW; j++) {
+          for (let i = 0; i < WINDOW; i++) {
+            if (!mask[j * WINDOW + i]) continue;
+            m4.makeTranslation(ax + i * CELL + CELL / 2, ALTITUDE, az + j * CELL + CELL / 2);
+            mesh.setMatrixAt(n++, m4);
+          }
+        }
+        mesh.count = n;
+        mesh.instanceMatrix.needsUpdate = true;
+      }
+      mat.color.copy(day).lerp(night, (1 - dim) / (1 - 0.33));
+    },
+  };
+}
