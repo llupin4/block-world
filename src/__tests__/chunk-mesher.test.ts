@@ -170,6 +170,51 @@ describe('chunk-mesher special blocks', () => {
     }
   });
 
+  it('every wall stub grows out of its support face in the correct orientation (faces 1-4)', () => {
+    const mount = (face: number) => {
+      // support block on the stub's backing side of cell (8,8,8), torch mounted at (8,8,8)
+      const w = new World();
+      const c = w.ensureChunk(0, 0, 0);
+      const support: [number, number, number] = face === 1 ? [7, 8, 8] : face === 2 ? [9, 8, 8] : face === 3 ? [8, 8, 7] : [8, 8, 9];
+      c.blocks[localIndex(support[0], support[1], support[2])] = Block.Stone;
+      c.blocks[localIndex(8, 8, 8)] = Block.Torch;
+      c.meta[localIndex(8, 8, 8)] = torchMeta(face);
+      return w;
+    };
+    // posBounds is the UNION of the support stone (a full cube, y [8,9], x/z spanning its
+    // own cell) and the stub. On the stub's axis the far extreme is the stub tip; on the
+    // other axes the stone's cell dominates. Per-face stub extent (emitTorch min/size):
+    // face1 x[8,8.375], face2 x[8.625,9], face3 z[8,8.375], face4 z[8.625,9].
+    const cases = [
+      { face: 1, x: [7, 8.375],   z: [8, 9] },        // support -X(7), stone x[7,8]; stub grows +X
+      { face: 2, x: [8.625, 10],  z: [8, 9] },        // support +X(9), stone x[9,10]; stub grows -X
+      { face: 3, x: [8, 9],       z: [7, 8.375] },    // support -Z(7), stone z[7,8]; stub grows +Z
+      { face: 4, x: [8, 9],       z: [8.625, 10] },   // support +Z(9), stone z[9,10]; stub grows -Z
+    ];
+    for (const c of cases) {
+      const opaque = meshChunk(mount(c.face), 0, 0, 0).opaque!;
+      const b = posBounds(opaque);
+      // stone keeps all 6 faces (a torch never culls it); the stub loses its support-facing face -> 5
+      expect(opaque.positions.length / 3, `face ${c.face}`).toBe((6 + 5) * 4);
+      expect(b.xMin, `face ${c.face} xMin`).toBeCloseTo(c.x[0]);
+      expect(b.xMax, `face ${c.face} xMax`).toBeCloseTo(c.x[1]);
+      expect(b.zMin, `face ${c.face} zMin`).toBeCloseTo(c.z[0]);
+      expect(b.zMax, `face ${c.face} zMax`).toBeCloseTo(c.z[1]);
+      expect(b.yMin, `face ${c.face} yMin`).toBeCloseTo(8);
+      expect(b.yMax, `face ${c.face} yMax`).toBeCloseTo(9);
+    }
+  });
+
+  it('an orphan door half still renders a full-height panel in its own cell', () => {
+    const w = new World();
+    const c = w.ensureChunk(0, 0, 0);
+    c.blocks[localIndex(8, 8, 8)] = Block.DoorTop;
+    c.meta[localIndex(8, 8, 8)] = doorMeta(false, 0);
+    const { opaque } = meshChunk(w, 0, 0, 0);
+    expect(opaque!.positions.length / 3).toBe(6 * 4);
+    expect(meshChunk(w, 0, 0, 0).trans).toBeNull();
+  });
+
   it('a closed X-thin door emits its full-height panel (x [0.4, 0.6] of the cell)', () => {
     const w = new World();
     const c = w.ensureChunk(0, 0, 0);

@@ -54,6 +54,14 @@ const TILE_DOOR = 13;
 // torch meta face -> FACES index of the stub's outward tip: 1:+X, 2:-X, 3:+Z, 4:-Z
 const TIP_FACE = [0, 0, 1, 4, 5];
 
+/** A special block's face is hidden when the neighboring CELL is opaque or special. */
+const makeHidden = (gb: (x: number, y: number, z: number) => number, wx: number, wy: number, wz: number) =>
+  (f: number): boolean => {
+    const d = FACES[f].dir;
+    const n = gb(wx + d[0], wy + d[1], wz + d[2]);
+    return isOpaque(n) || BLOCKS[n].kind !== 'cube';
+  };
+
 /**
  * Partial-geometry box for special blocks (torch post/stub, door panel), written into
  * the opaque buffer. `min`/`size` are world-space (a box lives inside ONE cell, size
@@ -62,8 +70,10 @@ const TIP_FACE = [0, 0, 1, 4, 5];
  * the stretch still reads correctly on a 0.18-wide post. A face is hidden when the
  * neighbouring CELL in its direction is opaque OR special: a stub's back face vanishes
  * against its wall, and the two faces between stacked door halves (or a torch beside a
- * door) hide each other — the geometry at those boundaries never coincides, so no
- * visible face is lost. Shading = FACE_SHADE[face]; no vertex AO on partial geometry.
+ * door) hide each other — the geometry at those boundaries never coincides, so
+ * nothing that is visible to the player disappears (the special-special gap is
+ * intentionally left open, per design). Shading = FACE_SHADE[face]; no vertex AO on
+ * partial geometry.
  */
 function pushBox(
   buf: Buf,
@@ -100,11 +110,7 @@ function emitTorch(
   wx: number, wy: number, wz: number,
   meta: number,
 ): void {
-  const hidden = (f: number): boolean => {
-    const d = FACES[f].dir;
-    const n = gb(wx + d[0], wy + d[1], wz + d[2]);
-    return isOpaque(n) || BLOCKS[n].kind !== 'cube';
-  };
+  const hidden = makeHidden(gb, wx, wy, wz);
   const face = torchFace(meta);
   if (face === 0) {
     pushBox(
@@ -139,11 +145,7 @@ function emitDoor(
   wx: number, wy: number, wz: number,
   meta: number,
 ): void {
-  const hidden = (f: number): boolean => {
-    const d = FACES[f].dir;
-    const n = gb(wx + d[0], wy + d[1], wz + d[2]);
-    return isOpaque(n) || BLOCKS[n].kind !== 'cube';
-  };
+  const hidden = makeHidden(gb, wx, wy, wz);
   const xThin = doorAxis(meta) === 0;
   const tiles: [number, number, number, number, number, number] =
     [TILE_DOOR, TILE_DOOR, TILE_DOOR, TILE_DOOR, TILE_DOOR, TILE_DOOR];
