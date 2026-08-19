@@ -57,6 +57,7 @@ export class TerrainGen {
  * Fills exactly one 16^3 chunk, vertically seam-free (height/cave functions are
  * pure in world coords, so adjacent chunks agree on shared cells).
  */
+// Must run only on fresh chunks (streaming guards with !world.hasChunk): player-written per-cell meta is NOT reset here.
 export function generateChunkTerrain(world: World, gen: TerrainGen, cx: number, cy: number, cz: number): void {
   const c = world.ensureChunk(cx, cy, cz);
   const bx = cx * 16, by = cy * 16, bz = cz * 16;

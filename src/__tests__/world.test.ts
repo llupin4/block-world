@@ -101,6 +101,16 @@ describe('world', () => {
     expect(w.getMeta(6, 5, 5)).toBe(0);
     // missing chunk reads as 0 (mirror of getBlock = Air)
     expect(w.getMeta(64, 5, 5)).toBe(0);
+    // same block + same special meta is a no-op (idempotent rewrite must not dirtify)
+    w.setBlock(5, 5, 5, Block.DoorBottom, doorMeta(true, 1));
+    c.dirty = false;
+    expect(w.setBlock(5, 5, 5, Block.DoorBottom, doorMeta(true, 1))).toBe(false);
+    expect(c.dirty).toBe(false);
+    // a meta-only change (door toggle) also dirties face-neighbor chunks
+    const n = w.ensureChunk(1, 0, 0);
+    n.dirty = false;
+    w.setBlock(5, 5, 5, Block.DoorBottom, doorMeta(false, 1));
+    expect(n.dirty).toBe(true);
   });
 
   it('isSolid: closed doors block, open doors and torches do not', () => {

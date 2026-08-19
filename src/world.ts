@@ -96,6 +96,9 @@ export class World {
   /**
    * Returns false when the chunk is missing or the value is unchanged (block AND meta).
    * meta defaults to 0 — writing any plain block clears the cell's torch/door state.
+   * Footgun: calling setBlock WITHOUT meta on a cell that already holds a
+   * torch/door silently RESETS its state to 0 (returns true, dirties neighbors) —
+   * always pass meta explicitly when writing Block.Torch / a door id.
    * Marks the chunk and any existing 6 face-neighbors dirty: a door closing/opening
    * changes both what is solid and which neighbor faces its panel hides.
    */
