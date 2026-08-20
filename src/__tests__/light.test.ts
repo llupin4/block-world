@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { Block, doorMeta } from '../blocks';
 import { World, localIndex } from '../world';
-import { lightOpacity, columnSum, skyEmit, LIGHT_MAX } from '../light';
+import { lightOpacity, columnSum, skyEmit, LIGHT_MAX, LightSim } from '../light';
 
 function makeWorld(chunks: [number, number, number][]): World {
   const w = new World();
@@ -81,5 +81,57 @@ describe('light core math', () => {
     fillColSum(w3, 0, 1, 0); // colSum maintained in the UPPER chunk only
     // lower chunk's colSum stays 0 (stale) — skyEmit walks the in-chunk column of the cell's own chunk:
     expect(skyEmit(w3, 8, 5, 8)).toBe(14); // the walk reads the upper chunk's colSum directly, independent of the lower's cache
+  });
+});
+
+// Run the queue to a fixpoint (or until `max` tick cycles) — the node-side stand-in
+// for the 60 Hz substep clock (same pattern as water.test.ts's drain).
+function drain(sim: LightSim, max = 300): void {
+  let n = 0;
+  while (n++ < max && sim.tick(250) !== 0) {
+    /* drain */
+  }
+}
+
+describe('LightSim', () => {
+  it('a torch propagates the exact diamond pattern through air: 14 at the source, 14-d at Manhattan distance d, nothing beyond 14, and nothing through a solid wall', () => {
+    const w = makeWorld([[0, 0, 0], [1, 0, 0]]); // x 0..15 and 16..31, y 0..15
+    for (let x = 0; x < 32; x++) for (let z = 0; z < 16; z++) w.setBlock(x, 0, z, Block.Stone); // floor
+    w.setBlock(8, 1, 8, Block.Torch);
+    const sim = new LightSim(w);
+    sim.edit(8, 1, 8);
+    drain(sim);
+    expect(w.getLight(8, 1, 8)[0]).toBe(14);  // the source cell stores its own emission
+    expect(w.getLight(9, 1, 8)[0]).toBe(13);  // Manhattan 1
+    expect(w.getLight(10, 1, 8)[0]).toBe(12); // Manhattan 2
+    expect(w.getLight(9, 1, 9)[0]).toBe(12);  // diagonal = two orthogonal steps
+    expect(w.getLight(8, 8, 8)[0]).toBe(7);   // straight up, Manhattan 7
+    // a solid wall at x=12 kills the field on the far side (opacity 15 exits nothing)
+    for (let y = 1; y < 16; y++) for (let z = 0; z < 16; z++) w.setBlock(12, y, z, Block.Stone);
+    // wall was added AFTER settle: re-seed + drain (the real flow goes through edit(), Task 5)
+    sim.edit(12, 8, 8);
+    drain(sim);
+    expect(w.getLight(11, 1, 8)[0]).toBe(11); // last air before the wall: 14-3 (d=3 from torch); the wall doesn't attenuate the near side
+    expect(w.getLight(13, 1, 8)[0]).toBe(0);  // far side stays dark (no light stored leaks through: wall stores 10 → 10-1-15 < 0)
+    // distance cap: with the wall gone again, level 0 at distance 14, nothing at 15
+    for (let y = 1; y < 16; y++) for (let z = 0; z < 16; z++) w.setBlock(12, y, z, Block.Air);
+    sim.edit(12, 8, 8);
+    drain(sim);
+    expect(w.getLight(22, 1, 8)[0]).toBe(0); // 8+14 = 22: the last lit cell is 21 at level 1
+    expect(w.getLight(21, 1, 8)[0]).toBe(1);
+    expect(w.getLight(23, 1, 8)[0]).toBe(0);
+  });
+
+  it('two overlapping torches: the stored level is the MAX, never a sum', () => {
+    const w = makeWorld([[0, 0, 0]]);
+    for (let x = 0; x < 16; x++) for (let z = 0; z < 16; z++) w.setBlock(x, 0, z, Block.Stone);
+    w.setBlock(3, 5, 8, Block.Torch);
+    const sim = new LightSim(w);
+    sim.edit(3, 5, 8);
+    w.setBlock(13, 5, 8, Block.Torch);
+    sim.edit(13, 5, 8);
+    drain(sim);
+    // (8,5,8) is distance 5 from both: 14-5 = 9 from each — max 9, not 18
+    expect(w.getLight(8, 5, 8)[0]).toBe(9);
   });
 });

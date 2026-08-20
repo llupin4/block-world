@@ -6,7 +6,7 @@
 // Pure module: no three.js — node-testable.
 
 import { BLOCKS, isDoor, doorOpen } from './blocks';
-import { World, CHUNK_SIZE, localIndex, chunkOf } from './world';
+import { World, CHUNK_SIZE, localIndex, chunkOf, chunkKey } from './world';
 import { CY_MAX } from './streaming';
 
 export const LIGHT_MAX = 15;
@@ -23,7 +23,7 @@ export function lightOpacity(world: World, wx: number, wy: number, wz: number): 
   return BLOCKS[b].opacity;
 }
 
-/** Capped-at-15 sum of light opacities over one 16-cell chunk column (lx, lz) of chunk (cx, cy, cz) — the per-chunk `colSum` cache entry. Reads the chunk arrays directly (no per-cell world lookups). */
+/** Capped-at-15 sum of light opacities over one 16-cell chunk column (lx, lz) of chunk (cx, cy, cz) — the per-chunk `colSum` cache entry. Reads the chunk arrays directly (no per-cell world lookups). The value LightSim keeps in chunk.colSum; must be recomputed after any block/meta change in the chunk (edit/settleChunk) — skyEmit reads neighboring chunks' entries and assumes they are current. */
 export function columnSum(world: World, cx: number, cy: number, cz: number, lx: number, lz: number): number {
   const c = world.getChunk(cx, cy, cz);
   if (!c) return 0;
@@ -37,7 +37,7 @@ export function columnSum(world: World, cx: number, cy: number, cz: number, lx: 
   return s;
 }
 
-/** Sky-light emission E_s of a cell: 15 minus the capped sum of the opacities of every cell STRICTLY above it (open air column -> 0 -> 15: direct downward skylight does not decay through air; glass costs 1; water 2 per cell; a single solid above -> 0). Walks up through loaded chunks (missing chunk = air = 0, keep walking); a partially-loaded column reads low until the upper chunks load and their seam seeding re-seeds the lower one. The band top is CY_MAX (generated y band 0..79; outside it there are no chunks, hence no cells). */
+/** Sky-light emission E_s of a cell: 15 minus the capped sum of the opacities of every cell STRICTLY above it (open air column -> 0 -> 15: direct downward skylight does not decay through air; glass costs 1; water 2 per cell; a single solid above -> 0). Walks up through loaded chunks (missing chunk = air = 0, keep walking); a partially-loaded column accrues a too-low opacity sum (missing upper = air → reads too BRIGHT) until the upper chunks load and their seam seeding re-seeds the lower one. The band top is CY_MAX (generated y band 0..79; outside it there are no chunks, hence no cells). */
 export function skyEmit(world: World, wx: number, wy: number, wz: number): number {
   const cx = chunkOf(wx), cy = chunkOf(wy), cz = chunkOf(wz);
   const c = world.getChunk(cx, cy, cz);
@@ -58,4 +58,109 @@ export function skyEmit(world: World, wx: number, wy: number, wz: number): numbe
     if (s >= LIGHT_MAX) return 0;
   }
   return LIGHT_MAX - s;
+}
+
+export interface LightStats { seeds: number; pops: number; fieldChanges: number }
+
+export class LightSim {
+  /** Chunk keys whose light changed — consumed and cleared exactly once per frame by main.ts (the exact `sim.touched` contract). */
+  readonly touched = new Set<string>();
+  /** World-coord keys, insertion-ordered FIFO with dedup (the water-sim contract). */
+  private readonly queue = new Set<string>();
+  readonly stats: LightStats = { seeds: 0, pops: 0, fieldChanges: 0 };
+
+  constructor(private readonly world: World) {}
+
+  private seed(wx: number, wy: number, wz: number): void {
+    this.queue.add(`${wx},${wy},${wz}`);
+    this.stats.seeds++;
+  }
+
+  private readField(f: 0 | 1, wx: number, wy: number, wz: number): number {
+    const c = this.world.getChunk(chunkOf(wx), chunkOf(wy), chunkOf(wz));
+    if (!c) return 0; // missing neighbor = no contribution (POC deviation: no light through ungenerated space)
+    return f === 0 ? c.blight[localIndex(wx - c.cx * CHUNK_SIZE, wy - c.cy * CHUNK_SIZE, wz - c.cz * CHUNK_SIZE)]
+                   : c.skylight[localIndex(wx - c.cx * CHUNK_SIZE, wy - c.cy * CHUNK_SIZE, wz - c.cz * CHUNK_SIZE)];
+  }
+
+  /** Re-derive ONE cell's both fields with the rule `target = max(E, max_nb (L(nb) − 1 − O(nb)))` — attenuation is paid EXITING the neighbor. Writes on change, marks the chunk touched, re-seeds the six neighbors per changed field. Returns the number of fields that changed. */
+  private pop(wx: number, wy: number, wz: number): number {
+    const c = this.world.getChunk(chunkOf(wx), chunkOf(wy), chunkOf(wz));
+    if (!c) return 0;
+    const i = localIndex(wx - c.cx * CHUNK_SIZE, wy - c.cy * CHUNK_SIZE, wz - c.cz * CHUNK_SIZE);
+    let changed = 0;
+    // block light: emission from the registry (torch 14) + neighbor contributions
+    let best = BLOCKS[this.world.getBlock(wx, wy, wz)].light;
+    for (const [dx, dy, dz] of N6) {
+      const nb = this.readField(0, wx + dx, wy + dy, wz + dz);
+      if (nb > 0) { // a dark neighbor can only contribute <= 0
+        const v = nb - 1 - lightOpacity(this.world, wx + dx, wy + dy, wz + dz);
+        if (v > best) best = v;
+      }
+    }
+    const b = best < 0 ? 0 : best;
+    if (b !== c.blight[i]) {
+      c.blight[i] = b;
+      this.touched.add(chunkKey(c.cx, c.cy, c.cz));
+      this.stats.fieldChanges++;
+      changed++;
+      for (const [dx, dy, dz] of N6) this.seed(wx + dx, wy + dy, wz + dz);
+    }
+    // sky light: same rule, emission from skyEmit (colSum walks)
+    let bestS = skyEmit(this.world, wx, wy, wz);
+    for (const [dx, dy, dz] of N6) {
+      const nb = this.readField(1, wx + dx, wy + dy, wz + dz);
+      if (nb > 0) {
+        const v = nb - 1 - lightOpacity(this.world, wx + dx, wy + dy, wz + dz);
+        if (v > bestS) bestS = v;
+      }
+    }
+    const s = bestS < 0 ? 0 : bestS;
+    if (s !== c.skylight[i]) {
+      c.skylight[i] = s;
+      this.touched.add(chunkKey(c.cx, c.cy, c.cz));
+      this.stats.fieldChanges++;
+      changed++;
+      for (const [dx, dy, dz] of N6) this.seed(wx + dx, wy + dy, wz + dz);
+    }
+    return changed;
+  }
+
+  /** Player-side edit at (wx, wy, wz), called from main.ts AFTER world.setBlock / a door-meta change (at every existing sim.edit site + the door toggle). re-seeds: the cell (its new emission), its six neighbors, and every cell STRICTLY BELOW it in the (wx, wz) column — each such cell's sky emission may have changed; a changed one is set exactly to its new E_s (relaxation restores any horizontal support). Also maintains the edited chunk's colSum entry. */
+  edit(wx: number, wy: number, wz: number): void {
+    const c = this.world.getChunk(chunkOf(wx), chunkOf(wy), chunkOf(wz));
+    if (c) {
+      const lx = wx - c.cx * CHUNK_SIZE, lz = wz - c.cz * CHUNK_SIZE;
+      c.colSum[lx + lz * 16] = columnSum(this.world, c.cx, c.cy, c.cz, lx, lz);
+    }
+    this.seed(wx, wy, wz);
+    for (const [dx, dy, dz] of N6) this.seed(wx + dx, wy + dy, wz + dz);
+    // the column: only cells strictly below the edited one can see a changed E_s
+    for (let y = 0; y < wy; y++) {
+      const ch = this.world.getChunk(chunkOf(wx), chunkOf(y), chunkOf(wz));
+      if (!ch) continue; // unloaded band cell: settles when its chunk loads
+      const e = skyEmit(this.world, wx, y, wz);
+      const i = localIndex(wx - ch.cx * CHUNK_SIZE, y - ch.cy * CHUNK_SIZE, wz - ch.cz * CHUNK_SIZE);
+      if (e !== ch.skylight[i]) {
+        ch.skylight[i] = e;
+        this.touched.add(chunkKey(ch.cx, ch.cy, ch.cz));
+        this.stats.fieldChanges++;
+      }
+      this.seed(wx, y, wz);
+    }
+  }
+
+  /** Process up to `budget` queued cells (insertion order); returns the number processed (0 = queue empty). Does NOT clear `touched` — the caller drains it after re-meshing (sim.touched contract). */
+  tick(budget: number): number {
+    let n = 0;
+    while (n++ < budget) {
+      const it = this.queue.values().next();
+      if (it.done) break;
+      this.queue.delete(it.value);
+      const [wx, wy, wz] = it.value.split(',').map(Number);
+      this.stats.pops++;
+      this.pop(wx, wy, wz);
+    }
+    return n - 1;
+  }
 }
