@@ -171,10 +171,9 @@ describe('LightSim', () => {
     expect(w.getLight(15, 5, 8)[0]).toBe(3); // d=11 from the left torch → 14-11
   });
 
-  it('sky column re-seed: a block at a cave mouth collapses the column (1/side-step decay into the cave); breaking it restores', () => {
+  it("sky column re-seed: plugging the column drops it to the 1/side-step leak (14); breaking restores 15", () => {
     const w2 = makeWorld([[0, 0, 0]]);
-    // column at (8,·,8): air from y=0..15 EXCEPT a stone slab at y=10..15 above an air cap y=8..9? NO — pinned layout:
-    // air y 0..9, STONE y 10 (single block, the plug), air y 11..15. The plug blocks sky for y <= 9.
+    // pinned layout: open column everywhere; the plug (stone at y=10 of column (8,·,8)) is placed mid-test
     for (let y = 11; y < 16; y++) w2.setBlock(8, y, 8, Block.Air); // air above the plug (explicit, though default)
     const sim = new LightSim(w2);
     sim.settleChunk(0, 0, 0); // initial settle: open column everywhere (plug not yet placed) — skylight 15 all the way down

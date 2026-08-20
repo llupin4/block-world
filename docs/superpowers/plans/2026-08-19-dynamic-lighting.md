@@ -570,7 +570,7 @@ git commit -m "feat: LightSim — recompute-relaxation queue (max-of-sources rul
     expect(w.getLight(15, 5, 8)[0]).toBe(3); // d=11 from the left torch → 14-11 = 3
   });
 
-  it('sky column re-seed: a block at a cave mouth collapses the column (1/side-step decay into the cave); breaking it restores', () => {
+  it("sky column re-seed: plugging the column drops it to the 1/side-step leak (14); breaking restores 15", () => {
     const w = makeWorld([[0, 0, 0]]);
     // cave: a horizontal air tunnel at y=5, z 4..11, under a stone ceiling at y=6 and stone above; open to the sky at z=12 (the mouth)
     for (let x = 0; x < 16; x++) {
@@ -580,7 +580,7 @@ git commit -m "feat: LightSim — recompute-relaxation queue (max-of-sources rul
     // hmm: simpler deterministic layout — build the column explicitly instead:
     // reset: one fresh world
     const w2 = makeWorld([[0, 0, 0]]);
-    // column at (8,·,8): air from y=0..15 EXCEPT a stone slab at y=10..15 above an air cap y=8..9? NO — pinned layout:
+    // pinned layout: open column everywhere; the plug (stone at y=10 of column (8,·,8)) is placed mid-test
     // air y 0..9, STONE y 10 (single block, the plug), air y 11..15. The plug blocks sky for y <= 9.
     for (let y = 11; y < 16; y++) w2.setBlock(8, y, 8, Block.Air); // air above the plug (explicit, though default)
     const sim = new LightSim(w2);
