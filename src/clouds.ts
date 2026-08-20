@@ -1,20 +1,24 @@
-// Clouds: an instanced quad layer. The coverage math (top) is pure and
-// node-testable: one simplex-noise sample per 4×4-block cell, thresholded —
-// the soft look comes from a pre-baked noise-alpha quad texture. The layer
-// itself follows the camera only through grid-snapped re-anchoring; wind
-// drift is a slow shift of the noise sample offset (see src/time.ts for the
-// time source it will be driven by).
+// Clouds — a world-locked repeating pattern on one large quad, scrolled by wind.
+// The pattern (top, pure, node-testable): one 2D-simplex sample per 4×4-block
+// cell, baked once into a 128×128-texel tile (core/rim alpha) that repeats
+// every 512 world blocks. The renderer (below) draws the tile on a
+// 2048×2048 quad at y = 96 — camera-following, 512-block-snapped — and
+// scrolls it per frame via the texture offset (wind). No instances, no
+// window, no per-frame noise or matrix work.
 // Spec: docs/superpowers/specs/2026-08-19-day-night-clouds-design.md.
 
 import { createNoise2D } from 'simplex-noise';
 
-export const CELL = 4; // world blocks per quad (the classic voxel-sandbox cloud proportion)
-export const WINDOW = 24; // quads per axis: ~96×96 blocks of sky around the player
+export const CELL = 4; // world blocks per texel (the classic voxel-sandbox cloud proportion)
+export const TILE = 128; // texels per tile edge → one tile = 512 world blocks of repeating pattern
 export const WAVE = 12; // noise wavelength (blocks) → cloud features ~4–24 blocks wide
-export const THRESHOLD = 0.05; // cells above this noise value draw
+export const CORE = 0.2; // noise above this → opaque core texel
+export const RIM = 0.05; // noise above this (and ≤ CORE) → ~60% rim texel; below → none
 export const ALTITUDE = 96; // above WORLD_Y_MAX (64): clouds never clip terrain
-const WIND_X = 0.1; // blocks/s
-const WIND_Z = 0.09;
+
+const QUAD = 2048; // quad edge (blocks); the 512 far plane clips its corners → edge sits ~6° above the horizon
+const WIND_X = 0.5; // blocks/s — ~1 block per 2 s: clearly drifting while standing still, still slow
+const WIND_Z = 0.45; // 0.9× the x drift
 const WIND_Z_OFFSET = 37.7; // decorrelates the z-axis sampling from x
 const CLOUD_SEED = 0x5c10d5;
 
@@ -31,23 +35,15 @@ function prng(seed: number): () => number {
 
 const noise2D = createNoise2D(prng(CLOUD_SEED));
 
-/** Pure: noise coverage (≈ −1..1) for the 4×4 cell whose min corner is (wx, wz), at a given wind drift. */
-export function cloudCoverage(wx: number, wz: number, windX: number, windZ: number): number {
+/** Pure: the noise value for the 4×4 cell whose min corner is (wx, wz), at a given wind drift. World-locked: cloudCoverage(w + d, u) === cloudCoverage(w, u + d). */
+export function cloudCoverage(wx: number, wz: number, windX = 0, windZ = 0): number {
   return noise2D((wx + CELL / 2 + windX) / WAVE, (wz + CELL / 2 + windZ) / WAVE);
 }
 
-/** Pure: which of the WINDOW×WINDOW cells (row = +z) draw, for the window anchored at (ax, az). Throws if the anchor is not a multiple of CELL — a misaligned anchor would break the world-lock (seam pops). */
-export function cloudMask(ax: number, az: number, windX: number, windZ: number): boolean[] {
-  const axRem = ((ax % CELL) + CELL) % CELL;
-  const azRem = ((az % CELL) + CELL) % CELL;
-  if (axRem !== 0 || azRem !== 0) {
-    throw new Error(`cloudMask: anchor (${ax}, ${az}) must be a multiple of CELL (${CELL})`);
-  }
-  const out: boolean[] = [];
-  for (let j = 0; j < WINDOW; j++)
-    for (let i = 0; i < WINDOW; i++)
-      out.push(cloudCoverage(ax + i * CELL, az + j * CELL, windX, windZ) > THRESHOLD);
-  return out;
+/** Pure: the baked tile's alpha level for texel (cx, cz): 0 = none, 1 = rim, 2 = core. */
+export function cloudTileLevel(cx: number, cz: number): 0 | 1 | 2 {
+  const c = cloudCoverage(cx * CELL, cz * CELL);
+  return c > CORE ? 2 : c > RIM ? 1 : 0;
 }
 
 /** Pure: the wind drift (in blocks) at a simulation time in seconds. */
@@ -57,7 +53,7 @@ export function windAt(timeSec: number): [number, number] {
 
 import * as THREE from 'three';
 
-// --- renderer: an InstancedMesh of flat quads, grid-locked to the world ---
+// --- renderer: one large textured quad, world-locked, wind-scrolled ---
 
 export interface Clouds {
   update(camX: number, camZ: number, timeSec: number, dim: number): void;
@@ -65,72 +61,68 @@ export interface Clouds {
 }
 
 /**
- * Builds the cloud layer into `scene`. Instances live at fixed world
- * positions inside a 24×24-cell window anchored to the camera's 4-block grid
- * cell; the window re-anchors (and the mask re-evaluates) only when the
- * camera crosses a cell boundary — no per-frame matrix writes. `dim` is the
- * sky's worldDim: clouds tint white → faint blue-grey as night falls.
+ * Builds the cloud layer into `scene`: a QUAD×QUAD-block plane at
+ * `ALTITUDE` carrying the baked 128×128 tile (repeated, NearestFilter).
+ * The quad follows the camera snapped to the 512-block tile grid, the
+ * pattern is world-locked, and drift is a per-frame texture offset:
+ * `map.offset = windAt(t) / 512`. Per-frame cost: two offset floats
+ * (+ a rare position snap on 512-block cell crossings).
  */
 export function createClouds(scene: THREE.Scene): Clouds {
-  // Pre-baked soft puff texture: blurred white blobs on transparency (deterministic).
+  // The tile: one RGBA pixel per texel (white + alpha level), baked once.
   const canvas = document.createElement('canvas');
-  canvas.width = 64;
-  canvas.height = 64;
+  canvas.width = TILE;
+  canvas.height = TILE;
   {
     const g = canvas.getContext('2d')!;
-    const r = prng(CLOUD_SEED ^ 0x9e3779b9);
-    g.filter = 'blur(5px)';
-    for (let i = 0; i < 14; i++) {
-      g.globalAlpha = 0.45 + r() * 0.5;
-      g.fillStyle = '#ffffff';
-      g.beginPath();
-      g.arc(r() * 64, r() * 64, 8 + r() * 14, 0, Math.PI * 2);
-      g.fill();
-    }
+    const img = g.createImageData(TILE, TILE);
+    for (let j = 0; j < TILE; j++)
+      for (let i = 0; i < TILE; i++) {
+        const l = cloudTileLevel(i, j);
+        const p = (j * TILE + i) * 4;
+        img.data[p] = 255;
+        img.data[p + 1] = 255;
+        img.data[p + 2] = 255;
+        img.data[p + 3] = l === 2 ? 255 : l === 1 ? 153 : 0;
+      }
+    g.putImageData(img, 0, 0);
   }
-  const tex = new THREE.CanvasTexture(canvas); // default linear filter: soft edges
+  const tex = new THREE.CanvasTexture(canvas);
+  tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
+  tex.magFilter = THREE.NearestFilter; // the blocky 0/1 cell edges
+  tex.minFilter = THREE.NearestFilter;
+  tex.generateMipmaps = false;
   const mat = new THREE.MeshBasicMaterial({
     map: tex,
     transparent: true,
     opacity: 0.85,
     depthWrite: false,
-    side: THREE.DoubleSide,
-    fog: false, // sits ~95 blocks overhead; without this, night fog would fade the layer to ~57%
+    side: THREE.DoubleSide, // visible from below
+    fog: false, // 50–150 blocks overhead: night fog would fade the layer up to ~50%
   });
-  const geo = new THREE.PlaneGeometry(CELL, CELL);
+  const geo = new THREE.PlaneGeometry(QUAD, QUAD);
   geo.rotateX(-Math.PI / 2); // flat in XZ (DoubleSide → normal sign irrelevant)
-  const mesh = new THREE.InstancedMesh(geo, mat, WINDOW * WINDOW);
-  mesh.count = 0;
-  mesh.frustumCulled = false; // instance bounds are computed once and go stale as the window migrates with the camera
+  const mesh = new THREE.Mesh(geo, mat);
+  mesh.renderOrder = 1; // drawn after the other transparents: any ray that hits both cloud and water/celestial objects hits the cloud first (terrain tops at 64 < 96), so last-among-transparent is always the correct order — no per-frame sort-key management
   scene.add(mesh);
 
-  const m4 = new THREE.Matrix4();
   const day = new THREE.Color(0xffffff);
   const night = new THREE.Color(0x707a9c);
+  const SNAP = TILE * CELL; // 512-block tile grid — an exact multiple of the tile, so re-centering shifts the texture by whole tiles (seamless)
   let anchorX = NaN;
   let anchorZ = NaN;
 
   return {
     update(camX, camZ, timeSec, dim) {
-      const ax = Math.floor(camX / CELL) * CELL;
-      const az = Math.floor(camZ / CELL) * CELL;
+      const ax = Math.floor(camX / SNAP) * SNAP;
+      const az = Math.floor(camZ / SNAP) * SNAP;
       if (ax !== anchorX || az !== anchorZ) {
+        mesh.position.set(ax + QUAD / 2, ALTITUDE, az + QUAD / 2);
         anchorX = ax;
         anchorZ = az;
-        const [wx, wz] = windAt(timeSec);
-        const mask = cloudMask(ax, az, wx, wz);
-        let n = 0;
-        for (let j = 0; j < WINDOW; j++) {
-          for (let i = 0; i < WINDOW; i++) {
-            if (!mask[j * WINDOW + i]) continue;
-            m4.makeTranslation(ax + i * CELL + CELL / 2, ALTITUDE, az + j * CELL + CELL / 2);
-            mesh.setMatrixAt(n++, m4);
-          }
-        }
-        mesh.count = n;
-        mesh.instanceMatrix.needsUpdate = true;
-        mesh.computeBoundingSphere(); // instances migrate with the camera; the sort key is derived from this bound
       }
+      const [wx, wz] = windAt(timeSec);
+      tex.offset.set(wx / SNAP, wz / SNAP);
       // dim ∈ [0.33, 1] (0.33 is the sky's night floor); clamp guards a future mood
       const dtn = Math.max(0, Math.min(1, (1 - dim) / (1 - 0.33)));
       mat.color.copy(day).lerp(night, dtn);
