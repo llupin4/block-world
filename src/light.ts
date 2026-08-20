@@ -23,8 +23,8 @@ import { CY_MAX } from './streaming';
 
 export const LIGHT_MAX = 15;
 export const LIGHT_AMBIENT = 0.12; // unlit floor ("dark but readable"): shader factor at light 0
-export const LIGHT_TICK_BUDGET = 2500; // cell pops per 60 Hz substep: a torch's <=14-cell wave (a few thousand cells) settles in 1-3 substeps
-export const LIGHT_SETTLE_GUARD = 4096; // inline pops per chunk-load settle (the frontier is far smaller; the rest keeps draining on substeps)
+export const LIGHT_TICK_BUDGET = 512; // cell pops per frame: a torch's <=14-cell wave (a few thousand cells) settles in a few frames (still fast); idle cost ~0 (empty queue no-ops)
+export const LIGHT_SETTLE_GUARD = 512; // inline pops per chunk-load settle. A bounded drain: the light is a LOWER BOUND (prefill + frontier relaxes inward), so an under-drained chunk is only briefly a touch dark and self-corrects on later frames. In open caverns the frontier is large (skylight propagates through the chamber) — an unbounded drain would converge it all in one frame and spike the per-frame re-mesh; the bound spreads that over a few frames.
 
 const N6: [number, number, number][] = [[1, 0, 0], [-1, 0, 0], [0, 1, 0], [0, -1, 0], [0, 0, 1], [0, 0, -1]]; // orthogonal neighbors only — diagonals get light by taking two steps
 
@@ -79,17 +79,25 @@ export interface LightStats { seeds: number; pops: number; fieldChanges: number 
 export class LightSim {
   /** Chunk keys whose light changed — consumed and cleared exactly once per frame by main.ts (the exact `sim.touched` contract). */
   readonly touched = new Set<string>();
-  /** World-coord keys, insertion-ordered FIFO with dedup (the water-sim contract). */
-  private readonly queue = new Set<string>();
+  /** World-coord FIFO queue, insertion-ordered with dedup (the water-sim contract). An ARRAY (not a Set) is the dequeue structure: a `Set` used as a FIFO allocates a fresh `SetIterator` per `values().next()` (~52us/iter in-browser at ~1e5 entries — iterator allocation + GC under the concurrent renderer), which dominated the per-frame light drain in open caves. The array gives O(1) dequeue; a parallel `Set` provides O(1) dedup. The consumed prefix is compacted in place once it exceeds half the array (amortized O(1) per push). */
+  private readonly qArr: string[] = [];
+  private qHead = 0;
+  private readonly qDedup = new Set<string>();
   readonly stats: LightStats = { seeds: 0, pops: 0, fieldChanges: 0 };
   /** Scratch per-cell opacity cache for the frontier scan: filled during the column prefill and read in the same call (one 16^3 pass, never escapes). */
   private readonly opac = new Uint8Array(CHUNK_SIZE * CHUNK_SIZE * CHUNK_SIZE);
 
   constructor(private readonly world: World) {}
 
+  /** Current queue length (live, not-yet-drained cells). */
+  queueSize(): number { return this.qArr.length - this.qHead; }
+
   private seed(wx: number, wy: number, wz: number): void {
-    this.queue.add(`${wx},${wy},${wz}`);
     this.stats.seeds++;
+    const key = `${wx},${wy},${wz}`;
+    if (this.qDedup.has(key)) return; // already queued (FIFO dedup, the Set contract)
+    this.qDedup.add(key);
+    this.qArr.push(key);
   }
 
   /** Re-derive ONE cell's both fields with the rule `target = max(E, max_nb (L(nb) - 1 - O(nb)))` — attenuation is paid EXITING the neighbor. Each of the six neighbors is read ONCE and contributes to both fields: its opacity is a property of the block (shared by block- and sky-light), so the hot path is six chunk reads instead of twelve (profiled: neighbor lookups are ~80% of a pop). Writes on change, marks the chunk touched, re-seeds the six neighbors per changed field. Returns the number of fields that changed. */
@@ -228,16 +236,22 @@ export class LightSim {
     for (const [sx, sy, sz] of N6) this.seedSeamNeighbor(cx, cy, cz, sx, sy, sz);
   }
 
-  /** Internal bounded drain (shares tick's body; used by settleChunk). */
+  /** Internal bounded drain (shares tick's body; used by settleChunk). Dequeues by array index (O(1) — no `SetIterator`, which cost ~52us/iter in-browser at ~1e5 entries). */
   private drain(budget: number): number {
     let n = 0;
-    while (n++ < budget) {
-      const it = this.queue.values().next();
-      if (it.done) break;
-      this.queue.delete(it.value);
-      const [wx, wy, wz] = it.value.split(',').map(Number);
+    while (n++ < budget && this.qHead < this.qArr.length) {
+      const key = this.qArr[this.qHead++];
+      this.qDedup.delete(key);
+      const [wx, wy, wz] = key.split(',').map(Number);
       this.stats.pops++;
       this.pop(wx, wy, wz);
+    }
+    // compact the consumed prefix once it exceeds half the array (amortized O(1) per push)
+    if (this.qHead > 4096 && this.qHead * 2 >= this.qArr.length) {
+      const live = this.qArr.length - this.qHead;
+      this.qArr.copyWithin(0, this.qHead);
+      this.qArr.length = live;
+      this.qHead = 0;
     }
     return n - 1;
   }

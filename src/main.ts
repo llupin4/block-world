@@ -758,9 +758,11 @@ window.addEventListener(
 
 // === streaming ===
 
-// Per physics substep: stream the ring around the player. update() does the world side
-// (generate new chunks, remove far ones); main.ts does the scene side (rebuild/dispose
-// meshes). The 2 loads + 2 remeshes per call keep the frame cost bounded.
+// Once per frame (not per physics substep): stream the ring around the player. update() does the
+// world side (generate new chunks, remove far ones); main.ts does the scene side (rebuild/dispose
+// meshes). The stream is a pure function of the player position, so one call per frame is enough —
+// and it enforces the §9 ≤1 load + ≤1 remesh/frame budget (calling it per substep let the frame
+// clamp multiply the budget by the substep count, up to ~12 chunks/frame).
 function tickStreaming(): void {
   const r = streaming.update(world, chunkOf(player.pos.x), chunkOf(player.pos.z), chunkOf(player.pos.y));
   for (const c of r.unloaded) {
@@ -821,10 +823,10 @@ function frame(now: number): void {
     acc -= STEP;
     player.update(STEP, readMove());
     worldTime.advance(STEP);
-    lightSim.tick(LIGHT_TICK_BUDGET);
-    tickStreaming();
     if (player.pos.y < WORLD_Y_MIN) player.place(SPAWN); // fell out of the world (open cave / dug-away floor)
   }
+  tickStreaming(); // ONCE per frame (was inside the substep loop, where the frame-time clamp multiplied the streaming budget by the substep count, up to ~12 chunks/frame)
+  lightSim.tick(LIGHT_TICK_BUDGET); // light drain ONCE per frame (was per substep: budget × up to 6 catch-up substeps = ~15k pops/frame); idle cost ~0 (an empty queue is a no-op)
   waterAcc += dt;
   if (waterAcc >= WATER_STEP) {
     waterAcc = 0;
