@@ -279,6 +279,23 @@ function toGeometry(b: VoxelBuffer): THREE.BufferGeometry {
 
 const chunkObjs = new Map<string, { opaque: THREE.Mesh | null; trans: THREE.Mesh | null }>();
 
+// Budgeted re-mesh of the light/water TOUCHED chunks. A cave's light convergence marks many
+// chunks in one frame (up to ~7+); re-meshing all of them is a ~20ms spike (a re-mesh is a full
+// rebuildChunkMesh, ~2-5ms each). Instead, this frame's sim.touched + lightSim.touched are merged
+// into pendingRebuild and re-meshed CLOSEST-FIRST, up to REBUILD_BUDGET per frame; the rest carry
+// one frame. That is safe because the light is a LOWER BOUND (the frontier relaxes inward) and the
+// water settles converge, so a briefly-stale mesh self-corrects as the pending set drains — the
+// visible (near) chunks are always re-meshed first. The streaming's own 1 load + 1 remesh stay
+// immediate (the worldgen budget, keeps the ring filling).
+const REBUILD_BUDGET = 3; // light/water-touched chunks re-meshed per frame
+const pendingRebuild = new Set<string>(); // chunk keys awaiting a rebuildChunkMesh (carries across frames)
+
+/** (dx^2+dz^2) dominates x/z; |cy-pcy| breaks ties — mirrors streaming.score so the nearest chunk re-meshes first. */
+function rebuildScore(c: [number, number, number], pcx: number, pcy: number, pcz: number): number {
+  const dx = c[0] - pcx, dz = c[2] - pcz;
+  return (dx * dx + dz * dz) * 100 + Math.abs(c[1] - pcy);
+}
+
 function rebuildChunkMesh(cx: number, cy: number, cz: number): void {
   const key = chunkKey(cx, cy, cz);
   const old = chunkObjs.get(key);
@@ -762,12 +779,15 @@ window.addEventListener(
 // world side (generate new chunks, remove far ones); main.ts does the scene side (rebuild/dispose
 // meshes). The stream is a pure function of the player position, so one call per frame is enough —
 // and it enforces the §9 ≤1 load + ≤1 remesh/frame budget (calling it per substep let the frame
-// clamp multiply the budget by the substep count, up to ~12 chunks/frame).
+// clamp multiply the budget by the substep count, up to ~12 chunks/frame). The load+remesh are
+// rebuilt immediately (they're the new world content the player is moving into); the light/water
+// touched are drained through the frame's budgeted re-mesh below (REBUILD_BUDGET).
 function tickStreaming(): void {
   const r = streaming.update(world, chunkOf(player.pos.x), chunkOf(player.pos.z), chunkOf(player.pos.y));
   for (const c of r.unloaded) {
     removeChunkMesh(c.cx, c.cy, c.cz);
     lightSim.onChunkUnloaded(c.cx, c.cy, c.cz); // cells lit through the removed chunk darken
+    pendingRebuild.delete(chunkKey(c.cx, c.cy, c.cz)); // don't re-mesh a chunk we just unloaded
   }
   for (const c of r.rebuilt) {
     sim.settle(c.cx, c.cy, c.cz); // POC form of worldgen-fluid settling: settle BEFORE meshing so the new chunk's mesh already shows flooded caves. The settled flag makes re-settling a re-meshed chunk a no-op. settle() never clears sim.touched: cross-seam marks from any settle this frame survive here and to the end-of-frame drain below, which re-meshes them.
@@ -832,21 +852,22 @@ function frame(now: number): void {
     waterAcc = 0;
     sim.tick(WATER_PULSE); // water on a ~2 Hz slow clock (PROJECT.md §9); settles are event-driven and stay snappy
   }
-  const touched = sim.touched; // re-mesh any chunk the sim changed this frame (settles from substeps + ticks), then drain
-  if (touched.size) {
-    for (const key of touched) {
-      const [cx, cy, cz] = key.split(',').map(Number);
+  // Merge this frame's water + light touched chunks into the pending re-mesh set (both sims keep
+  // their exact sim.touched contract: consumed and cleared exactly once per frame here).
+  for (const key of sim.touched) pendingRebuild.add(key);
+  sim.touched.clear();
+  for (const key of lightSim.touched) pendingRebuild.add(key);
+  lightSim.touched.clear();
+  // Re-mesh up to REBUILD_BUDGET, closest to the player first; the rest carry to the next frame
+  // (their light/water is a self-correcting lower bound, so a briefly-stale mesh is fine).
+  if (pendingRebuild.size) {
+    const pcx = chunkOf(player.pos.x), pcy = chunkOf(player.pos.y), pcz = chunkOf(player.pos.z);
+    const list = [...pendingRebuild].map((k) => k.split(',').map(Number) as [number, number, number]);
+    list.sort((a, b) => rebuildScore(a, pcx, pcy, pcz) - rebuildScore(b, pcx, pcy, pcz));
+    for (const [cx, cy, cz] of list.slice(0, REBUILD_BUDGET)) {
+      pendingRebuild.delete(`${cx},${cy},${cz}`);
       if (world.hasChunk(cx, cy, cz)) rebuildChunkMesh(cx, cy, cz);
     }
-    touched.clear();
-  }
-  const ltouched = lightSim.touched; // re-mesh any chunk whose LIGHT changed this frame (edits + settles + cross-seam waves), then drain — same contract as sim.touched
-  if (ltouched.size) {
-    for (const key of ltouched) {
-      const [cx, cy, cz] = key.split(',').map(Number);
-      if (world.hasChunk(cx, cy, cz)) rebuildChunkMesh(cx, cy, cz);
-    }
-    ltouched.clear();
   }
   syncCamera();
   updateHitbox();
