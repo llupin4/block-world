@@ -204,7 +204,12 @@ stored anywhere. A second manual pass then showed v2's 512-block re-snap
 lurching the sheet when the player crossed a grid line (and leaving the
 player at the sheet's corner on spawn) — hence the continuous
 player-centring below: the sheet re-centers every frame, and the
-world-lock is preserved by the camera terms cancelling in the uv offset.
+world-lock is preserved by the camera terms cancelling in the uv offset. A
+   further manual pass then showed the player-centred sheet drawing *in front
+   of* tree canopies (its bounding sphere sits at the camera, so the
+   distance-based transparent sort judged it closest and drew it last) —
+   hence the dynamic `renderOrder` rule, the celestial `-2` layer, and the
+   opacity re-tune (cloud 0.70 / leaves·water 0.85) below.
 
 - **Shape**: a single quad, **2048×2048 blocks**, flat, at altitude
   **y = 96** (`ALTITUDE`, above `WORLD_Y_MAX = 64`), **centered on the
@@ -239,13 +244,19 @@ world-lock is preserved by the camera terms cancelling in the uv offset.
   can never cause a seam. The quad's v axis is flipped so both uv axes
   increase with world +x/+z (sign consistency on both axes). No per-frame
   noise, matrices, or uploads: two position floats + two offset floats.
-- **Material**: white, `transparent: true`, `opacity: 0.85`, `fog: false`
+- **Material**: white, `transparent: true`, `opacity: 0.70`, `fog: false`
   (50–150 blocks overhead; night's exponential fog would fade the layer by
   up to ~50%), `depthWrite: false`, `side: DoubleSide` (visible from
-  below), `renderOrder` after the other transparents (any ray that hits
-  both cloud and water/celestial objects hits the cloud first: terrain tops
-  out at 64 < 96 — so drawing clouds last among transparents is always
-  correct, with no per-frame sort-key management). Tint:
+  below). Transparent depth order: the sheet's `renderOrder` is
+  **dynamic** — `-1` while the eye is at/below the sheet (the sheet is the
+  *farthest* transparent on any upward ray — terrain/canopy tops out at
+  64 < 96, sun/moon discs at r=360–380 — so it draws *behind* vegetation
+  and water), `+1` while the eye is above the sheet (fly mode: it is the
+  *nearest* looking down, so it draws in front of water). The sun/moon
+  sprites and stars are fixed at `-2`, behind the sheet, so cloud puffs
+  occlude the celestials. (The v1-era "clouds last, always" claim was wrong
+  for a player-following sheet: with the bound centred on the camera the
+  transparent sort drew it dead last, on top of everything.) Tint:
   `lerp(#ffffff, #707a9c, clamped (1 − worldDim) / (1 − 0.33))` — crisp
   white by day, faint blue-grey at night per the chosen mood.
 - The layer is **hidden in the underwater mood** (`setVisible(false)` from
@@ -270,6 +281,10 @@ world-lock is preserved by the camera terms cancelling in the uv offset.
 - `cloudTexOffset(camX, camZ, timeSec): [number, number] =
   [(camX + wx) / QUAD, (camZ + wz) / QUAD]` — the sheet-following uv
   offsets; the cam terms cancel in the sampling invariant above.
+- `cloudRenderOrder(camY): -1 | 1 = camY > ALTITUDE ? 1 : -1` — the
+  sheet's dynamic transparent depth order: at/below the sheet it is the
+  farthest transparent (drawn behind vegetation/water), above it the
+  nearest (drawn in front of them).
 
 ### Tests (`src/__tests__/clouds.test.ts`)
 
@@ -287,6 +302,8 @@ world-lock is preserved by the camera terms cancelling in the uv offset.
   both axes); `windAt` is monotonic on both axes; and drift moves the field
   a fixed world point samples (coverage at `windAt(0)` ≠
   `windAt(2000)`).
+- `cloudRenderOrder` is `-1` at and below the sheet's altitude (`ALTITUDE`
+  inclusive) and `+1` above it.
 
 ## HUD clock & integration
 
@@ -307,13 +324,21 @@ world-lock is preserved by the camera terms cancelling in the uv offset.
   - per frame, after `syncWaterFx()`:
     `clouds.setVisible(waterFx === 'air')` (the underwater mood hides the
     layer), then
-    `sky.apply(sampleSky(worldTime.dayPhase), waterFx, camera)` then
-    `clouds.update(camera.position.x, camera.position.z, worldTime.time,
-    skySample.worldDim)`.
-- No changes to world storage, mesher, water sim, or player code. The
+`sky.apply(sampleSky(worldTime.dayPhase), waterFx, camera)` then
+     `clouds.update(camera.position.x, camera.position.z,
+     camera.position.y, worldTime.time, skySample.worldDim)`.
+- No changes to world storage, mesher, water sim, or player code *for this
+  feature*. The
   streaming/remesh frame budget (PROJECT.md §9) is untouched: everything
   added is O(1) per frame apart from the rare mask rebuilds and the
-  transition-band gradient redraws.
+  transition-band gradient redraws. One deliberate carve-out landed
+  alongside this pass (small gameplay change, recorded in PROJECT.md):
+  `world.isSolid` now treats Leaves as solid for the player (no more
+  walking through canopies) — glass keeps the legacy pass-through rule,
+  and the water sim already blocked leaves via the registry `solid` flag.
+  Also, the shared leaves/water `matTrans` opacity is 0.85 (leaves read
+  denser; water follows — if the two need to differ, leaves need their own
+  material; see PROJECT.md).
 
 ## Manual verification
 

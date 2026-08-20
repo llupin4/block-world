@@ -976,7 +976,7 @@ Run: `npm run build`
 Expected: passes (in particular: no remaining references to `BG_AIR`, and `syncWaterFx` no longer touches `scene.background`/`scene.fog`).
 
 Run: `npm test`
-Expected: all suites pass (124 tests total: 101 pre-existing + 23 new).
+Expected: all suites pass (123 tests total: 101 pre-existing + 22 new).
 
 Run: `npm run dev`, open the printed URL, click the canvas to lock the pointer, and do a 60-second smoke check:
 - The sky reads as a gradient (zenith → horizon), not a flat colour; the sun disc is visible in the sky.
@@ -1122,7 +1122,7 @@ Report pass/fail per checklist item. If everything passes: the branch is ready f
 
 ---
 
-### Amendment record — Clouds v2/v3 (2026-08-19, post-execution)
+### Amendment record — Clouds v2/v3/v4 (2026-08-19, post-execution)
 
 Two manual passes (user testing in-browser) rejected the clouds as designed
 and implemented in Tasks 4–6; the renderer was reworked in place (pure
@@ -1140,7 +1140,21 @@ math + tests rewritten, `main.ts` call sites unchanged):
   terms cancel algebraically → world-locked, no seam); v-axis flipped so
   both uv axes run with world +x/+z; tile pinned by a whole-tile hash
   fixture. Commit `0d8fc20`.
+- **v4 (task 11)** — a third manual pass: the player-centred sheet drew on
+  **top** of tree canopies (its bounding sphere sits at the camera → the
+  distance-based transparent sort drew it last). Fix: dynamic sheet
+  `renderOrder` — `-1` at/below the sheet (farthest transparent on any
+  upward ray → behind vegetation/water), `+1` flying above it (nearest →
+  in front of water); sun/moon/stars fixed at `-2` behind the sheet (puffs
+  occlude the celestials). Pure `cloudRenderOrder(camY)` + test; `update`
+  now takes `camY`. Opacities re-tuned: cloud 0.85 → **0.70**, shared
+  leaves/water `matTrans` 0.75 → **0.85**. Commits `7563eba` + `599080b`.
+  Alongside (separate gameplay change, commit `aa92d48`): `world.isSolid`
+  treats Leaves as solid to the player (no walking through canopies);
+  glass keeps pass-through; the water sim already blocked leaves.
 
 Spec: the "## Clouds" section was revised to v2/v3 in the same window
-(commits `6b00fee` + docs sync). Re-verify checklist item 4 and the
-standing-still drift after v3.
+(commits `6b00fee` + docs sync) and to v4 alongside this record.
+Re-verify checklist item 4, the standing-still drift, and (after v4) that
+clouds sit *behind* tree canopies while the player stands under one — and
+that the player can no longer walk through leaves.

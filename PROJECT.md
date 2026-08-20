@@ -276,7 +276,7 @@ new THREE.MeshBasicMaterial({ map: atlas, vertexColors: true });
 // Transparent material
 new THREE.MeshBasicMaterial({
   map: atlas, vertexColors: true, transparent: true,
-  opacity: 0.75, depthWrite: false, side: THREE.DoubleSide,
+  opacity: 0.85, depthWrite: false, side: THREE.DoubleSide,
 });
 ```
 
@@ -553,8 +553,11 @@ pattern as the water flag arrays:
   0.2-thin panel hugging its hinge edge (flush against the aimed wall); open = the
   **same** full-size panel swung 90° about the hinge corner (never a squished slab),
   walkable.
-- `world.isSolid()` is the single collision truth (closed door blocks, open door and
-  torch walk); the mesher emits their partial geometry in the opaque pass. Torches
+- `world.isSolid()` is the single collision truth (closed door blocks, open
+  door and torch walk; **leaves are solid to the player** — a dedicated
+  `isSolid` exception, so the player cannot walk through canopies — while
+  glass keeps the legacy pass-through rule; the water sim already blocked
+  leaves via the registry `solid` flag); the mesher emits their partial geometry in the opaque pass. Torches
   and doors are never opaque, so they never cull neighbor faces; and a thin panel's
   own face is culled only when the neighbour's **geometry** actually covers that
   area (coverage rule), so a door/torch next to a door keeps its textured faces
@@ -596,10 +599,16 @@ Spec: `docs/superpowers/specs/2026-08-19-day-night-clouds-design.md`.
   each frame's uv offset tracks `camera + wind` so the camera terms cancel
   in the sampled uv — the pattern is world-locked AND drifts ~0.5 block/s,
   continuously, even while standing still; no per-frame noise, matrices, or
-  uploads. `fog: false`, tinted white → faint blue-grey by `worldDim`.
-  The layer is hidden while the underwater mood is active (the dense water
-  fog would physically 100% fog a y=96 layer; an un-fogged one would
-  instead flicker in/out of the water column).
+uploads. `fog: false`, opacity 0.70, tinted white → faint blue-grey by
+   `worldDim`; transparent depth order is dynamic — the sheet draws at
+   `renderOrder -1` while the eye is at/below it (it is the *farthest*
+   transparent on any upward ray, so it sits *behind* vegetation and water)
+   and `+1` when flying above it (nearest looking down, so in front of
+   water); the sun/moon discs and stars sit at `-2`, behind the sheet, so
+   cloud puffs correctly occlude the celestials. The layer is hidden while
+   the underwater mood is active (the dense water
+   fog would physically 100% fog a y=96 layer; an un-fogged one would
+   instead flicker in/out of the water column).
 - The T12 air/water mood swap survives: it owns the FOV squeeze and which
   fog/background objects are active; the **values** they show are now
   time-driven, so night comes underwater too.
