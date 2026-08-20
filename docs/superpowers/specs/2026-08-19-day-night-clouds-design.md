@@ -21,7 +21,8 @@ This project delivers:
 1. a **world-time clock** as world state, decoupled from any consumer;
 2. a **sky system** that reads the clock: gradient sky, sun/moon, stars, a
    global night dim of the whole world;
-3. a **cloud layer** (instanced grid, wind drift);
+3. a **cloud layer** (a world-locked repeating pattern on one large planar
+   sheet, scrolled by wind);
 4. a small **HUD clock**.
 
 Explicitly out of scope: dynamic lighting with light levels (the second
@@ -190,51 +191,85 @@ Constructed once (`createSky(...)`), re-applied each frame via
 Also a pure-consumer module: it reads `WorldTime` (for wind) and the
 `SkySample` (for tint); it never advances anything.
 
-- **Shape**: a layer of instanced flat quads at fixed altitude **y = 96**
-  (above `WORLD_Y_MAX = 64`, so clouds never clip terrain; ~400 blocks of
-  sky inside the far plane). Each quad covers **4×4 world blocks** — the
-  classic voxel-sandbox cloud proportion — in a **24×24-cell window**
-  (≈ 96×96 blocks) so the layer spans well past what is visible.
-- **Tracking**: the layer origin is anchored to the world grid at
-  `floor(cam.x / 4) · 4` (same for z) and re-snapped when the camera crosses
-  a 4-block boundary. Quads live at fixed world positions inside the window,
-  so there is no per-frame matrix work; instances are (re)built only on
-  anchor changes.
-- **Coverage**: per cell, `c = simplex2d((wx + 2 + windX) / 12,
-  (wz + 2 + windZ) / 12)` using the existing `simplex-noise` dependency, on a
-  12-block wavelength (features ~4–24 blocks wide, sparser than the terrain
-  noise scales). A cell draws its quad when `c > 0.05` — on/off at the cell
-  level; the *intra-cell* softness comes from the quad's texture, a
-  canvas-painted blurred noise alpha tile (same deterministic painter style
-  as the block atlas). Per-cell opacity was rejected: per-instance alpha
-  isn't natively supported, and cell on/off with a noisy tile is the
-  established look and the cheaper one. Noisecell count per rebuild is
-  576 — a sub-millisecond budget at rebuild rate (a few times per second
-  while walking).
-- **Wind**: `windX = windSpeed · time` (and `windZ` at 0.9× plus a fixed
-  offset for the second axis), `windSpeed ≈ 0.1` blocks/s (~1 block per 10 s
-  — a slow visible drift). Drift moves the *sample offset*, not the
-  geometry: the quads stay grid-locked and the pattern glides through them.
-  The mask is re-evaluated whenever the window re-anchors (every 4-block
-  camera movement, ~1 s at walk speed); wind is sampled at rebuild time, so
-  at this speed the pattern advances ~0.1 block per rebuild — smooth, and
-  rebuilds stay rare and cheap.
-- **Material**: white, `transparent: true`, `fog: false` (a 40-block
-  distance overhead would otherwise fog the layer out at altitude),
-  `depthWrite: false`, `side: DoubleSide` (visible from below). Tint:
-  `lerp(#ffffff, #707a9c, (1 − worldDim) / (1 − 0.33))` — crisp white by
-  day, faint blue-grey at night per the chosen mood.
-- One draw call (~a third of the 576 cells typically active).
+**Design revision (v2, 2026-08-19):** the v1 design (an instanced 24×24-cell
+window, mask rebuilt only when the camera crossed a 4-block grid line)
+failed its manual pass: standing still showed no drift at all (the pattern
+was effectively world-static — sampling only moved at re-anchoring rate),
+and the finite 96-block window's hard edge read as a visible square band in
+the sky. v2 replaces the window with the standard approach for this kind of
+voxel sandbox: a **repeating world-space pattern rendered on one large
+fixed-altitude sheet whose texture scrolls with time** — no per-cloud
+objects, no camera-relative window, no cloud state stored anywhere.
+
+- **Shape**: a single quad, **2048×2048 blocks**, flat, at altitude
+  **y = 96** (`ALTITUDE`, above `WORLD_Y_MAX = 64`). It follows the camera
+  in X/Z but snaps to the 512-block tile grid (`floor(cam / 512) · 512`,
+  re-centred only when that cell changes — rare), so the pattern is locked
+  to the world while the player moves. The 512-block far plane clips the
+  quad's corners long before its edge, so coverage is a near-circular disc
+  whose boundary sits ≤ ~6° above the horizon, in every direction. One draw
+  call, one 128×128 texture.
+- **Pattern**: a **128×128-texel repeating tile**, each texel = one 4×4
+  world-block cell, baked **once** at startup (deterministic, seeded PRNG
+  like the atlas painters): a texel's alpha is **core** if
+  `c = simplex2d((wx + 2) / 12, (wz + 2) / 12) > 0.2`, **rim** (~60% alpha)
+  if `c > 0.05` (wx, wz = the cell's min corner; the +2 samples the cell
+  centre), else none — the same 12-block-wavelength field as v1 (features
+  ~4–24 blocks wide). `NearestFilter`, no mipmaps → the classic blocky 0/1
+  cell edges (the low-res grid look): cells are on/off at the texel level,
+  with the two-level alpha as the only intra-tile softness. The pattern
+  therefore repeats every **512 blocks** — like a tiling cloud texture, a
+  deliberate cosmetic trade-off (repeat distance ≈ 2 min of walking).
+- **Wind / drift**: the pattern scrolls purely via the texture offset:
+  every frame `map.offset = windAt(time) / 512` (in tile units), where
+  `windAt(t) = [0.5·t, 0.45·t + 37.7]` **blocks** (z at 0.9×, fixed
+  offset decorrelating the axes). ~1 block per 2 s: clearly drifting while
+  standing still, still slow in character. The snap step (512) is an exact
+  multiple of the tile (512), so re-centering shifts the texture by whole
+  tiles — seamless; and a world point always samples the field at
+  `(w + wind(t)) / 12` modulo the tile — the pattern is world-locked and
+  the drift is a continuous translate. No per-frame noise, matrices, or
+  uploads: two offset floats (+ a rare position snap).
+- **Material**: white, `transparent: true`, `opacity: 0.85`, `fog: false`
+  (50–150 blocks overhead; night's exponential fog would fade the layer by
+  up to ~50%), `depthWrite: false`, `side: DoubleSide` (visible from
+  below), `renderOrder` after the other transparents (any ray that hits
+  both cloud and water/celestial objects hits the cloud first: terrain tops
+  out at 64 < 96 — so drawing clouds last among transparents is always
+  correct, with no per-frame sort-key management). Tint:
+  `lerp(#ffffff, #707a9c, clamped (1 − worldDim) / (1 − 0.33))` — crisp
+  white by day, faint blue-grey at night per the chosen mood.
+- The layer is **hidden in the underwater mood** (`setVisible(false)` from
+  `main.ts`): dense water fog would 100% fog a y=96 layer, and an un-fogged
+  one would otherwise flicker in/out of the water column.
+
+### Pure part (node-testable)
+
+- Constants: `CELL = 4`, `TILE = 128` (texels per tile edge → one tile =
+  512 world blocks), `WAVE = 12`, `CORE = 0.2`, `RIM = 0.05`,
+  `ALTITUDE = 96`; the seeded 2D-simplex field (xorshift prng, same shape
+  as `src/main.ts`'s).
+- `cloudCoverage(wx, wz, windX = 0, windZ = 0) =
+  noise2D((wx + 2 + windX) / WAVE, (wz + 2 + windZ) / WAVE)` — one 4×4
+  cell's noise value (wx, wz = min corner). **World-lock identity**:
+  `cloudCoverage(w + d, u) === cloudCoverage(w, u + d)` for any vector
+  shift — shift the world or shift the sample; same field.
+- `cloudTileLevel(cx, cz) ∈ {0, 1, 2}` — the baked tile's alpha level for
+  texel (cx, cz) (0 none, 1 rim, 2 core); deterministic, and consistent
+  with `cloudCoverage` at zero wind.
+- `windAt(t): [number, number]` — linear drift, monotonic on both axes.
 
 ### Tests (`src/__tests__/clouds.test.ts`)
 
-- Coverage is deterministic: same (cell, wind offset) → same mask.
-- On/off threshold behaves (cells just above/below 0.05 flip correctly).
-- Re-anchoring: advancing the camera across a 4-block boundary re-anchors
-  the window and yields an identical *world-space* mask (no pop or
-  duplication at the seam).
-- Wind: advancing `time` monotonically shifts coverage — a fixed cell's
-  sampled value changes directionally as the offset grows.
+- `cloudCoverage` is deterministic; the world-lock identity holds for
+  several (w, d) pairs.
+- `cloudTileLevel` is deterministic, consistent with the coverage
+  thresholds at zero wind (sampled texels), and yields all three levels
+  (0, 1, 2) under the fixed seed (full-tile scan).
+- On/off thresholds behave: core above 0.2, rim in (0.05, 0.2], none at or
+  below 0.05 (as expressed by `cloudTileLevel` vs `cloudCoverage`).
+- `windAt` is monotonic on both axes, and drift moves the field a fixed
+  world point samples (coverage at `windAt(0)` ≠ at `windAt(2000)`).
 
 ## HUD clock & integration
 
