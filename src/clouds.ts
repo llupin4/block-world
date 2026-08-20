@@ -2,7 +2,7 @@
 // The pattern (top, pure, node-testable): one 2D-simplex sample per 4×4-block
 // cell, baked once into a 128×128-texel tile (core/rim alpha) that repeats
 // every 512 world blocks. The renderer (below) draws the tile on a
-// 2048×2048 quad at y = 96 — camera-following, 512-block-snapped — and
+// 2048×2048 quad at y = 96 — centered on the player every frame — and
 // scrolls it per frame via the texture offset (wind). No instances, no
 // window, no per-frame noise or matrix work.
 // Spec: docs/superpowers/specs/2026-08-19-day-night-clouds-design.md.
@@ -16,7 +16,7 @@ export const CORE = 0.2; // noise above this → opaque core texel
 export const RIM = 0.05; // noise above this (and ≤ CORE) → ~60% rim texel; below → none
 export const ALTITUDE = 96; // above WORLD_Y_MAX (64): clouds never clip terrain
 
-const QUAD = 2048; // quad edge (blocks); the 512 far plane clips its corners → edge sits ~6° above the horizon
+export const QUAD = 2048; // sheet edge (blocks); centered on the player, the 512 far plane clips corners → edge ring ≈5–10° above the horizon
 const WIND_X = 0.5; // blocks/s — ~1 block per 2 s: clearly drifting while standing still, still slow
 const WIND_Z = 0.45; // 0.9× the x drift
 const WIND_Z_OFFSET = 37.7; // decorrelates the z-axis sampling from x
@@ -51,9 +51,21 @@ export function windAt(timeSec: number): [number, number] {
   return [WIND_X * timeSec, WIND_Z * timeSec + WIND_Z_OFFSET];
 }
 
+/**
+ * Pure: the tile-uv offsets that keep the pattern world-locked while the
+ * sheet follows the camera. For a world point w the sampled texel index is
+ * (w − cam + QUAD/2) / (TILE · CELL) + 4 · offset
+ *   = (w − cam + 1024) / 512 + (cam + wind) / 512
+ *   = (w + wind) / 512 + 2 — the cam terms cancel algebraically.
+ */
+export function cloudTexOffset(camX: number, camZ: number, timeSec: number): [number, number] {
+  const [wx, wz] = windAt(timeSec);
+  return [(camX + wx) / QUAD, (camZ + wz) / QUAD];
+}
+
 import * as THREE from 'three';
 
-// --- renderer: one large textured quad, world-locked, wind-scrolled ---
+// --- renderer: one large textured quad, world-locked, wind-scrolled, player-centered ---
 
 export interface Clouds {
   update(camX: number, camZ: number, timeSec: number, dim: number): void;
@@ -61,12 +73,15 @@ export interface Clouds {
 }
 
 /**
- * Builds the cloud layer into `scene`: a QUAD×QUAD-block plane at
- * `ALTITUDE` carrying the baked 128×128 tile (repeated, NearestFilter).
- * The quad follows the camera snapped to the 512-block tile grid, the
- * pattern is world-locked, and drift is a per-frame texture offset:
- * `map.offset = windAt(t) / 512`. Per-frame cost: two offset floats
- * (+ a rare position snap on 512-block cell crossings).
+ * Builds the cloud layer into `scene`: a QUAD×QUAD-block plane at `ALTITUDE`
+ * carrying the baked 128×128 tile (repeated, NearestFilter). The sheet is
+ * centered on the camera EVERY frame (continuous — no snapping, no
+ * re-center events), and the texture offset tracks `camera + wind`, so a
+ * fixed world point always samples `(w + wind(t)) / 512 + const`: the
+ * pattern is world-locked AND the sheet reads as an infinite layer — its
+ * edge is always ≥ QUAD/2 blocks away, so the 512 far plane clips it to a
+ * disc whose rim sits only ≈5–10° above the horizon. Per-frame cost: two
+ * position floats + two offset floats; no matrix or texture uploads.
  */
 export function createClouds(scene: THREE.Scene): Clouds {
   // The tile: one RGBA pixel per texel (white + alpha level), baked once.
@@ -102,27 +117,25 @@ export function createClouds(scene: THREE.Scene): Clouds {
   });
   const geo = new THREE.PlaneGeometry(QUAD, QUAD);
   geo.rotateX(-Math.PI / 2); // flat in XZ (DoubleSide → normal sign irrelevant)
+  // PlaneGeometry's v runs along the pre-rotation +Y, which lands on world −z
+  // after the rotate; flip it so BOTH uv axes increase with world +x/+z —
+  // keeps the wind-offset signs consistent on both axes.
+  {
+    const uv = geo.attributes.uv;
+    for (let i = 0; i < uv.count; i++) uv.setY(i, 1 - uv.getY(i));
+  }
   const mesh = new THREE.Mesh(geo, mat);
-  mesh.renderOrder = 1; // drawn after the other transparents: any ray that hits both cloud and water/celestial objects hits the cloud first (terrain tops at 64 < 96), so last-among-transparent is always the correct order — no per-frame sort-key management
+  mesh.renderOrder = 1; // drawn after the other transparents: any ray that hits both cloud and water/celestial objects hits the cloud first (terrain tops out at 64 < 96; sun/moon sprites at r360–380 lie within the sheet's 1024 reach), so last-among-transparent is the correct painter order — no per-frame sort-key management
   scene.add(mesh);
 
   const day = new THREE.Color(0xffffff);
   const night = new THREE.Color(0x707a9c);
-  const SNAP = TILE * CELL; // 512-block tile grid — an exact multiple of the tile, so re-centering shifts the texture by whole tiles (seamless)
-  let anchorX = NaN;
-  let anchorZ = NaN;
 
   return {
     update(camX, camZ, timeSec, dim) {
-      const ax = Math.floor(camX / SNAP) * SNAP;
-      const az = Math.floor(camZ / SNAP) * SNAP;
-      if (ax !== anchorX || az !== anchorZ) {
-        mesh.position.set(ax + QUAD / 2, ALTITUDE, az + QUAD / 2);
-        anchorX = ax;
-        anchorZ = az;
-      }
-      const [wx, wz] = windAt(timeSec);
-      tex.offset.set(wx / SNAP, wz / SNAP);
+      mesh.position.set(camX, ALTITUDE, camZ);
+      const [ox, oy] = cloudTexOffset(camX, camZ, timeSec);
+      tex.offset.set(ox, oy);
       // dim ∈ [0.33, 1] (0.33 is the sky's night floor); clamp guards a future mood
       const dtn = Math.max(0, Math.min(1, (1 - dim) / (1 - 0.33)));
       mat.color.copy(day).lerp(night, dtn);
