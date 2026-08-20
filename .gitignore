@@ -19,6 +19,8 @@ coverage/
 
 # Local overrides (Vite convention)
 *.local
+.vite/
+.superpowers/
 
 # Editor & OS files
 .vscode/*
