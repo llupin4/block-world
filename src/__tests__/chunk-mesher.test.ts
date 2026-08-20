@@ -377,7 +377,7 @@ describe('chunk-mesher special blocks', () => {
 });
 
 describe('chunk-mesher light baking', () => {
-  it('a zero-light stub keeps the colors buffer byte-identical to pre-light (FACE_SHADE * AO only) and aLight all-zero', () => {
+  it('a zero-light stub: every vertex bakes aLight 0 (length = 2 x vertex count, all zeros); the color path is untouched by code inspection', () => {
     const w = new World();
     w.ensureChunk(0, 0, 0).blocks.fill(Block.Stone);
     const { opaque } = meshChunk(w, 0, 0, 0, NO_LIGHT);
@@ -407,6 +407,16 @@ describe('chunk-mesher light baking', () => {
     const { opaque } = meshChunk(w, 0, 0, 0, lightAt);
     const l = opaque!.light;
     expect(Math.max(...l.filter((_, i) => i % 2 === 0))).toBeCloseTo(10 / 15, 6);
+  });
+
+  it('the face-across cell (the dominant per-corner light) is pinned: light only at the across cell bakes into the corner', () => {
+    const w = makeWorldForMesher(Block.Stone);
+    // light ONLY at the +X face-across cell (9,8,8) of the lone stone (8,8,8); every candidate cell except the across one is dark:
+    const lightAt: LightSampler = (x, y, z) => (x === 9 && y === 8 && z === 8 ? [12, 0] : [0, 0]);
+    const { opaque } = meshChunk(w, 0, 0, 0, lightAt);
+    const l = opaque!.light;
+    expect(Math.max(...l.filter((_, i) => i % 2 === 0))).toBeCloseTo(12 / 15, 6);
+    expect(Math.max(...l.filter((_, i) => i % 2 === 1))).toBe(0);
   });
 });
 
