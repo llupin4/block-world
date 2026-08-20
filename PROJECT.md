@@ -587,19 +587,24 @@ Spec: `docs/superpowers/specs/2026-08-19-day-night-clouds-design.md`.
   uniform update dims the whole world with zero remeshing. It is the
   documented stand-in until the dynamic-lighting item bakes per-block
   skylight into the vertex colour buffer.
-- `src/clouds.ts` — instanced 4-block-cell quads at y = 96 in a 24×24 window
-  anchored to the camera's 4-block grid cell; per-cell coverage is one
-  2D-simplex sample (12-block wavelength, threshold 0.05), wind = a slow
-  (~0.1 block/s) shift of the sample offset, re-evaluated only on
-  re-anchoring. `fog: false`, tinted white → faint blue-grey by `worldDim`.
+- `src/clouds.ts` — a world-locked cloud sheet: a 128×128-texel tile (one
+  4×4-block cell per texel, 2D-simplex, 12-block wavelength, core/rim
+  thresholds 0.2/0.05, `NearestFilter` for the blocky cells) baked once and
+  repeated every 512 blocks; one 2048×2048 quad at y = 96 **centered on the
+  player every frame** (the 512 far plane clips its rim to a ≈5–10° ring
+  above the horizon → an effectively infinite layer from the ground), and
+  each frame's uv offset tracks `camera + wind` so the camera terms cancel
+  in the sampled uv — the pattern is world-locked AND drifts ~0.5 block/s,
+  continuously, even while standing still; no per-frame noise, matrices, or
+  uploads. `fog: false`, tinted white → faint blue-grey by `worldDim`.
   The layer is hidden while the underwater mood is active (the dense water
-  fog would physically 100% fog a y=96 layer; an un-fogged one would instead
-  flicker in/out of the water column as the window re-anchors while
-  swimming).
+  fog would physically 100% fog a y=96 layer; an un-fogged one would
+  instead flicker in/out of the water column).
 - The T12 air/water mood swap survives: it owns the FOV squeeze and which
   fog/background objects are active; the **values** they show are now
   time-driven, so night comes underwater too.
 - HUD: `Day N · hh:mm` top-left (top-right is the palette strip's).
-- Renderer note: everything added is O(1) per frame apart from rare mask
-  rebuilds and the dusk/dawn gradient redraws; the §9 streaming budget is
+- Renderer note: everything added is O(1) per frame (the sky gradient only
+  redraws while the dusk/dawn palette moves; the cloud sheet costs two
+  position floats + two uv-offset floats); the §9 streaming budget is
   untouched.

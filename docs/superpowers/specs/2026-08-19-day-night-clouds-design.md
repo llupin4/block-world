@@ -191,24 +191,29 @@ Constructed once (`createSky(...)`), re-applied each frame via
 Also a pure-consumer module: it reads `WorldTime` (for wind) and the
 `SkySample` (for tint); it never advances anything.
 
-**Design revision (v2, 2026-08-19):** the v1 design (an instanced 24×24-cell
-window, mask rebuilt only when the camera crossed a 4-block grid line)
-failed its manual pass: standing still showed no drift at all (the pattern
-was effectively world-static — sampling only moved at re-anchoring rate),
-and the finite 96-block window's hard edge read as a visible square band in
-the sky. v2 replaces the window with the standard approach for this kind of
-voxel sandbox: a **repeating world-space pattern rendered on one large
-fixed-altitude sheet whose texture scrolls with time** — no per-cloud
-objects, no camera-relative window, no cloud state stored anywhere.
+**Design revision (v2/v3, 2026-08-19):** the v1 design (an instanced
+24×24-cell window, mask rebuilt only when the camera crossed a 4-block
+grid line) failed its manual pass: standing still showed no drift at all
+(the pattern was effectively world-static — sampling only moved at
+re-anchoring rate), and the finite 96-block window's hard edge read as a
+visible square band in the sky. v2 replaced the window with the standard
+approach for this kind of voxel sandbox: a **repeating world-space pattern
+rendered on one large fixed-altitude sheet whose texture scrolls with
+time** — no per-cloud objects, no camera-relative window, no cloud state
+stored anywhere. A second manual pass then showed v2's 512-block re-snap
+lurching the sheet when the player crossed a grid line (and leaving the
+player at the sheet's corner on spawn) — hence the continuous
+player-centring below: the sheet re-centers every frame, and the
+world-lock is preserved by the camera terms cancelling in the uv offset.
 
 - **Shape**: a single quad, **2048×2048 blocks**, flat, at altitude
-  **y = 96** (`ALTITUDE`, above `WORLD_Y_MAX = 64`). It follows the camera
-  in X/Z but snaps to the 512-block tile grid (`floor(cam / 512) · 512`,
-  re-centred only when that cell changes — rare), so the pattern is locked
-  to the world while the player moves. The 512-block far plane clips the
-  quad's corners long before its edge, so coverage is a near-circular disc
-  whose boundary sits ≤ ~6° above the horizon, in every direction. One draw
-  call, one 128×128 texture.
+  **y = 96** (`ALTITUDE`, above `WORLD_Y_MAX = 64`), **centered on the
+  player every frame** — the sheet re-centers continuously (no snapping, no
+  re-center event that could lurch). Because its edge is always ≥ 1024
+  blocks away in every direction, the 512-block far plane clips the sheet
+  to a disc whose rim sits only ≈5–10° above the horizon (≈5–6° at typical
+  spawn height) — it reads as an effectively infinite layer of clouds from
+  the ground. One draw call, one 128×128 texture.
 - **Pattern**: a **128×128-texel repeating tile**, each texel = one 4×4
   world-block cell, baked **once** at startup (deterministic, seeded PRNG
   like the atlas painters): a texel's alpha is **core** if
@@ -221,15 +226,19 @@ objects, no camera-relative window, no cloud state stored anywhere.
   therefore repeats every **512 blocks** — like a tiling cloud texture, a
   deliberate cosmetic trade-off (repeat distance ≈ 2 min of walking).
 - **Wind / drift**: the pattern scrolls purely via the texture offset:
-  every frame `map.offset = windAt(time) / 512` (in tile units), where
-  `windAt(t) = [0.5·t, 0.45·t + 37.7]` **blocks** (z at 0.9×, fixed
-  offset decorrelating the axes). ~1 block per 2 s: clearly drifting while
-  standing still, still slow in character. The snap step (512) is an exact
-  multiple of the tile (512), so re-centering shifts the texture by whole
-  tiles — seamless; and a world point always samples the field at
-  `(w + wind(t)) / 12` modulo the tile — the pattern is world-locked and
-  the drift is a continuous translate. No per-frame noise, matrices, or
-  uploads: two offset floats (+ a rare position snap).
+  every frame `map.offset = (camera + windAt(time)) / 2048` (in uv units,
+  `QUAD = 2048`), where `windAt(t) = [0.5·t, 0.45·t + 37.7]` **blocks**
+  (z at 0.9×, fixed offset decorrelating the axes). ~1 block per 2 s:
+  clearly drifting while standing still, still slow in character. Because
+  the sheet is centered on the camera AND the offset tracks `camera +
+  wind`, the uv of a world point `w` is
+  `(w − camera) / 512 + (camera + wind) / 512 + const
+  = (w + wind(t)) / 512 + const` — the camera terms **cancel
+  algebraically**, so the pattern is world-locked even though the sheet
+  follows the player: the drift is a continuous translate and re-centering
+  can never cause a seam. The quad's v axis is flipped so both uv axes
+  increase with world +x/+z (sign consistency on both axes). No per-frame
+  noise, matrices, or uploads: two position floats + two offset floats.
 - **Material**: white, `transparent: true`, `opacity: 0.85`, `fog: false`
   (50–150 blocks overhead; night's exponential fog would fade the layer by
   up to ~50%), `depthWrite: false`, `side: DoubleSide` (visible from
@@ -247,8 +256,8 @@ objects, no camera-relative window, no cloud state stored anywhere.
 
 - Constants: `CELL = 4`, `TILE = 128` (texels per tile edge → one tile =
   512 world blocks), `WAVE = 12`, `CORE = 0.2`, `RIM = 0.05`,
-  `ALTITUDE = 96`; the seeded 2D-simplex field (xorshift prng, same shape
-  as `src/main.ts`'s).
+  `ALTITUDE = 96`, `QUAD = 2048`; the seeded 2D-simplex field (xorshift
+  prng, same shape as `src/main.ts`'s).
 - `cloudCoverage(wx, wz, windX = 0, windZ = 0) =
   noise2D((wx + 2 + windX) / WAVE, (wz + 2 + windZ) / WAVE)` — one 4×4
   cell's noise value (wx, wz = min corner). **World-lock identity**:
@@ -258,18 +267,26 @@ objects, no camera-relative window, no cloud state stored anywhere.
   texel (cx, cz) (0 none, 1 rim, 2 core); deterministic, and consistent
   with `cloudCoverage` at zero wind.
 - `windAt(t): [number, number]` — linear drift, monotonic on both axes.
+- `cloudTexOffset(camX, camZ, timeSec): [number, number] =
+  [(camX + wx) / QUAD, (camZ + wz) / QUAD]` — the sheet-following uv
+  offsets; the cam terms cancel in the sampling invariant above.
 
 ### Tests (`src/__tests__/clouds.test.ts`)
 
 - `cloudCoverage` is deterministic; the world-lock identity holds for
   several (w, d) pairs.
-- `cloudTileLevel` is deterministic, consistent with the coverage
-  thresholds at zero wind (sampled texels), and yields all three levels
-  (0, 1, 2) under the fixed seed (full-tile scan).
+- `cloudTileLevel` is a **fixed fixture** (whole-tile hash pinned),
+  consistent with the coverage thresholds at zero wind (sampled texels),
+  and yields all three levels (0, 1, 2) under the fixed seed.
 - On/off thresholds behave: core above 0.2, rim in (0.05, 0.2], none at or
   below 0.05 (as expressed by `cloudTileLevel` vs `cloudCoverage`).
-- `windAt` is monotonic on both axes, and drift moves the field a fixed
-  world point samples (coverage at `windAt(0)` ≠ at `windAt(2000)`).
+- The tex offset keeps the pattern world-locked: the sampled cell of a
+  fixed world point is independent of the camera position (the
+  cam-cancellation invariant, mirrored in JS).
+- The tex offset advances exactly with the wind (cam + wind decomposition,
+  both axes); `windAt` is monotonic on both axes; and drift moves the field
+  a fixed world point samples (coverage at `windAt(0)` ≠
+  `windAt(2000)`).
 
 ## HUD clock & integration
 

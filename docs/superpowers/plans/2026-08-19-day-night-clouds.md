@@ -1109,7 +1109,7 @@ Run `npm run dev` and, over two full cycles (~8 minutes), verify:
 1. **Full cycle**: noon → dusk band (warm horizon, dim falling) → night (indigo sky, stars, glowing moon, world at ~33%) → dawn → noon. No pop on any transition; sun and moon track the horizon correctly (sun sets +X, rises −X).
 2. **Underwater at night**: the water mood is the time-tinted darker blue; surfacing continues the same sky state with no time jump.
 3. **HUD clock** reads 12:00 at noon, 18:00 at sunset, 0:00 when the day counter increments (midnight), 06:00 at dawn.
-4. **Clouds**: the layer spans the sky overhead, drifts slowly, and never pops or duplicates when the camera crosses a 4-block grid line or the window re-anchors.
+4. **Clouds**: the sheet spans the sky in all directions (no visible edge), visibly drifts while standing still, and never jumps or re-centres — the sheet follows the player continuously; no pop or duplication at all.
 5. **Night torches**: a placed torch's flame tile dims with the world and still reads as the brightest object nearby (real glow is the lighting project's scope).
 
 - [ ] **Step 2: Frame-budget sanity (only if any transition looks hitchy)**
@@ -1119,3 +1119,28 @@ If a transition shows a hitch, recreate the PROJECT.md §9 probe (400-frame walk
 - [ ] **Step 3: Report**
 
 Report pass/fail per checklist item. If everything passes: the branch is ready for review — do **not** merge or push without explicit user approval.
+
+---
+
+### Amendment record — Clouds v2/v3 (2026-08-19, post-execution)
+
+Two manual passes (user testing in-browser) rejected the clouds as designed
+and implemented in Tasks 4–6; the renderer was reworked in place (pure
+math + tests rewritten, `main.ts` call sites unchanged):
+
+- **v2 (task 9)** — replaced the 24×24 instanced window (rebuild only on
+  camera-cell crossings → no drift standing still; finite edge → visible
+  square band) with the spec's revised design: a 128×128-texel repeating
+  tile (blocky 4-block cells, `NearestFilter`) on one 2048×2048 quad at
+  y=96, scrolled via the texture offset (wind 0.5/0.45 blocks/s). Commit
+  `eca86af`.
+- **v3 (task 10)** — v2's 512-block re-snap lurching the sheet and leaving
+  the player at the sheet's corner on spawn → the quad is now **centered on
+  the player every frame** and the uv offset tracks `camera + wind` (cam
+  terms cancel algebraically → world-locked, no seam); v-axis flipped so
+  both uv axes run with world +x/+z; tile pinned by a whole-tile hash
+  fixture. Commit `0d8fc20`.
+
+Spec: the "## Clouds" section was revised to v2/v3 in the same window
+(commits `6b00fee` + docs sync). Re-verify checklist item 4 and the
+standing-still drift after v3.
