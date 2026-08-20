@@ -390,8 +390,8 @@ describe('LightSim', () => {
     // wall was added AFTER settle: re-seed + drain (the real flow goes through edit(), Task 5)
     sim.edit(12, 8, 8);
     drain(sim);
-    expect(w.getLight(11, 1, 8)[0]).toBe(13); // last air before the wall
-    expect(w.getLight(13, 1, 8)[0]).toBe(0);  // far side stays dark (no light stored leaks through: 13-1-15 < 0)
+    expect(w.getLight(11, 1, 8)[0]).toBe(11); // last air before the wall: 14-3 (d=3 from torch); the wall doesn't attenuate the near side
+    expect(w.getLight(13, 1, 8)[0]).toBe(0);  // far side stays dark (no light stored leaks through: wall stores 10 → 10-1-15 < 0)
     // distance cap: with the wall gone again, level 0 at distance 14, nothing at 15
     for (let y = 1; y < 16; y++) for (let z = 0; z < 16; z++) w.setBlock(12, y, z, Block.Air);
     sim.edit(12, 8, 8);
