@@ -186,7 +186,7 @@ const matTrans = new THREE.MeshBasicMaterial({
   map: atlas,
   vertexColors: true,
   transparent: true,
-  opacity: 0.75,
+  opacity: 0.85, // shared with water (no separate leaf material): leaves read denser; if water should differ later, leaves need their own material (see PROJECT.md)
   depthWrite: false,
   side: THREE.DoubleSide, // lets water be seen from under-side/side as well
 });

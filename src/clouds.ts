@@ -126,7 +126,7 @@ export function createClouds(scene: THREE.Scene): Clouds {
   const mat = new THREE.MeshBasicMaterial({
     map: tex,
     transparent: true,
-    opacity: 0.85,
+    opacity: 0.7, // soft, see-through puffs so vegetation in front reads crisply
     depthWrite: false,
     side: THREE.DoubleSide, // visible from below
     fog: false, // 50–150 blocks overhead: night fog would fade the layer up to ~50%
