@@ -22,25 +22,27 @@ export interface BlockDef {
   solid: boolean;        // solid to the WATER SIM (unconditionally — doors block water even while open; PROJECT.md §16); for doors this marks the closed state as well. Player collision uses world.isSolid, not this flag.
   transparent: boolean;  // culls neighbor faces? (never for torch/door — they are partial geometry)
   kind: BlockKind;
+  light: number;         // block-light emission, 0..15 (0 = emits nothing; torch 14). Read by src/light.ts at seed time.
+  opacity: number;       // extra light attenuation paid when light EXITS this cell: 0 air-like, 1 glass, 2 leaves/water, 15 nothing passes. Doors are meta-dependent via lightOpacity() (closed = 15, open = 0).
   /** tile indices, order [+X, -X, +Y, -Y, +Z, -Z]; see the atlas layout in main.ts. faces[2] doubles as the UI icon tile */
   faces: [number, number, number, number, number, number];
 }
 
 // D1: Record<number, ...> so plain-number voxel data indexes freely; completeness is test-enforced.
 export const BLOCKS: Record<number, BlockDef> = {
-  [Block.Air]:        { name: 'air',    solid: false, transparent: true,  kind: 'cube',  faces: [0, 0, 0, 0, 0, 0] },
-  [Block.Stone]:      { name: 'stone',  solid: true,  transparent: false, kind: 'cube',  faces: [3, 3, 3, 3, 3, 3] },
-  [Block.Dirt]:       { name: 'dirt',   solid: true,  transparent: false, kind: 'cube',  faces: [2, 2, 2, 2, 2, 2] },
-  [Block.Grass]:      { name: 'grass',  solid: true,  transparent: false, kind: 'cube',  faces: [1, 1, 0, 2, 1, 1] },
-  [Block.Sand]:       { name: 'sand',   solid: true,  transparent: false, kind: 'cube',  faces: [4, 4, 4, 4, 4, 4] },
-  [Block.Water]:      { name: 'water',  solid: false, transparent: true,  kind: 'cube',  faces: [5, 5, 5, 5, 5, 5] },
-  [Block.Wood]:       { name: 'wood',   solid: true,  transparent: false, kind: 'cube',  faces: [6, 6, 7, 7, 6, 6] },
-  [Block.Leaves]:     { name: 'leaves', solid: true,  transparent: true,  kind: 'cube',  faces: [8, 8, 8, 8, 8, 8] },
-  [Block.Glass]:      { name: 'glass',  solid: true,  transparent: true,  kind: 'cube',  faces: [9, 9, 9, 9, 9, 9] },
-  [Block.Planks]:     { name: 'planks', solid: true,  transparent: false, kind: 'cube',  faces: [10, 10, 10, 10, 10, 10] },
-  [Block.Torch]:      { name: 'torch',  solid: false, transparent: true,  kind: 'torch', faces: [11, 11, 11, 11, 11, 11] },
-  [Block.DoorBottom]: { name: 'door',   solid: true,  transparent: true,  kind: 'door',  faces: [13, 13, 13, 13, 13, 13] },
-  [Block.DoorTop]:    { name: 'doorTop',solid: true,  transparent: true,  kind: 'door',  faces: [13, 13, 13, 13, 13, 13] },
+  [Block.Air]:        { name: 'air',    solid: false, transparent: true,  kind: 'cube',  light: 0,   opacity: 0,  faces: [0, 0, 0, 0, 0, 0] },
+  [Block.Stone]:      { name: 'stone',  solid: true,  transparent: false, kind: 'cube',  light: 0,   opacity: 15, faces: [3, 3, 3, 3, 3, 3] },
+  [Block.Dirt]:       { name: 'dirt',   solid: true,  transparent: false, kind: 'cube',  light: 0,   opacity: 15, faces: [2, 2, 2, 2, 2, 2] },
+  [Block.Grass]:      { name: 'grass',  solid: true,  transparent: false, kind: 'cube',  light: 0,   opacity: 15, faces: [1, 1, 0, 2, 1, 1] },
+  [Block.Sand]:       { name: 'sand',   solid: true,  transparent: false, kind: 'cube',  light: 0,   opacity: 15, faces: [4, 4, 4, 4, 4, 4] },
+  [Block.Water]:      { name: 'water',  solid: false, transparent: true,  kind: 'cube',  light: 0,   opacity: 2,  faces: [5, 5, 5, 5, 5, 5] },
+  [Block.Wood]:       { name: 'wood',   solid: true,  transparent: false, kind: 'cube',  light: 0,   opacity: 15, faces: [6, 6, 7, 7, 6, 6] },
+  [Block.Leaves]:     { name: 'leaves', solid: true,  transparent: true,  kind: 'cube',  light: 0,   opacity: 2,  faces: [8, 8, 8, 8, 8, 8] },
+  [Block.Glass]:      { name: 'glass',  solid: true,  transparent: true,  kind: 'cube',  light: 0,   opacity: 1,  faces: [9, 9, 9, 9, 9, 9] },
+  [Block.Planks]:     { name: 'planks', solid: true,  transparent: false, kind: 'cube',  light: 0,   opacity: 15, faces: [10, 10, 10, 10, 10, 10] },
+  [Block.Torch]:      { name: 'torch',  solid: false, transparent: true,  kind: 'torch', light: 14,  opacity: 0,  faces: [11, 11, 11, 11, 11, 11] },
+  [Block.DoorBottom]: { name: 'door',   solid: true,  transparent: true,  kind: 'door',  light: 0,   opacity: 15, faces: [13, 13, 13, 13, 13, 13] },
+  [Block.DoorTop]:    { name: 'doorTop',solid: true,  transparent: true,  kind: 'door',  light: 0,   opacity: 15, faces: [13, 13, 13, 13, 13, 13] },
 };
 
 export const TILE_NAMES = [

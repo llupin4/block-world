@@ -139,4 +139,22 @@ describe('blocks', () => {
     // degenerate level facing (looking straight down) -> fall back to the aimed normal, the old rule
     expect(doorPlacementFromView(0, 0, 0, -1)).toEqual({ axis: 1, side: 1 }); // aim -Z wall
   });
+
+  it('light fields: torch emits 14, nothing else emits; opacity: air/torch 0, glass 1, leaves/water 2, other solid + closed door 15 (open door via lightOpacity, not the registry)', () => {
+    const table: [number, number, number][] = [
+      // [block, light, opacity]
+      [Block.Air, 0, 0],
+      [Block.Stone, 0, 15], [Block.Dirt, 0, 15], [Block.Grass, 0, 15],
+      [Block.Sand, 0, 15], [Block.Wood, 0, 15], [Block.Planks, 0, 15],
+      [Block.Water, 0, 2],
+      [Block.Leaves, 0, 2],
+      [Block.Glass, 0, 1],
+      [Block.Torch, 14, 0],
+      [Block.DoorBottom, 0, 15], [Block.DoorTop, 0, 15], // registry default: the closed state (open is meta-dependent via lightOpacity)
+    ];
+    for (const [b, light, opacity] of table) {
+      expect(BLOCKS[b].light, `light @ ${b}`).toBe(light);
+      expect(BLOCKS[b].opacity, `opacity @ ${b}`).toBe(opacity);
+    }
+  });
 });
