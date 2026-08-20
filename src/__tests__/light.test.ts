@@ -236,4 +236,50 @@ describe('LightSim', () => {
     b.setBlock(8, 1, 8, Block.Air); simB.edit(8, 1, 8); drain(simB);
     expect(fields(a)).toEqual(fields(b));
   });
+
+  it('column prefill + frontier settle converges to the SAME fixpoint as a full re-derive (brute force) on mixed terrain', () => {
+    const chunks: [number, number, number][] = [[0, 0, 0], [1, 0, 0], [0, 1, 0], [1, 1, 0], [0, 0, 1], [0, 0, -1]];
+    // deterministic pseudo-random terrain (fixed seed): a dense mix of air/stone/glass/water/leaves/torch —
+    // caves, horizontal sky leaks, and torches all at once, to stress the frontier's coverage
+    let s = 0x12345678;
+    const rnd = (): number => { s = (s * 1103515245 + 12345) & 0x7fffffff; return s / 0x7fffffff; };
+    const pick = (): number => {
+      const r = rnd();
+      if (r < 0.55) return Block.Air;
+      if (r < 0.72) return Block.Stone;
+      if (r < 0.8) return Block.Glass;
+      if (r < 0.87) return Block.Water;
+      if (r < 0.95) return Block.Leaves;
+      return Block.Torch;
+    };
+    const cells: [number, number, number, number][] = [];
+    for (const [cx, cy, cz] of chunks) for (let y = 0; y < 16; y++) for (let z = 0; z < 16; z++) for (let x = 0; x < 16; x++) {
+      const b = pick();
+      if (b !== Block.Air) cells.push([cx * 16 + x, cy * 16 + y, cz * 16 + z, b]);
+    }
+    const build = (w: World): void => {
+      for (const [cx, cy, cz] of chunks) w.ensureChunk(cx, cy, cz);
+      for (const [x, y, z, b] of cells) w.setBlock(x, y, z, b);
+    };
+    const snapshot = (w: World): number[] => {
+      const out: number[] = [];
+      for (const c of w.allChunks()) for (let i = 0; i < c.blight.length; i++) out.push(c.blight[i], c.skylight[i]);
+      return out;
+    };
+    const drainAll = (sim: LightSim): void => {
+      let guard = 0;
+      while (sim.tick(2000) !== 0) if (++guard > 200000) throw new Error('light did not converge');
+    };
+    // fast path: the production settle (column prefill + frontier), drained to empty
+    const wFast = new World(); build(wFast);
+    const simFast = new LightSim(wFast);
+    for (const [cx, cy, cz] of chunks) simFast.settleChunk(cx, cy, cz);
+    drainAll(simFast);
+    // slow reference: seed EVERY cell of every chunk (full re-derive), drained to empty
+    const wBrute = new World(); build(wBrute);
+    const simBrute = new LightSim(wBrute);
+    for (const [cx, cy, cz] of chunks) simBrute.settleChunkBruteForce(cx, cy, cz);
+    drainAll(simBrute);
+    expect(snapshot(wFast)).toEqual(snapshot(wBrute));
+  });
 });

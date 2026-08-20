@@ -61,13 +61,13 @@ describe('light boot replay (spawn ring)', () => {
       }
     }
     // 4) budget lineage: total settle+tick pops over the whole boot stay bounded.
-    //    DETERMINISTIC — pinned exactly (verified identical across repeated runs). The boot
-    //    re-settles a chunk on every remesh (settleChunk is not idempotent, unlike WaterSim
-    //    settle's settled flag), so the whole-ring boot totals ~449 chunk-settle equivalents
-    //    (1,840,919 pops), not the plan's initial guess of 40. The hard ceiling is a
-    //    regression guard against a pathological re-enqueue loop (which would push pops into
-    //    the tens of millions): 1000 equivalents ≈ 2.2x the measured boot.
-    expect(lightSim.stats.pops, 'settle pop lineage').toBe(1840919);
+    //    DETERMINISTIC — pinned exactly (verified identical across repeated runs). settleChunk
+    //    is idempotent via the chunk's lightSettled flag (fresh-load column prefill + frontier
+    //    seed; remeshes only re-seed the seam), so the whole-ring boot totals 477,415 pops —
+    //    ~59% fewer than the full 4096-cell re-derive the frontier replaced. The hard ceiling
+    //    is a regression guard against a pathological re-enqueue loop (which would push pops
+    //    into the tens of millions).
+    expect(lightSim.stats.pops, 'settle pop lineage').toBe(477415);
     expect(lightSim.stats.pops).toBeLessThanOrEqual(LIGHT_SETTLE_GUARD * 1000); // hard ceiling: regression guard against a pathological re-enqueue
   });
 }, 30000);

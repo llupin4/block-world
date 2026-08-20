@@ -28,6 +28,7 @@ export interface Chunk {
   colSum: Uint8Array;   // 256: per (lx,lz) column, capped-at-15 sum of light opacities over the chunk's own 16 cells (skyEmit's per-chunk cache; localIndex(lx, 0, lz) indexing)
   dirty: boolean;
   settled: boolean;    // water sim has settled this chunk's worldgen water (makes settle idempotent)
+  lightSettled: boolean; // light sim has settled this chunk's interior (fresh-load full settle done; remeshes only re-seed the seam)
   opaqueMesh: VoxelBuffer | null;
   transMesh: VoxelBuffer | null;
 }
@@ -76,6 +77,7 @@ export class World {
       colSum: new Uint8Array(256),
       dirty: true,
       settled: false,
+      lightSettled: false,
       opaqueMesh: null,
       transMesh: null,
     };
