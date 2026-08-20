@@ -14,7 +14,8 @@ Preview here [https://llupin4.github.io/block-world/](https://llupin4.github.io/
 - **Water simulation** — a cellular automaton over level/source/stream flags: placed water is an immortal spring that pours through gaps and floods reachable caves; cut it off from its source and it starves away cell by cell. Runs on a slow ~2 Hz clock independent of physics.
 - **Creative controls** — fly mode, noclip, hotbar + click-to-assign palette, wireframe debug view, and a help overlay.
 - **Underwater mood** — submerging your head swaps background, fog, and FOV to sell the dive; its palette tracks time of day, so night underwater is darker.
-- **Day/night cycle** — a world-time clock (noon start, 4-minute cycle) drives a gradient sky, a sun and moon crossing the sky, stars after dusk, a world that dims at night, and a slowly drifting cloud layer; a small HUD clock shows the time.
+- **Day/night cycle** — a world-time clock (noon start, 4-minute cycle) drives a gradient sky, a sun and moon crossing the sky, stars after dusk, a world that darkens at night, and a slowly drifting cloud layer; a small HUD clock shows the time.
+- **Dynamic lighting** — torches emit 14-level light that propagates block-by-block through the grid, and sky light reaches every block open to the air, so caves and corners go dark; doors, glass, leaves, and water attenuate it. Sky light fades per block with the day/night cycle (torches stay constant), keeping deep night dark but readable.
 
 ## Requirements
 

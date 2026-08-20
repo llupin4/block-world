@@ -25,9 +25,9 @@ Where the world is today:
 - **The water sim** (`src/water.ts`) already implements the local-propagation
   pattern this design mirrors: a world-coord `Set<string>` queue
   (insertion-ordered FIFO with dedup), `tick(budget)`, an `edit()` hook for
-  player mutations, a load-time bounded `settle`, and a `touched` set
-  consumed exactly once per frame to mark chunks `dirty` for the existing
-  remesh drain.
+   player mutations, a load-time bounded `settle`, and a `touched` set
+   consumed exactly once per frame and re-meshed immediately at the frame
+   end.
 - **`WorldTime`** (`src/time.ts`) advances in the fixed 60 Hz substep;
   `sampleSky(phase)` is a pure 9-anchor keyframed sampler with `sunDir`.
 
@@ -194,11 +194,17 @@ equal-or-higher value computes `target == current` and is never touched.
      gains is then repaired by ordinary pops, since the rule takes the max);
    - the chunk's `colSum` entry for that column is recomputed (16 reads).
 2. **Chunk load — `settleChunk(cx, cy, cz)`** from the budgeted load path
-   (where water settles): compute the chunk's `colSum`, enqueue the chunk's
-   cells, and drain inline up to `LIGHT_SETTLE_GUARD = 4096` pops (≈ one
-   chunk-size pass, same spirit as water's `SETTLE_GUARD`); anything left in
-   the queue keeps draining over subsequent substeps, so convergence
-   completes over a few ticks if it spills.
+   (where water settles): compute the chunk's `colSum`, then — on a *fresh*
+   load only — settle via **column prefill + frontier seeding**: set every
+   cell's sky field to its column emission `E_s` (a lower bound) and its block
+   field to 0 (one O(4096) pass off `colSum`), then enqueue only the cells
+   that can change (the six face shells, interior cells a horizontal neighbor
+   can raise, and torches) and drain inline up to
+   `LIGHT_SETTLE_GUARD = 4096` pops (the frontier is far smaller than 4096;
+   the rest keeps draining over substeps if it spills). A *remesh* of an
+   already-loaded chunk skips the prefill — the interior is settled and stays
+   converged by the wave, so only the one-cell seam is re-seeded (the
+   `lightSettled` flag, mirroring `settled`).
    **Plus the six-neighbourhood of the load seam in already-loaded
    neighbors** — their boundary cells may gain or lose light across the new
    seam, re-pop, and re-bake.
@@ -303,9 +309,11 @@ stubs), keeping the mesher pure.
   settle); the unload path calls the unload-seam seed for the affected
   neighbors.
 - frame end: `lightSim.touched` is consumed exactly once (same contract and
-  position as `sim.touched`) → those chunks are marked `dirty` → the
-  existing ≤2-remeshes/frame drain rebuilds their vertex colors. No new
-  scene or mesh path exists; the whole remesh machinery is reused.
+  position as `sim.touched`) → those chunks are re-meshed immediately at the
+  frame end — the exact mirror of the `sim.touched` drain block (touched
+  chunks per event stay small: ≤ ~6 for a torch edit, ≤ ~5 column chunks for
+  a sky edit). No new scene or mesh path exists; the whole remesh machinery
+  is reused.
 - per frame, after `sky.apply(...)`: `uDayness = skySample.dayness` on both
   materials (one uniform write each); `matOpaque/matTrans` colors no longer
   change (white).

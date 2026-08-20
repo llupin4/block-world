@@ -518,7 +518,7 @@ These are all real and all worth doing eventually. None belong in v1.
 
 - Web Workers for generation and meshing
 - Greedy meshing
-- ~~Flood-fill skylight and blocklight propagation (the de-propagation pass on block removal is the hard part)~~ and ~~day/night cycle~~ — moved to `TODO.md` → **Sky & lighting** (2026-08-18)
+- ~~Flood-fill skylight and blocklight propagation (the de-propagation pass on block removal is the hard part)~~ and ~~day/night cycle~~ — moved to `TODO.md` → **Sky & lighting** (2026-08-18); both landed 2026-08-19 (branch `dynamic-lighting` — see §18).
 - `DataArrayTexture` instead of an atlas
 - Biomes beyond a surface-block swap
 - Survival mechanics: health, mining time, item stacks, crafting
@@ -584,12 +584,14 @@ Spec: `docs/superpowers/specs/2026-08-19-day-night-clouds-design.md`.
   mirror-symmetric about midnight; sun/moon one angle `θ = 2π·phase` apart,
   180° out of phase) + `createSky` renderer: a camera-locked inverted-sphere
   sky dome (16×256 gradient canvas, redrawn only while the palette moves),
-  ~400 fixed stars fading in after dusk, sun/moon sprite discs at r≈380
-  (inside the 400 dome, all `fog: false`). `worldDim` 1.0 → 0.33 is applied
-  per frame as `material.color` on the two shared chunk materials — one
-  uniform update dims the whole world with zero remeshing. It is the
-  documented stand-in until the dynamic-lighting item bakes per-block
-  skylight into the vertex colour buffer.
+   ~400 fixed stars fading in after dusk, sun/moon sprite discs at r≈380
+   (inside the 400 dome, all `fog: false`). `worldDim` 1.0 → 0.33 drove the
+   night dimming as `material.color` on the two shared chunk materials — one
+   uniform update dims the whole world with zero remeshing. That was the
+   documented stand-in until the dynamic-lighting item (now landed, §18)
+   bakes per-block skylight into the vertex `aLight`; `worldDim` now
+   survives only as the cloud/sky tint (the chunk materials stay white and
+   are dimmed per-vertex instead).
 - `src/clouds.ts` — a world-locked cloud sheet: a 128×128-texel tile (one
   4×4-block cell per texel, 2D-simplex, 12-block wavelength, core/rim
   thresholds 0.2/0.05, `NearestFilter` for the blocky cells) baked once and
@@ -617,3 +619,75 @@ uploads. `fog: false`, opacity 0.70, tinted white → faint blue-grey by
   redraws while the dusk/dawn palette moves; the cloud sheet costs two
   position floats + two uv-offset floats); the §9 streaming budget is
   untouched.
+
+## 18. Dynamic lighting with light levels (post-POC, 2026-08-19)
+
+Spec: `docs/superpowers/specs/2026-08-19-dynamic-lighting-design.md`.
+
+Two 0–15 integer light fields per chunk (`blight` torch light, `skylight`
+open-to-sky exposure) are propagated locally through the voxel grid — the
+classic voxel-sandbox convention: every cell re-derives
+`max(emission, max neighbor − 1 − O(neighbor))` (attenuation paid *exiting* the
+neighbor); light never knows which source lit it; changes walk a queue to a
+stable state. O: air/torch/open-door 0, glass 1, leaves/water 2, closed-door/
+solid 15 (nothing passes). Emission: torches 14; sky columns emit
+`15 − (capped opacity sum above)` — open air columns 15 (no vertical air
+decay), glass 14 below, water −2 per cell, rock 0.
+
+- `src/light.ts` — `lightOpacity` (door-meta-aware), `columnSum` (per-chunk
+  colSum[256] cache), `skyEmit` (the column walk, ≤ ~21 ops worst case), and
+  `LightSim`: the water-sim-shaped engine (world-coord `Set<string>` queue,
+  `tick(2500)` drained at every 60 Hz substep — near-instant torch waves
+  settle in 1–3 substeps — `edit()` at every player mutation + the door
+  toggle, `onChunkUnloaded()` seam seeding so cells lit *through* a removed
+  chunk darken, and a `touched` set consumed once per frame exactly like
+  `sim.touched` — re-meshed immediately at the frame end, so a torch's glow
+  appears with no streaming-budget latency). De-propagation needs no special
+  pass: a removed torch's wave stops dead at cells a surviving source still
+  supports (target == current).
+- **Load settle = column prefill + frontier** (`settleChunk`, fresh load
+  only). (1) Every cell's sky field is set to its column emission `E_s` — the
+  direct downcast, a *lower bound* on the true sky light — and its block field
+  to 0, all in one O(4096) pass off the colSum cache (no per-cell skyEmit
+  walk); (2) only the cells that can actually change are queued — the six face
+  shells (light crosses a chunk boundary there), every interior cell a
+  horizontal neighbor's prefill can raise (a cell's sky light can only exceed
+  its column prefill through a horizontal neighbor; a vertical neighbor's
+  column prefill is at most its own, so it never raises a cell above the
+  prefill), and every torch (the only block-light source); (3) that frontier
+  relaxes with the recompute pop (a pop re-seeds a changed cell's six
+  neighbors), so the deficit propagates inward and converges to the *same
+  fixpoint* as a full re-derive. A **remesh** (an already-loaded chunk) skips
+  the prefill entirely — the interior is settled and stays converged by the
+  wave, so only the one-cell seam is re-seeded (a neighbor may have loaded or
+  unloaded, changing the boundary light, including a sky column whose upper
+  band just appeared). The `lightSettled` flag (mirrors WaterSim's `settled`)
+  makes the remesh path cheap. This cut the fresh-load settle from a full
+  4096-cell re-derive to a small frontier — roughly half the boot pops — and
+  brought both the load spike and the steady-state walk under the §9 frame
+  budget. The slow full re-derive (`settleChunkBruteForce`) is kept as a
+  test-only reference that pins the fixpoint the fast path must reach.
+- The renderer bakes `aLight = (blight, skylight)/15` per vertex corner (the
+  3-candidate max: the across-face cell + the two face-diagonal cells, per
+  field), and the two chunk materials carry a one-uniform day/night pass:
+  `factor = 0.12 + 0.88 * max(bl, sk * uDayness)` — `uDayness` is the
+  `worldDim` ramp normalized to 0–1 (sky and light fade on the same curve),
+  so night is an O(1) uniform write: no re-baking, no brightness wavefront
+  sweeping the ring at dusk. The 0.12 ambient floor is the "dark but
+  readable" choice; it is applied in linear light, so it reads as ≈ 0.38× the
+  day sRGB luminance after the renderer's sRGB conversion lifts the dark
+  values (verified headless, Task 13). The old `worldDim` MATERIAL dim is
+  gone (it survives as the cloud/sky visual tint only).
+- Torch light is time-invariant (emission doesn't scale with dayness); sky
+  light dies at night; underwater darkening falls out of water's O=2 per
+  cell. Clouds do not attenuate (texture plane, follow-up). Flow *levels*
+  are light-irrelevant (flat O=2) — the water sim never touches the light
+  sim.
+- POC deviations: light stops at ungenerated chunks (nothing through the
+  void, like water); a partially-loaded column reads low until the upper
+  chunks' seam seeding re-seeds it (self-heals within a few ticks); water
+  opacity is level-flat; boot settle cost is pinned by
+  `src/__tests__/light-load.test.ts` (real spawn ring, deterministic pop
+  lineage). Walking stays within the §9 budget (p95 ≈ 7 ms target; the
+  light tick is O(0) when idle — the queue only holds cells a recent
+  edit/load actually queued).

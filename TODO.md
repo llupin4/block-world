@@ -92,13 +92,17 @@ Items requested 2026-08-18 (with the torch/door work), deferred by design:
   (instanced 4-block-cell layer at y=96 with wind drift); the sky moods —
   including the underwater one — are time-driven. See
   `docs/superpowers/specs/2026-08-19-day-night-clouds-design.md`. `worldDim`
-  is the stand-in that the next item replaces.
-- **Dynamic lighting with light levels** (for torch / sun / moon positions).
-  Block-light + skylight propagation into the chunk buffers, with the
-  de-propagation pass on block edits (the deferred skylight item from
-  PROJECT.md §15 — the hard part). Torch meta (wall-mount face) already stores
-  where a light source sits; a torch's light level will be read from there.
-  Until this lands, torches are **visual only** — a bright tile, no glow.
-  This item consumes `WorldTime` (src/time.ts) for time-of-day/sun position —
-  and `sampleSky().sunDir` for the sun — and lands per-block skylight in the
-  vertex colour buffer, replacing the global `worldDim`.
+  was the stand-in the next item (dynamic lighting, PROJECT.md §18) replaced
+  — it now survives only as the cloud/sky tint.
+- ~~Dynamic lighting with light levels (for torch / sun / moon positions).~~
+  **Resolved (2026-08-19, branch `dynamic-lighting`):** `src/light.ts`
+  (two 0–15 fields + the recompute-relaxation queue: torches 14, sky
+  columns 15 with no vertical air decay, door/glass/leaves/water
+  attenuation, de-propagation by relaxation — no special pass; the
+  load-path settle is a column prefill + frontier so a fresh chunk costs a
+  small drain, not a full re-derive), baked per-vertex into the chunk meshes
+  with a `uDayness` uniform day/night pass (the `worldDim` material dim it
+  replaced is gone; the 0.12 ambient floor keeps deep night readable).
+  Torches now glow. See
+  `docs/superpowers/specs/2026-08-19-dynamic-lighting-design.md` and
+  PROJECT.md §18.
