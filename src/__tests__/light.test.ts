@@ -194,4 +194,46 @@ describe('LightSim', () => {
     expect(w2.getLight(8, 9, 8)[1]).toBe(15);
     expect(w2.getLight(8, 0, 8)[1]).toBe(15);
   });
+
+  it('cross-chunk seams: light is continuous across a boundary (a wave crosses the seam); after the lit-neighbor chunk unloads, cells lit THROUGH it darken', () => {
+    const w = makeWorld([[0, 0, 0], [1, 0, 0]]); // x 0..15 and 16..31
+    for (let cx = 0; cx <= 1; cx++) for (let x = cx * 16; x < cx * 16 + 16; x++) for (let z = 0; z < 16; z++) w.setBlock(x, 0, z, Block.Stone);
+    w.setBlock(20, 8, 8, Block.Torch); // in chunk (1,0,0)
+    const sim = new LightSim(w);
+    sim.settleChunk(0, 0, 0);
+    sim.settleChunk(1, 0, 0);
+    drain(sim);
+    expect(w.getLight(20, 8, 8)[0]).toBe(14);
+    expect(w.getLight(15, 8, 8)[0]).toBe(9); // 20-15 = 5 steps: 14-5
+    // remove chunk (1,0,0): cells that were lit through it must darken
+    w.removeChunk(1, 0, 0);
+    sim.onChunkUnloaded(1, 0, 0);
+    drain(sim);
+    expect(w.getLight(15, 8, 8)[0]).toBe(0); // no more contribution across the missing seam
+    expect(w.getLight(8, 8, 8)[0]).toBe(0);
+  });
+
+  it('determinism: the same edit sequence on two fresh worlds yields identical final fields', () => {
+    const build = (w: World): void => {
+      for (let x = 0; x < 32; x++) for (let z = 0; z < 16; z++) w.setBlock(x, 0, z, Block.Stone);
+      w.setBlock(8, 1, 8, Block.Torch);
+      w.setBlock(16, 4, 8, Block.Torch);
+    };
+    const fields = (w: World): number[] => {
+      const out: number[] = [];
+      for (const c of w.allChunks()) for (let i = 0; i < c.blight.length; i++) out.push(c.blight[i], c.skylight[i]);
+      return out;
+    };
+    const a = makeWorld([[0, 0, 0], [1, 0, 0]]);
+    build(a);
+    const simA = new LightSim(a);
+    simA.settleChunk(0, 0, 0); simA.settleChunk(1, 0, 0); drain(simA);
+    a.setBlock(8, 1, 8, Block.Air); simA.edit(8, 1, 8); drain(simA);
+    const b = makeWorld([[0, 0, 0], [1, 0, 0]]);
+    build(b);
+    const simB = new LightSim(b);
+    simB.settleChunk(0, 0, 0); simB.settleChunk(1, 0, 0); drain(simB);
+    b.setBlock(8, 1, 8, Block.Air); simB.edit(8, 1, 8); drain(simB);
+    expect(fields(a)).toEqual(fields(b));
+  });
 });
