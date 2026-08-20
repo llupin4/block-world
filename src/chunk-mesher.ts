@@ -26,12 +26,14 @@ class Buf {
   col: number[] = [];
   uv: number[] = [];
   idx: number[] = [];
+  light: number[] = [];
   verts = 0;
 
-  push(x: number, y: number, z: number, s: number, u: number, v: number) {
+  push(x: number, y: number, z: number, s: number, u: number, v: number, bl: number, sk: number) {
     this.pos.push(x, y, z);
     this.col.push(s, s, s, 1.0);
     this.uv.push(u, v);
+    this.light.push(bl, sk);
     this.verts++;
   }
 
@@ -42,6 +44,7 @@ class Buf {
       colors: new Float32Array(this.col),
       uvs: new Float32Array(this.uv),
       indices: new Uint32Array(this.idx),
+      light: new Float32Array(this.light),
     };
   }
 }
@@ -183,6 +186,7 @@ function pushBox(
         FACE_SHADE[f],
         (tileCol + c[au]) / 16,
         (15 - tileRow + c[av]) / 16,
+        0, 0,
       );
     }
     const base = buf.verts - 4;
@@ -319,6 +323,7 @@ export function meshChunk(world: World, cx: number, cy: number, cz: number): Chu
               FACE_SHADE[f] * AO_SHADE[occ],
               (tileCol + c[au]) / 16,
               (15 - tileRow + c[av]) / 16,
+              0, 0,
             );
           }
           const base = buf.verts - 4;

@@ -134,4 +134,19 @@ describe('world', () => {
     expect(w.isSolid(8, 0, 1)).toBe(false);
     expect(w.isSolid(64, 0, 0)).toBe(false); // missing chunk -> Air -> not solid
   });
+
+  it('light fields: zero-initialized per chunk; getLight reads [blight, skylight], [0, 0] for missing chunks or out-of-band y', () => {
+    const w = new World();
+    const c = w.ensureChunk(0, 0, 0);
+    expect(c.blight).toBeInstanceOf(Uint8Array);
+    expect(c.blight.length).toBe(4096);
+    expect(c.skylight.length).toBe(4096);
+    expect(c.colSum.length).toBe(256); // per (lx, lz) column, capped at 15
+    c.blight[localIndex(8, 8, 8)] = 12;
+    c.skylight[localIndex(8, 8, 8)] = 15;
+    expect(w.getLight(8, 8, 8)).toEqual([12, 15]);
+    expect(w.getLight(0, 8, 8)).toEqual([0, 0]);      // zero cell
+    expect(w.getLight(16, 8, 8)).toEqual([0, 0]);     // missing chunk (neighbor col)
+    expect(w.getLight(8, 80, 8)).toEqual([0, 0]);     // above the generated band (band = y 0..79)
+  });
 });
