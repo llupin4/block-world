@@ -124,17 +124,17 @@ export class World {
 
   /**
    * The single collision truth: air and torches are never solid; a door is solid
-   * while CLOSED (both halves, full block) and walkable while open. Cube blocks
-   * keep the legacy player rule (isOpaque): leaves/glass are solid in BLOCKS
-   * (the water sim's blocking truth) but pass-through for the player. Do NOT
-   * "fix" the fallback to BLOCKS[.].solid — that would wall off glass/leaves,
-   * a gameplay change this feature does not make.
+   * while CLOSED (both halves, full block) and walkable while open. LEAVES get a
+   * dedicated solid exception (the water sim already blocked them via the
+   * registry flag); GLASS keeps the legacy pass-through rule. Do NOT change the
+   * isOpaque fallback — it is the rule glass/air/torch still follow.
    */
   isSolid(wx: number, wy: number, wz: number): boolean {
     const b = this.getBlock(wx, wy, wz);
     if (b === Block.Air) return false;
     if (b === Block.Torch) return false;
     if (isDoor(b)) return !doorOpen(this.getMeta(wx, wy, wz));
+    if (b === Block.Leaves) return true; // leaves are solid to the player; glass intentionally keeps pass-through
     return isOpaque(b);
   }
 

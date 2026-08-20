@@ -122,15 +122,15 @@ describe('world', () => {
     w.setBlock(4, 0, 1, Block.DoorBottom, doorMeta(false, 0)); // closed
     w.setBlock(5, 0, 1, Block.DoorBottom, doorMeta(true, 0));  // open
     w.setBlock(6, 0, 1, Block.DoorTop, doorMeta(false, 1));    // closed top half
-    w.setBlock(7, 0, 1, Block.Leaves); // solid:true (water sim) but player-passable — pin the legacy rule
-    w.setBlock(8, 0, 1, Block.Glass);  // same for glass
+    w.setBlock(7, 0, 1, Block.Leaves); // solid to the player (dedicated isSolid exception; the water sim already blocked it via the registry flag)
+    w.setBlock(8, 0, 1, Block.Glass);  // glass intentionally keeps the legacy player pass-through
     expect(w.isSolid(1, 0, 1)).toBe(true);
     expect(w.isSolid(2, 0, 1)).toBe(false);
     expect(w.isSolid(3, 0, 1)).toBe(false);
     expect(w.isSolid(4, 0, 1)).toBe(true);
     expect(w.isSolid(5, 0, 1)).toBe(false);
     expect(w.isSolid(6, 0, 1)).toBe(true);
-    expect(w.isSolid(7, 0, 1)).toBe(false);
+    expect(w.isSolid(7, 0, 1)).toBe(true);
     expect(w.isSolid(8, 0, 1)).toBe(false);
     expect(w.isSolid(64, 0, 0)).toBe(false); // missing chunk -> Air -> not solid
   });
