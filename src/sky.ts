@@ -223,6 +223,13 @@ export function createSky(
   moon.scale.set(34, 34, 1);
   scene.add(moon);
 
+  // Celestial discs + stars sit BEHIND the cloud sheet: the sheet (renderOrder
+  // −1/+1, managed per frame in src/clouds.ts) always draws after them, so
+  // cloud puffs correctly occlude sun/moon/stars.
+  stars.renderOrder = -2;
+  sun.renderOrder = -2;
+  moon.renderOrder = -2;
+
   const tmp = new THREE.Vector3();
   let lastTop: RGB | null = null;
   let lastHorizon: RGB | null = null;

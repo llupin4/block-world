@@ -792,7 +792,7 @@ function frame(now: number): void {
   clouds.setVisible(waterFx === 'air');
   const skySample = sampleSky(worldTime.dayPhase);
   sky.apply(skySample, waterFx, camera);
-  clouds.update(camera.position.x, camera.position.z, worldTime.time, skySample.worldDim);
+  clouds.update(camera.position.x, camera.position.z, camera.position.y, worldTime.time, skySample.worldDim);
   const label = formatClock(worldTime.day, worldTime.hour);
   if (label !== clockLabel) {
     clockLabel = label;

@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { cloudCoverage, cloudTileLevel, cloudTexOffset, windAt, CELL, TILE, CORE, RIM, QUAD } from '../clouds';
+import { cloudCoverage, cloudTileLevel, cloudTexOffset, windAt, cloudRenderOrder, CELL, TILE, CORE, RIM, QUAD, ALTITUDE } from '../clouds';
 
 describe('clouds (v3: world-locked scrolling sheet, player-centered)', () => {
   it('coverage is deterministic and world-locked (shift the world or the sample)', () => {
@@ -72,5 +72,13 @@ describe('clouds (v3: world-locked scrolling sheet, player-centered)', () => {
     const [bx, bz] = windAt(2000);
     const wx = 33, wz = 57;
     expect(cloudCoverage(wx, wz, ax, az)).not.toBe(cloudCoverage(wx, wz, bx, bz));
+  });
+
+  it('cloudRenderOrder: eye at/below the sheet → -1 (sheet first), eye above → +1 (sheet last)', () => {
+    expect(cloudRenderOrder(0)).toBe(-1);
+    expect(cloudRenderOrder(64)).toBe(-1);
+    expect(cloudRenderOrder(ALTITUDE)).toBe(-1); // exactly on the sheet → still below-or-at → farthest
+    expect(cloudRenderOrder(97)).toBe(1);
+    expect(cloudRenderOrder(500)).toBe(1);
   });
 });

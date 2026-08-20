@@ -63,12 +63,28 @@ export function cloudTexOffset(camX: number, camZ: number, timeSec: number): [nu
   return [(camX + wx) / QUAD, (camZ + wz) / QUAD];
 }
 
+/**
+ * Pure: the cloud sheet's renderOrder for a camera at height `camY`. The
+ * sheet re-centers on the camera every frame, so its bounding sphere sits at
+ * the camera — three.js's transparent sort (renderOrder, then far-to-near)
+ * would draw it dead last no matter where it really is. Rule: an eye at or
+ * below the sheet (camY ≤ ALTITUDE) sees the sheet as the FARTHEST
+ * transparent on any upward ray (terrain tops out at y ≤ 64, sun/moon discs
+ * at r = 360–380) → the sheet is drawn FIRST among transparents
+ * (renderOrder −1, after the −2 celestial layer). An eye above the sheet
+ * (fly mode, y > ALTITUDE) sees it as the NEAREST transparent when looking
+ * down → drawn LAST (renderOrder +1).
+ */
+export function cloudRenderOrder(camY: number): -1 | 1 {
+  return camY <= ALTITUDE ? -1 : 1;
+}
+
 import * as THREE from 'three';
 
 // --- renderer: one large textured quad, world-locked, wind-scrolled, player-centered ---
 
 export interface Clouds {
-  update(camX: number, camZ: number, timeSec: number, dim: number): void;
+  update(camX: number, camZ: number, camY: number, timeSec: number, dim: number): void;
   setVisible(visible: boolean): void; // the water mood hides the whole layer
 }
 
@@ -125,15 +141,16 @@ export function createClouds(scene: THREE.Scene): Clouds {
     for (let i = 0; i < uv.count; i++) uv.setY(i, 1 - uv.getY(i));
   }
   const mesh = new THREE.Mesh(geo, mat);
-  mesh.renderOrder = 1; // drawn after the other transparents: any ray that hits both cloud and water/celestial objects hits the cloud first (terrain tops out at 64 < 96; sun/moon sprites at r360–380 lie within the sheet's 1024 reach), so last-among-transparent is the correct painter order — no per-frame sort-key management
+  // renderOrder is managed per frame by update() via cloudRenderOrder(camY) — see that comment.
   scene.add(mesh);
 
   const day = new THREE.Color(0xffffff);
   const night = new THREE.Color(0x707a9c);
 
   return {
-    update(camX, camZ, timeSec, dim) {
+    update(camX, camZ, camY, timeSec, dim) {
       mesh.position.set(camX, ALTITUDE, camZ);
+      mesh.renderOrder = cloudRenderOrder(camY);
       const [ox, oy] = cloudTexOffset(camX, camZ, timeSec);
       tex.offset.set(ox, oy);
       // dim ∈ [0.33, 1] (0.33 is the sky's night floor); clamp guards a future mood
