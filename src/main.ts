@@ -238,6 +238,7 @@ function toGeometry(b: VoxelBuffer): THREE.BufferGeometry {
   g.setAttribute('position', new THREE.BufferAttribute(b.positions, 3));
   g.setAttribute('color', new THREE.BufferAttribute(b.colors, 4)); // rgb + baked alpha
   g.setAttribute('uv', new THREE.BufferAttribute(b.uvs, 2));
+  g.setAttribute('aLight', new THREE.BufferAttribute(b.light, 2));
   g.setIndex(new THREE.BufferAttribute(b.indices, 1));
   g.computeBoundingSphere();
   return g;
@@ -254,7 +255,7 @@ function rebuildChunkMesh(cx: number, cy: number, cz: number): void {
       m.geometry.dispose();
     }
   }
-  const { opaque, trans } = meshChunk(world, cx, cy, cz);
+  const { opaque, trans } = meshChunk(world, cx, cy, cz, (x, y, z) => world.getLight(x, y, z));
   const entry: { opaque: THREE.Mesh | null; trans: THREE.Mesh | null } = { opaque: null, trans: null };
   if (opaque) entry.opaque = new THREE.Mesh(toGeometry(opaque), matOpaque);
   if (trans) entry.trans = new THREE.Mesh(toGeometry(trans), matTrans);

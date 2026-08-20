@@ -6,6 +6,9 @@ export interface ChunkMesh {
   trans: VoxelBuffer | null;
 }
 
+/** Per-cell light accessor for baking: both fields 0..15, [0, 0] for missing neighbors. main.ts supplies it from World.getLight; tests pass stubs. */
+export type LightSampler = (wx: number, wy: number, wz: number) => [number, number];
+
 // CCW corners viewed from outside (FrontSide-safe; see D2). `axes` = [u-axis, v-axis]
 // double-duty: AO side/diagonal sampling axes and UV mapping axes.
 type FaceDef = { dir: [number, number, number]; axes: [number, number]; corners: [number, number, number][] };
@@ -171,6 +174,8 @@ function pushBox(
   size: [number, number, number],
   tiles: [number, number, number, number, number, number],
   hidden: (faceIdx: number) => boolean,
+  lightAt: LightSampler,
+  wx: number, wy: number, wz: number,
 ): void {
   for (let f = 0; f < 6; f++) {
     if (hidden(f)) continue;
@@ -179,6 +184,7 @@ function pushBox(
     const tile = tiles[f];
     const tileCol = tile % 16, tileRow = (tile / 16) | 0;
     for (const c of face.corners) {
+      const [bl, sk] = cornerLight(lightAt, wx, wy, wz, face, c);
       buf.push(
         min[0] + c[0] * size[0],
         min[1] + c[1] * size[1],
@@ -186,7 +192,7 @@ function pushBox(
         FACE_SHADE[f],
         (tileCol + c[au]) / 16,
         (15 - tileRow + c[av]) / 16,
-        0, 0,
+        bl, sk,
       );
     }
     const base = buf.verts - 4;
@@ -201,6 +207,7 @@ function emitTorch(
   gm: (x: number, y: number, z: number) => number,
   wx: number, wy: number, wz: number,
   meta: number,
+  lightAt: LightSampler,
 ): void {
   const hidden = makeHidden(gb, gm, wx, wy, wz, Block.Torch, meta);
   const face = torchFace(meta);
@@ -211,6 +218,7 @@ function emitTorch(
       [0.18, 0.875, 0.18],
       [TILE_TORCH_STEM, TILE_TORCH_STEM, TILE_TORCH_FLAME, TILE_TORCH_STEM, TILE_TORCH_STEM, TILE_TORCH_STEM],
       hidden,
+      lightAt, wx, wy, wz,
     );
     return;
   }
@@ -218,10 +226,10 @@ function emitTorch(
   const tiles: [number, number, number, number, number, number] =
     [TILE_TORCH_STEM, TILE_TORCH_STEM, TILE_TORCH_STEM, TILE_TORCH_STEM, TILE_TORCH_STEM, TILE_TORCH_STEM];
   tiles[TIP_FACE[face]] = TILE_TORCH_FLAME;
-  if (face === 1) pushBox(buf, [wx, wy + 0.41, wz + 0.41], [0.375, 0.18, 0.18], tiles, hidden);
-  else if (face === 2) pushBox(buf, [wx + 1 - 0.375, wy + 0.41, wz + 0.41], [0.375, 0.18, 0.18], tiles, hidden);
-  else if (face === 3) pushBox(buf, [wx + 0.41, wy + 0.41, wz], [0.18, 0.18, 0.375], tiles, hidden);
-  else pushBox(buf, [wx + 0.41, wy + 0.41, wz + 1 - 0.375], [0.18, 0.18, 0.375], tiles, hidden);
+  if (face === 1) pushBox(buf, [wx, wy + 0.41, wz + 0.41], [0.375, 0.18, 0.18], tiles, hidden, lightAt, wx, wy, wz);
+  else if (face === 2) pushBox(buf, [wx + 1 - 0.375, wy + 0.41, wz + 0.41], [0.375, 0.18, 0.18], tiles, hidden, lightAt, wx, wy, wz);
+  else if (face === 3) pushBox(buf, [wx + 0.41, wy + 0.41, wz], [0.18, 0.18, 0.375], tiles, hidden, lightAt, wx, wy, wz);
+  else pushBox(buf, [wx + 0.41, wy + 0.41, wz + 1 - 0.375], [0.18, 0.18, 0.375], tiles, hidden, lightAt, wx, wy, wz);
 }
 
 /**
@@ -239,6 +247,7 @@ function emitDoor(
   gm: (x: number, y: number, z: number) => number,
   wx: number, wy: number, wz: number,
   meta: number,
+  lightAt: LightSampler,
 ): void {
   // Both halves emit the identical panel, so either door id yields the same geometry.
   const hidden = makeHidden(gb, gm, wx, wy, wz, Block.DoorBottom, meta);
@@ -247,12 +256,37 @@ function emitDoor(
   const tiles: [number, number, number, number, number, number] =
     [TILE_DOOR, TILE_DOOR, TILE_DOOR, TILE_DOOR, TILE_DOOR, TILE_DOOR];
   if (doorOpen(meta)) {
-    pushBox(buf, [wx, wy, wz], xThin ? [1, 1, 0.2] : [0.2, 1, 1], tiles, hidden);
+    pushBox(buf, [wx, wy, wz], xThin ? [1, 1, 0.2] : [0.2, 1, 1], tiles, hidden, lightAt, wx, wy, wz);
   } else if (xThin) {
-    pushBox(buf, side === 1 ? [wx + 0.8, wy, wz] : [wx, wy, wz], [0.2, 1, 1], tiles, hidden);
+    pushBox(buf, side === 1 ? [wx + 0.8, wy, wz] : [wx, wy, wz], [0.2, 1, 1], tiles, hidden, lightAt, wx, wy, wz);
   } else {
-    pushBox(buf, side === 1 ? [wx, wy, wz + 0.8] : [wx, wy, wz], [1, 1, 0.2], tiles, hidden);
+    pushBox(buf, side === 1 ? [wx, wy, wz + 0.8] : [wx, wy, wz], [1, 1, 0.2], tiles, hidden, lightAt, wx, wy, wz);
   }
+}
+
+// Per-corner light: the max over the UP TO 4 outside cells the vertex corner pokes
+// into — the cell across the face, the two face-diagonal cells (one corner step along
+// each face axis), and the body-diagonal cell (both steps) — the same s1/s2/dg
+// machinery as the vertex AO sampler below. Per field independently: the
+// max-over-cells keeps a corner lit when a solid tucks into the corner of the outside
+// cell (the classic one-dark-corner artifact). Solid candidate cells contribute their
+// stored value, which the propagation keeps naturally low. Returned normalized
+// (level / 15).
+function cornerLight(l: LightSampler, wx: number, wy: number, wz: number, face: FaceDef, c: readonly number[]): [number, number] {
+  const ax = face.dir[0], ay = face.dir[1], az = face.dir[2];
+  const au = face.axes[0], av = face.axes[1];
+  const su = c[au] === 1 ? 1 : -1;
+  const sv = c[av] === 1 ? 1 : -1;
+  const nx = wx + ax, ny = wy + ay, nz = wz + az;
+  const ox = au === 0 ? su : 0, oy = au === 1 ? su : 0, oz = au === 2 ? su : 0;
+  const px = av === 0 ? sv : 0, py = av === 1 ? sv : 0, pz = av === 2 ? sv : 0;
+  let bl = 0, sk = 0;
+  for (const [dx, dy, dz] of [[0, 0, 0], [ox, oy, oz], [px, py, pz], [ox + px, oy + py, oz + pz]] as const) {
+    const [lb, lk] = l(nx + dx, ny + dy, nz + dz);
+    if (lb > bl) bl = lb;
+    if (lk > sk) sk = lk;
+  }
+  return [bl / 15, sk / 15];
 }
 
 /**
@@ -261,7 +295,8 @@ function emitDoor(
  * faces yields null. `toGeometry` (BufferGeometry) lives in main.ts only, so this
  * module stays node-testable.
  */
-export function meshChunk(world: World, cx: number, cy: number, cz: number): ChunkMesh {
+const noLight: LightSampler = () => [0, 0]; // zero-light default for callers not yet wired for light (e.g. the perf bench in water-load.test.ts)
+export function meshChunk(world: World, cx: number, cy: number, cz: number, lightAt: LightSampler = noLight): ChunkMesh {
   const chunk = world.getChunk(cx, cy, cz);
   if (!chunk) return { opaque: null, trans: null };
   const bx = cx * 16, by = cy * 16, bz = cz * 16;
@@ -292,8 +327,8 @@ export function meshChunk(world: World, cx: number, cy: number, cz: number): Chu
         const wx = bx + lx, wy = by + ly, wz = bz + lz;
         if (kind !== 'cube') {
           // Special blocks are partial geometry, always in the opaque pass (never trans).
-          if (kind === 'torch') emitTorch(opaque, gb, gm, wx, wy, wz, chunk.meta[localIndex(lx, ly, lz)]);
-          else emitDoor(opaque, gb, gm, wx, wy, wz, chunk.meta[localIndex(lx, ly, lz)]);
+          if (kind === 'torch') emitTorch(opaque, gb, gm, wx, wy, wz, chunk.meta[localIndex(lx, ly, lz)], lightAt);
+          else emitDoor(opaque, gb, gm, wx, wy, wz, chunk.meta[localIndex(lx, ly, lz)], lightAt);
           continue;
         }
         const sOp = isOpaque(b);
@@ -318,12 +353,13 @@ export function meshChunk(world: World, cx: number, cy: number, cz: number): Chu
               ny + (au === 1 ? su : 0) + (av === 1 ? sv : 0),
               nz + (au === 2 ? su : 0) + (av === 2 ? sv : 0))) ? 1 : 0;
             const occ = s1 && s2 ? 3 : s1 + s2 + dg;
+            const [bl, sk] = cornerLight(lightAt, wx, wy, wz, face, c);
             buf.push(
               wx + c[0], wy + c[1], wz + c[2],
               FACE_SHADE[f] * AO_SHADE[occ],
               (tileCol + c[au]) / 16,
               (15 - tileRow + c[av]) / 16,
-              0, 0,
+              bl, sk,
             );
           }
           const base = buf.verts - 4;

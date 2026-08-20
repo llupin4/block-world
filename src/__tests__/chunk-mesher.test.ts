@@ -2,6 +2,8 @@ import { describe, it, expect } from 'vitest';
 import { Block, torchMeta, doorMeta } from '../blocks';
 import { World, localIndex } from '../world';
 import { meshChunk } from '../chunk-mesher';
+import { type LightSampler } from '../chunk-mesher';
+const NO_LIGHT: LightSampler = () => [0, 0]; // zero-light stub: pre-light behavior for all existing tests
 
 function loneChunk(b: Block): World {
   const w = new World();
@@ -16,13 +18,13 @@ const FACE_NORMALS: [number, number, number][] = [
 
 function topFaceOf(w: World) {
   // the lone/first block's +Y face: face index 2 of the first emitted block => verts 8..11
-  const { opaque } = meshChunk(w, 0, 0, 0);
+  const { opaque } = meshChunk(w, 0, 0, 0, NO_LIGHT);
   return { colors: opaque!.colors, uvs: opaque!.uvs };
 }
 
 describe('chunk-mesher', () => {
   it('winding: every emitted face normal points outward (CCW under FrontSide)', () => {
-    const { opaque } = meshChunk(loneChunk(Block.Stone), 0, 0, 0);
+    const { opaque } = meshChunk(loneChunk(Block.Stone), 0, 0, 0, NO_LIGHT);
     expect(opaque).not.toBeNull();
     const p = opaque!.positions;
     for (let f = 0; f < 6; f++) {
@@ -39,7 +41,7 @@ describe('chunk-mesher', () => {
   it('fully solid 16^3 chunk: 6 boundary shells, 1536 faces, no transparent buffer', () => {
     const w = new World();
     w.ensureChunk(0, 0, 0).blocks.fill(Block.Stone);
-    const { opaque, trans } = meshChunk(w, 0, 0, 0);
+    const { opaque, trans } = meshChunk(w, 0, 0, 0, NO_LIGHT);
     expect(trans).toBeNull();
     expect(opaque).not.toBeNull();
     expect(opaque!.positions.length / 3).toBe(1536 * 4);
@@ -52,7 +54,7 @@ describe('chunk-mesher', () => {
     const w = new World();
     w.ensureChunk(0, 0, 0).blocks.fill(Block.Stone);
     w.ensureChunk(1, 0, 0).blocks.fill(Block.Stone);
-    const { opaque } = meshChunk(w, 0, 0, 0);
+    const { opaque } = meshChunk(w, 0, 0, 0, NO_LIGHT);
     expect(opaque!.positions.length / 3).toBe((1536 - 256) * 4); // +X shell removed
     expect(opaque!.indices.length).toBe((1536 - 256) * 6);
   });
@@ -62,7 +64,7 @@ describe('chunk-mesher', () => {
     for (let dx = -1; dx <= 1; dx++)
       for (let dy = -1; dy <= 1; dy++)
         for (let dz = -1; dz <= 1; dz++) w.ensureChunk(dx, dy, dz).blocks.fill(Block.Stone);
-    expect(meshChunk(w, 0, 0, 0).opaque).toBeNull();
+    expect(meshChunk(w, 0, 0, 0, NO_LIGHT).opaque).toBeNull();
   });
 
   it('water: transparent pass only; faces against air, suppressed between water blocks', () => {
@@ -70,7 +72,7 @@ describe('chunk-mesher', () => {
     const c = w.ensureChunk(0, 0, 0);
     c.blocks[localIndex(8, 8, 8)] = Block.Water;
     c.blocks[localIndex(9, 8, 8)] = Block.Water;
-    const { opaque, trans } = meshChunk(w, 0, 0, 0);
+    const { opaque, trans } = meshChunk(w, 0, 0, 0, NO_LIGHT);
     expect(opaque).toBeNull();
     expect(trans).not.toBeNull();
     expect(trans!.positions.length / 3).toBe(10 * 4); // 5 + 5 faces, shared face not emitted
@@ -80,7 +82,7 @@ describe('chunk-mesher', () => {
   it('an all-air chunk produces no buffers', () => {
     const w = new World();
     w.ensureChunk(0, 0, 0);
-    const { opaque, trans } = meshChunk(w, 0, 0, 0);
+    const { opaque, trans } = meshChunk(w, 0, 0, 0, NO_LIGHT);
     expect(opaque).toBeNull();
     expect(trans).toBeNull();
   });
@@ -136,7 +138,7 @@ describe('chunk-mesher special blocks', () => {
     const c = w.ensureChunk(0, 0, 0);
     c.blocks[localIndex(8, 8, 8)] = Block.Torch;
     c.meta[localIndex(8, 8, 8)] = torchMeta(0); // floor post
-    const { opaque, trans } = meshChunk(w, 0, 0, 0);
+    const { opaque, trans } = meshChunk(w, 0, 0, 0, NO_LIGHT);
     expect(trans).toBeNull(); // torches/doors are opaque-pass geometry, never trans
     expect(opaque).not.toBeNull();
     expect(opaque!.positions.length / 3).toBe(6 * 4); // all 6 faces of the post, open air
@@ -156,7 +158,7 @@ describe('chunk-mesher special blocks', () => {
     c.blocks[localIndex(8, 8, 8)] = Block.Stone; // the support wall
     c.blocks[localIndex(9, 8, 8)] = Block.Torch;
     c.meta[localIndex(9, 8, 8)] = torchMeta(1); // aimed at the stone's +X face: wall on the stub's -X side
-    const { opaque } = meshChunk(w, 0, 0, 0);
+    const { opaque } = meshChunk(w, 0, 0, 0, NO_LIGHT);
     // stone keeps all 6 faces (a torch never culls); the stub loses its -X back face -> 5
     expect(opaque!.positions.length / 3).toBe(6 * 4 + 5 * 4);
     const b = posBounds(opaque!); // stub: x reaches 9.375 (stone bounds 8..9 merged in)
@@ -192,7 +194,7 @@ describe('chunk-mesher special blocks', () => {
       { face: 4, x: [8, 9],       z: [8.625, 10] },   // support +Z(9), stone z[9,10]; stub grows -Z
     ];
     for (const c of cases) {
-      const opaque = meshChunk(mount(c.face), 0, 0, 0).opaque!;
+      const opaque = meshChunk(mount(c.face), 0, 0, 0, NO_LIGHT).opaque!;
       const b = posBounds(opaque);
       // stone keeps all 6 faces (a torch never culls it); the stub loses its support-facing face -> 5
       expect(opaque.positions.length / 3, `face ${c.face}`).toBe((6 + 5) * 4);
@@ -210,9 +212,9 @@ describe('chunk-mesher special blocks', () => {
     const c = w.ensureChunk(0, 0, 0);
     c.blocks[localIndex(8, 8, 8)] = Block.DoorTop;
     c.meta[localIndex(8, 8, 8)] = doorMeta(false, 0);
-    const { opaque } = meshChunk(w, 0, 0, 0);
+    const { opaque } = meshChunk(w, 0, 0, 0, NO_LIGHT);
     expect(opaque!.positions.length / 3).toBe(6 * 4);
-    expect(meshChunk(w, 0, 0, 0).trans).toBeNull();
+    expect(meshChunk(w, 0, 0, 0, NO_LIGHT).trans).toBeNull();
   });
 
   it('a closed X-thin door hugs its side edge: side 0 = x [0, 0.2], side 1 = x [0.8, 1] of the cell', () => {
@@ -220,7 +222,7 @@ describe('chunk-mesher special blocks', () => {
     const c = w.ensureChunk(0, 0, 0);
     c.blocks[localIndex(8, 8, 8)] = Block.DoorBottom;
     c.meta[localIndex(8, 8, 8)] = doorMeta(false, 0, 0); // closed, axis X, side 0 (min-X edge)
-    const { opaque, trans } = meshChunk(w, 0, 0, 0);
+    const { opaque, trans } = meshChunk(w, 0, 0, 0, NO_LIGHT);
     expect(trans).toBeNull();
     expect(opaque!.positions.length / 3).toBe(6 * 4); // all 6 faces in open air
     let b = posBounds(opaque!);
@@ -228,7 +230,7 @@ describe('chunk-mesher special blocks', () => {
     expect(b.zMin).toBeCloseTo(8); expect(b.zMax).toBeCloseTo(9); // panel spans the full cell width
     expect(b.yMin).toBeCloseTo(8); expect(b.yMax).toBeCloseTo(9);
     c.meta[localIndex(8, 8, 8)] = doorMeta(false, 0, 1); // side 1 (max-X edge)
-    b = posBounds(meshChunk(w, 0, 0, 0).opaque!);
+    b = posBounds(meshChunk(w, 0, 0, 0, NO_LIGHT).opaque!);
     expect(b.xMin).toBeCloseTo(8.8); expect(b.xMax).toBeCloseTo(9);
     expect(b.zMin).toBeCloseTo(8); expect(b.zMax).toBeCloseTo(9);
     expect(b.yMin).toBeCloseTo(8); expect(b.yMax).toBeCloseTo(9);
@@ -239,11 +241,11 @@ describe('chunk-mesher special blocks', () => {
     const c = w.ensureChunk(0, 0, 0);
     c.blocks[localIndex(8, 8, 8)] = Block.DoorBottom;
     c.meta[localIndex(8, 8, 8)] = doorMeta(false, 1, 0);
-    let b = posBounds(meshChunk(w, 0, 0, 0).opaque!);
+    let b = posBounds(meshChunk(w, 0, 0, 0, NO_LIGHT).opaque!);
     expect(b.xMin).toBeCloseTo(8); expect(b.xMax).toBeCloseTo(9); // panel spans the full cell width
     expect(b.zMin).toBeCloseTo(8); expect(b.zMax).toBeCloseTo(8.2);
     c.meta[localIndex(8, 8, 8)] = doorMeta(false, 1, 1);
-    b = posBounds(meshChunk(w, 0, 0, 0).opaque!);
+    b = posBounds(meshChunk(w, 0, 0, 0, NO_LIGHT).opaque!);
     expect(b.xMin).toBeCloseTo(8); expect(b.xMax).toBeCloseTo(9);
     expect(b.zMin).toBeCloseTo(8.8); expect(b.zMax).toBeCloseTo(9);
   });
@@ -253,11 +255,11 @@ describe('chunk-mesher special blocks', () => {
     const c = w.ensureChunk(0, 0, 0);
     c.blocks[localIndex(8, 8, 8)] = Block.DoorBottom;
     c.meta[localIndex(8, 8, 8)] = doorMeta(true, 0); // open, axis X
-    let b = posBounds(meshChunk(w, 0, 0, 0).opaque!);
+    let b = posBounds(meshChunk(w, 0, 0, 0, NO_LIGHT).opaque!);
     expect(b.xMin).toBeCloseTo(8); expect(b.xMax).toBeCloseTo(9);    // x full
     expect(b.zMin).toBeCloseTo(8); expect(b.zMax).toBeCloseTo(8.2); // the 0.2 thickness sits at the min corner
     c.meta[localIndex(8, 8, 8)] = doorMeta(true, 1); // open, axis Z
-    b = posBounds(meshChunk(w, 0, 0, 0).opaque!);
+    b = posBounds(meshChunk(w, 0, 0, 0, NO_LIGHT).opaque!);
     expect(b.xMin).toBeCloseTo(8); expect(b.xMax).toBeCloseTo(8.2);
     expect(b.zMin).toBeCloseTo(8); expect(b.zMax).toBeCloseTo(9);    // z full
     // The open panel is the closed side-0 panel rotated 90 degrees about the hinge
@@ -265,7 +267,7 @@ describe('chunk-mesher special blocks', () => {
     // clamped (an old squished slab would have read 0.55 on the full axis).
     for (const m of [doorMeta(true, 0), doorMeta(true, 1)]) {
       c.meta[localIndex(8, 8, 8)] = m;
-      const ob = posBounds(meshChunk(w, 0, 0, 0).opaque!);
+      const ob = posBounds(meshChunk(w, 0, 0, 0, NO_LIGHT).opaque!);
       const spans = [ob.xMax - ob.xMin, ob.zMax - ob.zMin].sort((p, q) => p - q);
       expect(spans[0], `open meta ${m} thin extent`).toBeCloseTo(0.2);
       expect(spans[1], `open meta ${m} full extent`).toBeCloseTo(1);
@@ -283,10 +285,10 @@ describe('chunk-mesher special blocks', () => {
     };
     // Stone next to a closed door: stone keeps ALL 6 faces (a panel is not opaque) and
     // the door loses its stone-facing face -> 6 + 5 faces
-    expect(meshChunk(withNeighbor(Block.DoorBottom, doorMeta(false, 0)), 0, 0, 0).opaque!.positions.length / 3)
+    expect(meshChunk(withNeighbor(Block.DoorBottom, doorMeta(false, 0)), 0, 0, 0, NO_LIGHT).opaque!.positions.length / 3)
       .toBe((6 + 5) * 4);
     // Contrast: a stone neighbor IS opaque -> the shared face culls on both blocks -> 5 + 5 faces
-    expect(meshChunk(withNeighbor(Block.Stone), 0, 0, 0).opaque!.positions.length / 3).toBe((5 + 5) * 4);
+    expect(meshChunk(withNeighbor(Block.Stone), 0, 0, 0, NO_LIGHT).opaque!.positions.length / 3).toBe((5 + 5) * 4);
   });
 
   it('an opaque neighbour on the FAR side does not over-cull an interior panel face (see-through slit)', () => {
@@ -298,7 +300,7 @@ describe('chunk-mesher special blocks', () => {
     c.blocks[localIndex(10, 8, 8)] = Block.Stone;       // the door's +X neighbour (far side)
     c.blocks[localIndex(9, 8, 8)] = Block.DoorBottom;   // closed X side 0: panel x [9.0, 9.2]
     c.meta[localIndex(9, 8, 8)] = doorMeta(false, 0);
-    const { opaque } = meshChunk(w, 0, 0, 0);
+    const { opaque } = meshChunk(w, 0, 0, 0, NO_LIGHT);
     // stone keeps 6 (a panel is not opaque); the door keeps ALL 6 faces (its far +X face is
     // interior at 9.2 and is no longer culled against the stone) -> (6 + 6) * 4
     expect(opaque!.positions.length / 3).toBe((6 + 6) * 4);
@@ -314,7 +316,7 @@ describe('chunk-mesher special blocks', () => {
     c.meta[localIndex(8, 8, 8)] = torchMeta(0);         // floor post
     c.blocks[localIndex(9, 8, 8)] = Block.DoorBottom;   // panel x [9.0, 9.2]
     c.meta[localIndex(9, 8, 8)] = doorMeta(false, 0);
-    const { opaque } = meshChunk(w, 0, 0, 0);
+    const { opaque } = meshChunk(w, 0, 0, 0, NO_LIGHT);
     expect(opaque!.positions.length / 3).toBe((6 + 6) * 4);
   });
 
@@ -330,7 +332,7 @@ describe('chunk-mesher special blocks', () => {
     c.meta[localIndex(8, 8, 8)] = doorMeta(false, 0, 1); // A side 1: panel x [8.8, 9.0]
     c.blocks[localIndex(9, 8, 8)] = Block.DoorBottom;
     c.meta[localIndex(9, 8, 8)] = doorMeta(false, 0, 0); // B side 0: panel x [9.0, 9.2]
-    const { opaque } = meshChunk(w, 0, 0, 0);
+    const { opaque } = meshChunk(w, 0, 0, 0, NO_LIGHT);
     expect(opaque!.positions.length / 3).toBe((6 + 5) * 4);
   });
 
@@ -344,7 +346,7 @@ describe('chunk-mesher special blocks', () => {
     c.meta[localIndex(8, 8, 8)] = doorMeta(false, 0, 0); // A side 0: panel x [8.0, 8.2]
     c.blocks[localIndex(9, 8, 8)] = Block.DoorBottom;
     c.meta[localIndex(9, 8, 8)] = doorMeta(false, 0, 0); // B side 0: panel x [9.0, 9.2]
-    const { opaque } = meshChunk(w, 0, 0, 0);
+    const { opaque } = meshChunk(w, 0, 0, 0, NO_LIGHT);
     expect(opaque!.positions.length / 3).toBe((6 + 6) * 4);
   });
 
@@ -357,7 +359,7 @@ describe('chunk-mesher special blocks', () => {
     c.meta[localIndex(9, 8, 8)] = doorMeta(false, 0);
     c.blocks[localIndex(9, 9, 8)] = Block.DoorTop;
     c.meta[localIndex(9, 9, 8)] = doorMeta(false, 0);
-    const { opaque } = meshChunk(w, 0, 0, 0);
+    const { opaque } = meshChunk(w, 0, 0, 0, NO_LIGHT);
     // face accounting — a face is hidden iff ITS box end lies on the cell-boundary plane AND
     // the neighbour covers that face's area (opaque neighbour, or a special neighbour reaching
     // the same plane with equal-or-larger coverage; equal coverage -> the smaller cell keeps):
@@ -373,3 +375,45 @@ describe('chunk-mesher special blocks', () => {
     expect(opaque!.positions.length / 3).toBe((6 + 6 + 5) * 4);
   });
 });
+
+describe('chunk-mesher light baking', () => {
+  it('a zero-light stub keeps the colors buffer byte-identical to pre-light (FACE_SHADE * AO only) and aLight all-zero', () => {
+    const w = new World();
+    w.ensureChunk(0, 0, 0).blocks.fill(Block.Stone);
+    const { opaque } = meshChunk(w, 0, 0, 0, NO_LIGHT);
+    expect(opaque).not.toBeNull();
+    const l = opaque!.light;
+    expect(l.length).toBe(opaque!.positions.length / 3 * 2); // one (bl, sk) pair per vertex
+    for (let i = 0; i < l.length; i++) expect(l[i]).toBe(0);
+  });
+
+  it('a torch-facing face corner bakes aLight.bl = 13/15 (the air cell across the face holds 13); a sky-exposed corner bakes aLight.sk = 1 (15/15)', () => {
+    const w = makeWorldForMesher(Block.Torch); // one torch at (8,8,8) in chunk (0,0,0), no floor
+    const lightAt: LightSampler = (x, y, z) => [x === 8 && y === 8 && z === 8 ? 0 : 13, 15]; // the torch cell itself stores 14 bl but the FACE-ACROSS cells of the stem read the air's 13 (see the 3-candidate rule below); sky everywhere 15
+    const { opaque } = meshChunk(w, 0, 0, 0, lightAt);
+    const l = opaque!.light;
+    expect(l).not.toBeNull();
+    // some vertex must have baked the torch-adjacent air value, scaled: 13/15
+    expect(Math.max(...l.filter((_, i) => i % 2 === 0))).toBeCloseTo(13 / 15, 6);
+    // and every non-torch corner reads skylight 15/15:
+    expect(Math.max(...l.filter((_, i) => i % 2 === 1))).toBeCloseTo(1, 6);
+  });
+
+  it('the 3-candidate max rule: a solid diagonal keeps the corner lit when the face-across cell is dark', () => {
+    const w = makeWorldForMesher(Block.Stone);
+    // face-across cell dark (0,0), but a diagonal candidate holds (10, 10):
+    const lightAt: LightSampler = (x, y, z) =>
+      x === 9 && y === 9 && z === 9 ? [10, 10] : [0, 0]; // (9,9,9) is a face-diagonal candidate of the lone stone's +X face at (8,8,8)
+    const { opaque } = meshChunk(w, 0, 0, 0, lightAt);
+    const l = opaque!.light;
+    expect(Math.max(...l.filter((_, i) => i % 2 === 0))).toBeCloseTo(10 / 15, 6);
+  });
+});
+
+// helper: a lone special/cube block at the chunk center (like the file's loneChunk, but importable by name here)
+function makeWorldForMesher(b: Block): World {
+  const w = new World();
+  const c = w.ensureChunk(0, 0, 0);
+  c.blocks[localIndex(8, 8, 8)] = b;
+  return w;
+}
