@@ -170,7 +170,7 @@ export class LightSim {
     else { const lz = sz === 1 ? 0 : 15; for (let lx = 0; lx < 16; lx++) for (let ly = 0; ly < 16; ly++) this.seed(x0 + lx, y0 + ly, z0 + lz); }
   }
 
-  /** Unload path (main.ts calls it for each removed chunk): the surviving neighbors' seam shells may have been lit THROUGH the removed chunk (their missing-neighbor lookup now contributes nothing) — re-seed those cells so pops re-derive the darker values and the darkness wave propagates. Streaming always unloads a whole x/z ring column, so a lower chunk can never be sitting under a missing upper band: the skyEmit walk's skip-missing-chunks rule stays safe. */
+  /** Unload path (main.ts calls it for each removed chunk): the surviving neighbors' seam shells may have been lit THROUGH the removed chunk (their missing-neighbor lookup now contributes nothing) — re-seed those cells so pops re-derive the darker values and the darkness wave propagates. Streaming unloads a doomed x/z column in a single pass, so no SURVIVING cell ever loses an upper sky-column mate to unload (a partially-loaded column is a load-time transient, self-correcting, and is what skyEmit's skip-missing-chunks walk documents). */
   onChunkUnloaded(cx: number, cy: number, cz: number): void {
     for (const [sx, sy, sz] of N6) this.seedSeamNeighbor(cx, cy, cz, sx, sy, sz);
   }
