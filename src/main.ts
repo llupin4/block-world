@@ -195,7 +195,7 @@ const matTrans = new THREE.MeshBasicMaterial({
 // World time is world state: advanced in the fixed substep loop below, then
 // sampled per frame for the sky (src/sky.ts) and clouds (src/clouds.ts).
 const worldTime = new WorldTime();
-const sky = createSky(scene, matOpaque, matTrans, FOG_AIR, FOG_WATER, BG_WATER);
+const sky = createSky(scene, FOG_AIR, FOG_WATER, BG_WATER);
 const clouds = createClouds(scene);
 const clockEl = document.getElementById('clock')!;
 let clockLabel = '';

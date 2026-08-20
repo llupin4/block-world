@@ -124,8 +124,6 @@ export interface Sky {
  */
 export function createSky(
   scene: THREE.Scene,
-  matOpaque: THREE.MeshBasicMaterial,
-  matTrans: THREE.MeshBasicMaterial,
   fogAir: THREE.FogExp2,
   fogWater: THREE.FogExp2,
   bgWater: THREE.Color,
@@ -239,10 +237,9 @@ export function createSky(
 
   return {
     apply(sample, mood, camera) {
-      // worldDim: one scalar on the shared materials dims the whole world,
-      // zero remeshing. The clouds tint it the same way (see src/clouds.ts).
-      matOpaque.color.setScalar(sample.worldDim);
-      matTrans.color.setScalar(sample.worldDim);
+      // World dimming: NO LONGER a material scalar. Per-vertex light (baked aLight
+      // attribute + the uDayness uniform, driven from main.ts) owns world brightness;
+      // sample.worldDim survives only as the CLOUD/SKY visual tint (PROJECT.md §18).
 
       if (mood === 'water') {
         // the underwater mood keeps priority, but is time-tinted
