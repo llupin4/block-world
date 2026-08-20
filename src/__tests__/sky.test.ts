@@ -104,4 +104,27 @@ describe('sampleSky', () => {
     wrap(-0.25, 0.75, 'negative');
     wrap(2.5, 0.5, 'out-of-range');
   });
+
+  it('dayness: the dim ramp normalized to 0..1 — 1.0 at noon, 0.0 at midnight, mirror-symmetric, monotonic day-to-midnight', () => {
+    expect(sampleSky(0.0).dayness).toBeCloseTo(1.0);
+    expect(sampleSky(1.0).dayness).toBeCloseTo(1.0);
+    expect(sampleSky(0.5).dayness).toBeCloseTo(0.0);
+    // dayness === (worldDim - 0.33) / 0.67 at every sample
+    for (let i = 0; i <= 40; i++) {
+      const p = i / 40;
+      const s = sampleSky(p);
+      expect(s.dayness, `@${p}`).toBeCloseTo((s.worldDim - 0.33) / 0.67, 6);
+    }
+    // mirror symmetry about midnight
+    for (let i = 1; i < 20; i++) {
+      const p = 0.02 + (i / 20) * 0.46;
+      expect(sampleSky(p).dayness, `mirror @${p}`).toBeCloseTo(sampleSky(1 - p).dayness, 6);
+    }
+    // monotonic on the way down (0.22 → 0.5), up on the way up (0.5 → 0.78)
+    const down: number[] = [], up: number[] = [];
+    for (let i = 0; i < 30; i++) down.push(sampleSky(0.22 + (i / 30) * 0.28).dayness);
+    for (let i = 0; i < 30; i++) up.push(sampleSky(0.5 + (i / 30) * 0.28).dayness);
+    for (let i = 1; i < down.length; i++) expect(down[i] <= down[i - 1] + 1e-9, `down @${i}`).toBe(true);
+    for (let i = 1; i < up.length; i++) expect(up[i] >= up[i - 1] - 1e-9, `up @${i}`).toBe(true);
+  });
 });

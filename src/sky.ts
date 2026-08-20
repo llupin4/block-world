@@ -14,6 +14,7 @@ export interface SkySample {
   airFogColor: RGB;
   airFogDensity: number;
   worldDim: number; // 1.0 (day) .. 0.33 (night); global stand-in dim until per-block skylight lands
+  dayness: number; // 0..1: the worldDim ramp normalized ((worldDim - 0.33) / 0.67) — 1.0 in full daylight, 0.0 at deep night; scales the skylight component of per-vertex light (uDayness uniform). Same curve as the sky palette fade, so sky and light dim in sync.
   starAlpha: number;
   sunDir: Vec3; // unit direction; (0,1,0) at noon, +X horizon at sunset
   moonDir: Vec3; // antipode of the sun
@@ -73,12 +74,14 @@ export function sampleSky(phase: number): SkySample {
   const b = ANCHORS[i + 1];
   const t = smoothstep((p - a.p) / (b.p - a.p));
   const sun: Vec3 = [Math.sin(2 * Math.PI * p), Math.cos(2 * Math.PI * p), 0];
+  const dimRaw = lerp(a.dim, b.dim, t);
   return {
     skyTop: lerp3(a.top, b.top, t),
     skyHorizon: lerp3(a.horizon, b.horizon, t),
     airFogColor: lerp3(a.airFog, b.airFog, t),
     airFogDensity: lerp(a.airFogDens, b.airFogDens, t),
-    worldDim: lerp(a.dim, b.dim, t),
+    worldDim: dimRaw,
+    dayness: (dimRaw - 0.33) / 0.67,
     starAlpha: lerp(a.stars, b.stars, t),
     sunDir: sun,
     moonDir: [-sun[0], -sun[1], -sun[2]],
