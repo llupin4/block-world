@@ -1003,28 +1003,36 @@ export type LightSampler = (wx: number, wy: number, wz: number) => [number, numb
 New corner helper (place it right above `meshChunk`, with a comment):
 
 ```ts
-// Per-corner light: the max over the UP TO 3 cells the vertex corner pokes into —
-// the cell across the face, plus the two face-diagonal cells (offset along the face's
-// u/v axes toward the corner) — per field independently. The max-over-3 keeps a corner
-// lit when a solid tucks into the corner of the outside cell (the classic
-// one-dark-corner artifact). Solid candidate cells contribute their stored value,
-// which the propagation keeps naturally low. Returned normalized (level / 15).
+// Per-corner light: the max over the UP TO 4 outside cells the vertex corner pokes
+// into — the cell across the face, the two face-diagonal cells (one corner step along
+// each face axis), and the body-diagonal cell (both steps) — the same s1/s2/dg
+// machinery as the vertex AO sampler below. Per field independently: the
+// max-over-cells keeps a corner lit when a solid tucks into the corner of the outside
+// cell (the classic one-dark-corner artifact). Solid candidate cells contribute their
+// stored value, which the propagation keeps naturally low. Returned normalized
+// (level / 15).
+// (Plan correction, during Task 9: the original 3-candidate snippet shifted the
+// diagonals along the face normal and failed this task's own test #3 — the body
+// diagonal (the AO dg cell) must be the 4th candidate.)
 function cornerLight(l: LightSampler, wx: number, wy: number, wz: number, face: FaceDef, c: readonly number[]): [number, number] {
   const ax = face.dir[0], ay = face.dir[1], az = face.dir[2];
-  const su = c[face.axes[0]] === 1 ? 1 : -1;
-  const sv = c[face.axes[1]] === 1 ? 1 : -1;
+  const au = face.axes[0], av = face.axes[1];
+  const su = c[au] === 1 ? 1 : -1;
+  const sv = c[av] === 1 ? 1 : -1;
   const nx = wx + ax, ny = wy + ay, nz = wz + az;
-  const [bl0, sk0] = l(nx, ny, nz);
-  // diagonal candidates: the across-cell shifted one corner step along each face axis
-  const sx = ax === 1 ? su : 0, sy = ay === 1 ? su : 0, sz = az === 1 ? su : 0;
-  const [bl1, sk1] = l(nx + sx, ny + sy, nz + sz);
-  const tx = ax === 1 ? sv : 0, ty = ay === 1 ? sv : 0, tz = az === 1 ? sv : 0;
-  const [bl2, sk2] = l(nx + tx, ny + ty, nz + tz);
-  return [Math.max(bl0, bl1, bl2) / 15, Math.max(sk0, sk1, sk2) / 15];
+  const ox = au === 0 ? su : 0, oy = au === 1 ? su : 0, oz = au === 2 ? su : 0;
+  const px = av === 0 ? sv : 0, py = av === 1 ? sv : 0, pz = av === 2 ? sv : 0;
+  let bl = 0, sk = 0;
+  for (const [dx, dy, dz] of [[0, 0, 0], [ox, oy, oz], [px, py, pz], [ox + px, oy + py, oz + pz]] as const) {
+    const [lb, lk] = l(nx + dx, ny + dy, nz + dz);
+    if (lb > bl) bl = lb;
+    if (lk > sk) sk = lk;
+  }
+  return [bl / 15, sk / 15];
 }
 ```
 
-`meshChunk` signature (:260): `export function meshChunk(world: World, cx: number, cy: number, cz: number, lightAt: LightSampler): ChunkMesh`.
+`meshChunk` signature (:260): `export function meshChunk(world: World, cx: number, cy: number, cz: number, lightAt: LightSampler = noLight): ChunkMesh` — PLAN CORRECTION (Task 9): `lightAt` is OPTIONAL with a `noLight` (`() => [0, 0]`) default; `src/__tests__/water-load.test.ts` has 4-arg perf-bench call sites outside this task's file scope.
 
 Cube path (:305-314): in the corner loop, after the `occ` compute, get the pair once and pass it:
 
