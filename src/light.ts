@@ -150,8 +150,28 @@ export class LightSim {
     }
   }
 
-  /** Process up to `budget` queued cells (insertion order); returns the number processed (0 = queue empty). Does NOT clear `touched` — the caller drains it after re-meshing (sim.touched contract). */
-  tick(budget: number): number {
+  /** Load-path settle (main.ts calls it for each newly loaded chunk, next to sim.settle): maintains the chunk's colSum, queues the chunk's cells, queues the one-cell face shells of the seam inside already-loaded neighbors (their boundary light may change across the new seam — including sky columns whose upper band just appeared), and drains inline up to LIGHT_SETTLE_GUARD pops (the rest keeps draining on substeps). */
+  settleChunk(cx: number, cy: number, cz: number): void {
+    const c = this.world.getChunk(cx, cy, cz);
+    if (!c) return;
+    for (let lz = 0; lz < 16; lz++) for (let lx = 0; lx < 16; lx++) c.colSum[lx + lz * 16] = columnSum(this.world, cx, cy, cz, lx, lz);
+    for (let ly = 0; ly < 16; ly++) for (let lz = 0; lz < 16; lz++) for (let lx = 0; lx < 16; lx++) this.seed(cx * 16 + lx, cy * 16 + ly, cz * 16 + lz);
+    for (const [sx, sy, sz] of N6) this.seedSeamNeighbor(cx, cy, cz, sx, sy, sz);
+    this.drain(LIGHT_SETTLE_GUARD);
+  }
+
+  /** Queue the one-cell face shell of neighbor chunk (cx+sx, cy+sy, cz+sz) that faces (cx, cy, cz). */
+  private seedSeamNeighbor(cx: number, cy: number, cz: number, sx: number, sy: number, sz: number): void {
+    const nc = this.world.getChunk(cx + sx, cy + sy, cz + sz);
+    if (!nc) return;
+    const x0 = nc.cx * 16, y0 = nc.cy * 16, z0 = nc.cz * 16;
+    if (sx !== 0) { const lx = sx === 1 ? 0 : 15; for (let ly = 0; ly < 16; ly++) for (let lz = 0; lz < 16; lz++) this.seed(x0 + lx, y0 + ly, z0 + lz); }
+    else if (sy !== 0) { const ly = sy === 1 ? 0 : 15; for (let lx = 0; lx < 16; lx++) for (let lz = 0; lz < 16; lz++) this.seed(x0 + lx, y0 + ly, z0 + lz); }
+    else { const lz = sz === 1 ? 0 : 15; for (let lx = 0; lx < 16; lx++) for (let ly = 0; ly < 16; ly++) this.seed(x0 + lx, y0 + ly, z0 + lz); }
+  }
+
+  /** Internal bounded drain (shares tick's body; used by settleChunk). */
+  private drain(budget: number): number {
     let n = 0;
     while (n++ < budget) {
       const it = this.queue.values().next();
@@ -162,5 +182,10 @@ export class LightSim {
       this.pop(wx, wy, wz);
     }
     return n - 1;
+  }
+
+  /** Process up to `budget` queued cells (insertion order); returns the number processed (0 = queue empty). Does NOT clear `touched` — the caller drains it after re-meshing (sim.touched contract). */
+  tick(budget: number): number {
+    return this.drain(budget);
   }
 }

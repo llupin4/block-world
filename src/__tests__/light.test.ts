@@ -108,7 +108,7 @@ describe('LightSim', () => {
     expect(w.getLight(8, 8, 8)[0]).toBe(7);   // straight up, Manhattan 7
     // a solid wall at x=12 kills the field on the far side (opacity 15 exits nothing)
     for (let y = 1; y < 16; y++) for (let z = 0; z < 16; z++) w.setBlock(12, y, z, Block.Stone);
-    // wall was added AFTER settle: re-seed + drain (the real flow goes through edit(), Task 5)
+    // wall was added AFTER settle: re-seed + drain (edit() re-seeds the cell, its neighbors, and the sky column below)
     sim.edit(12, 8, 8);
     drain(sim);
     expect(w.getLight(11, 1, 8)[0]).toBe(11); // last air before the wall: 14-3 (d=3 from torch); the wall doesn't attenuate the near side
@@ -133,5 +133,66 @@ describe('LightSim', () => {
     drain(sim);
     // (8,5,8) is distance 5 from both: 14-5 = 9 from each — max 9, not 18
     expect(w.getLight(8, 5, 8)[0]).toBe(9);
+  });
+
+  it('removal: the darkness wave walks out until the pre-torch state (no special de-propagation pass needed)', () => {
+    const w = makeWorld([[0, 0, 0]]);
+    for (let x = 0; x < 16; x++) for (let z = 0; z < 16; z++) w.setBlock(x, 0, z, Block.Stone);
+    w.setBlock(8, 1, 8, Block.Torch);
+    const sim = new LightSim(w);
+    sim.edit(8, 1, 8);
+    drain(sim);
+    const before = w.getLight(12, 1, 8)[0]; // 10
+    expect(before).toBe(10);
+    w.setBlock(8, 1, 8, Block.Air); // break the torch (main.ts calls edit after world.setBlock)
+    sim.edit(8, 1, 8);
+    drain(sim);
+    expect(w.getLight(8, 1, 8)[0]).toBe(0);
+    expect(w.getLight(12, 1, 8)[0]).toBe(0); // wave swept through; no support left anywhere
+    expect(w.getLight(15, 1, 8)[0]).toBe(0);
+  });
+
+  it('two-torch support boundary: removing one torch, the darkness wave stops dead at the cells the survivor still supports', () => {
+    const w = makeWorld([[0, 0, 0]]);
+    for (let x = 0; x < 16; x++) for (let z = 0; z < 16; z++) w.setBlock(x, 0, z, Block.Stone);
+    w.setBlock(4, 5, 8, Block.Torch);
+    w.setBlock(12, 5, 8, Block.Torch);
+    const sim = new LightSim(w);
+    sim.edit(4, 5, 8);
+    sim.edit(12, 5, 8);
+    drain(sim);
+    expect(w.getLight(8, 5, 8)[0]).toBe(10); // distance 4 from both: 14-4
+    expect(w.getLight(13, 5, 8)[0]).toBe(13); // max of the two fields: 14-1 from the right torch (left only gives 14-9 = 5)
+    w.setBlock(12, 5, 8, Block.Air);
+    sim.edit(12, 5, 8);
+    drain(sim);
+    expect(w.getLight(8, 5, 8)[0]).toBe(10); // unchanged: the left torch still supports it at exactly 10
+    expect(w.getLight(13, 5, 8)[0]).toBe(5); // right field gone: only the left torch — d=9 → 14-9
+    expect(w.getLight(15, 5, 8)[0]).toBe(3); // d=11 from the left torch → 14-11
+  });
+
+  it('sky column re-seed: a block at a cave mouth collapses the column (1/side-step decay into the cave); breaking it restores', () => {
+    const w2 = makeWorld([[0, 0, 0]]);
+    // column at (8,·,8): air from y=0..15 EXCEPT a stone slab at y=10..15 above an air cap y=8..9? NO — pinned layout:
+    // air y 0..9, STONE y 10 (single block, the plug), air y 11..15. The plug blocks sky for y <= 9.
+    for (let y = 11; y < 16; y++) w2.setBlock(8, y, 8, Block.Air); // air above the plug (explicit, though default)
+    const sim = new LightSim(w2);
+    sim.settleChunk(0, 0, 0); // initial settle: open column everywhere (plug not yet placed) — skylight 15 all the way down
+    drain(sim);
+    expect(w2.getLight(8, 0, 8)[1]).toBe(15);
+    // NOW plug the column at y=10: direct sky emission below it drops to 0 (stone opacity 15 saturates the sum);
+    // the cells relax to the 1/side-step lateral leak from the adjacent open column (15-1 = 14)
+    w2.setBlock(8, 10, 8, Block.Stone);
+    sim.edit(8, 10, 8);
+    drain(sim);
+    expect(w2.getLight(8, 10, 8)[1]).toBe(15); // the plug itself: nothing opaque strictly above it
+    expect(w2.getLight(8, 9, 8)[1]).toBe(14); // below the plug: E=0 (column blocked) + 15-1 side-step leak
+    expect(w2.getLight(8, 0, 8)[1]).toBe(14); // uniform down the column: 1/side-step from the open side column, no vertical decay
+    // break the plug: the column restores to 15
+    w2.setBlock(8, 10, 8, Block.Air);
+    sim.edit(8, 10, 8);
+    drain(sim);
+    expect(w2.getLight(8, 9, 8)[1]).toBe(15);
+    expect(w2.getLight(8, 0, 8)[1]).toBe(15);
   });
 });
