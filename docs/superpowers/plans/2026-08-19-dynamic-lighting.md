@@ -561,13 +561,13 @@ git commit -m "feat: LightSim — recompute-relaxation queue (max-of-sources rul
     sim.edit(12, 5, 8);
     drain(sim);
     expect(w.getLight(8, 5, 8)[0]).toBe(10); // distance 4 from both: 14-4
-    expect(w.getLight(13, 5, 8)[0]).toBe(11); // 1 from right torch, 9 from left
+    expect(w.getLight(13, 5, 8)[0]).toBe(13); // 1 from right torch (14-1) = the max; the left torch only gives 14-9 = 5
     w.setBlock(12, 5, 8, Block.Air);
     sim.edit(12, 5, 8);
     drain(sim);
     expect(w.getLight(8, 5, 8)[0]).toBe(10); // unchanged: the left torch still supports it at exactly 10
-    expect(w.getLight(13, 5, 8)[0]).toBe(9); // right field gone: left torch gives 14-9 = 9
-    expect(w.getLight(15, 5, 8)[0]).toBe(7); // 14-11
+    expect(w.getLight(13, 5, 8)[0]).toBe(5); // right field gone: left torch only — d=9 → 14-9 = 5
+    expect(w.getLight(15, 5, 8)[0]).toBe(3); // d=11 from the left torch → 14-11 = 3
   });
 
   it('sky column re-seed: a block at a cave mouth collapses the column (1/side-step decay into the cave); breaking it restores', () => {
@@ -587,13 +587,14 @@ git commit -m "feat: LightSim — recompute-relaxation queue (max-of-sources rul
     sim.settleChunk(0, 0, 0); // initial settle: open column everywhere (plug not yet placed) — skylight 15 all the way down
     drain(sim);
     expect(w2.getLight(8, 0, 8)[1]).toBe(15);
-    // NOW plug the column at y=10: cells below it must drop to 0 (stone opacity 15 saturates the sum)
+    // NOW plug the column at y=10: the column cells lose direct sky (E→0) and relax to the
+    // 1/side-step lateral leak from the adjacent open column (15-1 = 14) — not a full 0 (that needs enclosure)
     w2.setBlock(8, 10, 8, Block.Stone);
     sim.edit(8, 10, 8);
     drain(sim);
     expect(w2.getLight(8, 10, 8)[1]).toBe(15); // the plug itself: nothing opaque strictly above it
-    expect(w2.getLight(8, 9, 8)[1]).toBe(0); // below the plug: 15-15 = 0
-    expect(w2.getLight(8, 0, 8)[1]).toBe(0); // no vertical decay — the whole lower column is dark
+    expect(w2.getLight(8, 9, 8)[1]).toBe(14); // below the plug: E=0 (column blocked) + 15-1 side-step leak
+    expect(w2.getLight(8, 0, 8)[1]).toBe(14); // uniform down the column: 1/side-step from the open side column, no vertical decay
     // break the plug: the column restores to 15
     w2.setBlock(8, 10, 8, Block.Air);
     sim.edit(8, 10, 8);
