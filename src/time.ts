@@ -13,7 +13,12 @@ export class WorldTime {
   /** Total simulation time (s). */
   time = 0;
   /** Total phase progressed, in cycles. Stored, not derived from `time`, so the cycle can later run independently. */
-  private phaseTotal = 0;
+  private phaseTotal: number;
+
+  /** `startPhase` (default 0 = noon) lets verification/URL hooks (main.ts `?phase=`) reach any time of day without a real-time wait. */
+  constructor(startPhase = 0) {
+    this.phaseTotal = startPhase;
+  }
 
   /** Position in the current cycle, [0, 1): 0 = noon, 0.25 = sunset, 0.5 = midnight, 0.75 = sunrise. */
   get dayPhase(): number {

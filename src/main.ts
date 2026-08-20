@@ -11,6 +11,7 @@ import { WaterSim } from './water';
 import { WorldTime, formatClock } from './time';
 import { sampleSky, createSky } from './sky';
 import { createClouds } from './clouds';
+import { LIGHT_AMBIENT } from './light';
 
 // === boot ===
 
@@ -191,10 +192,37 @@ const matTrans = new THREE.MeshBasicMaterial({
   side: THREE.DoubleSide, // lets water be seen from under-side/side as well
 });
 
+// === per-vertex light (PROJECT.md §18) ===
+// aLight = (blight, skylight) 0..1 baked per corner by the mesher. uDayness scales the
+// sky component per frame (day/night fades in O(1) — no re-baking, no brightness
+// wavefront at dusk); uAmbient is the unlit floor so deep night is dark but readable.
+const daynessUniforms: { value: number }[] = [];
+function addLightShader(mat: THREE.MeshBasicMaterial): void {
+  const uDay = { value: 1.0 };
+  const uAmb = { value: LIGHT_AMBIENT };
+  mat.onBeforeCompile = (shader) => {
+    shader.uniforms.uDayness = uDay;
+    shader.uniforms.uAmbient = uAmb;
+    shader.vertexShader = shader.vertexShader
+      .replace('#include <common>', '#include <common>\nattribute vec2 aLight;\nvarying vec2 vLight;')
+      .replace('#include <begin_vertex>', '#include <begin_vertex>\n\tvLight = aLight;');
+    shader.fragmentShader = shader.fragmentShader
+      .replace('#include <common>', '#include <common>\nuniform float uDayness;\nuniform float uAmbient;\nvarying vec2 vLight;\n')
+      .replace('#include <color_fragment>', '// per-vertex light: sky component fades with dayness; block light never does\nfloat bwLight = clamp(max(vLight.x, vLight.y * uDayness), 0.0, 1.0);\ndiffuseColor.rgb *= uAmbient + (1.0 - uAmbient) * bwLight;\n#include <color_fragment>');
+  };
+  daynessUniforms.push(uDay);
+}
+addLightShader(matOpaque);
+addLightShader(matTrans);
+
 // === sky ===
 // World time is world state: advanced in the fixed substep loop below, then
 // sampled per frame for the sky (src/sky.ts) and clouds (src/clouds.ts).
-const worldTime = new WorldTime();
+// ?phase=<0..1> dev-only: seeds the day phase (e.g. ?phase=0.5 = deep night) so
+// headless/visual verification reaches any time of day without a 120 s real-time wait.
+const phaseParam = new URLSearchParams(location.search).get('phase');
+const startPhase = phaseParam !== null && phaseParam !== '' && Number.isFinite(+phaseParam) ? +phaseParam : 0;
+const worldTime = new WorldTime(startPhase);
 const sky = createSky(scene, FOG_AIR, FOG_WATER, BG_WATER);
 const clouds = createClouds(scene);
 const clockEl = document.getElementById('clock')!;
@@ -302,6 +330,12 @@ function syncCamera(): void {
   camera.rotation.set(player.pitch, player.yaw, 0);
 }
 syncCamera();
+
+// ?dbg dev-only: exposes the render triple for headless pixel verification (readPixels
+// after a forced render). Never used outside that rig.
+if (new URLSearchParams(location.search).has('dbg')) {
+  (window as unknown as Record<string, unknown>).__bw = { renderer, scene, camera };
+}
 
 // === input ===
 
@@ -793,6 +827,7 @@ function frame(now: number): void {
   clouds.setVisible(waterFx === 'air');
   const skySample = sampleSky(worldTime.dayPhase);
   sky.apply(skySample, waterFx, camera);
+  for (const u of daynessUniforms) u.value = skySample.dayness;
   clouds.update(camera.position.x, camera.position.z, camera.position.y, worldTime.time, skySample.worldDim);
   const label = formatClock(worldTime.day, worldTime.hour);
   if (label !== clockLabel) {
