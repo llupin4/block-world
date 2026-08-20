@@ -11,7 +11,7 @@ import { WaterSim } from './water';
 import { WorldTime, formatClock } from './time';
 import { sampleSky, createSky } from './sky';
 import { createClouds } from './clouds';
-import { LIGHT_AMBIENT } from './light';
+import { LightSim, LIGHT_AMBIENT, LIGHT_TICK_BUDGET } from './light';
 
 // === boot ===
 
@@ -244,6 +244,11 @@ for (let cy = 0; cy <= 4; cy++) generateChunkTerrain(world, gen, 0, cy, 2); // c
 // the first tickStreaming, before the first rendered frame, so caves read as already filled.
 const sim = new WaterSim(world);
 
+// Light sim (PROJECT.md §18, src/light.ts): two 0..15 fields streamed with each chunk;
+// drained every substep (near-instant), settled per loaded chunk (like sim), and its
+// `touched` set re-meshes changed chunks at the frame end (the sim.touched contract).
+const lightSim = new LightSim(world);
+
 // Spawn on MEASURED ground. Plan deviation (recorded): the plan's probe reported (33,41) as a
 // grass shelf at surface y=33, but under the T4-pinned generator that column is a sea-basin
 // cell (sand at y=30, water to y=32) in neither PRNG variant — the plan's T9 probe must have
@@ -471,6 +476,8 @@ function toggleDoorPair(x: number, y: number, z: number): void {
     world.setBlock(p[0], p[1], p[2], world.getBlock(p[0], p[1], p[2]), meta);
     remeshAround(p[0], p[1], p[2]);
   }
+  lightSim.edit(x, y, z);
+  if (p) lightSim.edit(p[0], p[1], p[2]);
 }
 
 /** Remove ONLY the partner half of the door at (x, y, z); the caller handles that cell itself. */
@@ -480,6 +487,7 @@ function clearDoorPartner(x: number, y: number, z: number): void {
   world.setBlock(p[0], p[1], p[2], Block.Air);
   remeshAround(p[0], p[1], p[2]);
   sim.edit(p[0], p[1], p[2], Block.Air);
+  lightSim.edit(p[0], p[1], p[2]);
 }
 
 // Rebuild the edited cell's chunk, plus — when the cell sits on a chunk face — the
@@ -515,6 +523,7 @@ function onMouseDown(e: MouseEvent): void {
     world.setBlock(hit.x, hit.y, hit.z, Block.Air);
     remeshAround(hit.x, hit.y, hit.z);
     sim.edit(hit.x, hit.y, hit.z, Block.Air); // clears the cell's water state + re-marks dependents
+    lightSim.edit(hit.x, hit.y, hit.z); // water/wall removal changes block AND sky exposure
   } else if (e.button === 2) {
     const hit = castFromCamera(false); // place targeting: water stays pass-through
     if (!hit) return;
@@ -542,6 +551,7 @@ function onMouseDown(e: MouseEvent): void {
       world.setBlock(tx, ty, tz, Block.Torch, torchMeta(torchFaceFromNormal(hit.nx, hit.ny, hit.nz)));
       remeshAround(tx, ty, tz);
       sim.edit(tx, ty, tz, Block.Torch);
+      lightSim.edit(tx, ty, tz); // the glow wave
       return;
     }
 
@@ -574,6 +584,7 @@ function onMouseDown(e: MouseEvent): void {
       remeshAround(tx, ty + 1, tz);
       sim.edit(tx, ty, tz, Block.DoorBottom);
       sim.edit(tx, ty + 1, tz, Block.DoorTop);
+      lightSim.edit(tx, ty, tz); lightSim.edit(tx, ty + 1, tz);
       return;
     }
 
@@ -585,6 +596,7 @@ function onMouseDown(e: MouseEvent): void {
     world.setBlock(tx, ty, tz, held); // meta = 0 clears any torch state in the cell
     remeshAround(tx, ty, tz);
     sim.edit(tx, ty, tz, held); // Water -> a level-7 source; any other block dries this cell
+    lightSim.edit(tx, ty, tz);
   }
 }
 
@@ -751,9 +763,13 @@ window.addEventListener(
 // meshes). The 2 loads + 2 remeshes per call keep the frame cost bounded.
 function tickStreaming(): void {
   const r = streaming.update(world, chunkOf(player.pos.x), chunkOf(player.pos.z), chunkOf(player.pos.y));
-  for (const c of r.unloaded) removeChunkMesh(c.cx, c.cy, c.cz);
+  for (const c of r.unloaded) {
+    removeChunkMesh(c.cx, c.cy, c.cz);
+    lightSim.onChunkUnloaded(c.cx, c.cy, c.cz); // cells lit through the removed chunk darken
+  }
   for (const c of r.rebuilt) {
     sim.settle(c.cx, c.cy, c.cz); // POC form of worldgen-fluid settling: settle BEFORE meshing so the new chunk's mesh already shows flooded caves. The settled flag makes re-settling a re-meshed chunk a no-op. settle() never clears sim.touched: cross-seam marks from any settle this frame survive here and to the end-of-frame drain below, which re-meshes them.
+    lightSim.settleChunk(c.cx, c.cy, c.cz);
     rebuildChunkMesh(c.cx, c.cy, c.cz);
   }
 }
@@ -805,6 +821,7 @@ function frame(now: number): void {
     acc -= STEP;
     player.update(STEP, readMove());
     worldTime.advance(STEP);
+    lightSim.tick(LIGHT_TICK_BUDGET);
     tickStreaming();
     if (player.pos.y < WORLD_Y_MIN) player.place(SPAWN); // fell out of the world (open cave / dug-away floor)
   }
@@ -820,6 +837,14 @@ function frame(now: number): void {
       if (world.hasChunk(cx, cy, cz)) rebuildChunkMesh(cx, cy, cz);
     }
     touched.clear();
+  }
+  const ltouched = lightSim.touched; // re-mesh any chunk whose LIGHT changed this frame (edits + settles + cross-seam waves), then drain — same contract as sim.touched
+  if (ltouched.size) {
+    for (const key of ltouched) {
+      const [cx, cy, cz] = key.split(',').map(Number);
+      if (world.hasChunk(cx, cy, cz)) rebuildChunkMesh(cx, cy, cz);
+    }
+    ltouched.clear();
   }
   syncCamera();
   updateHitbox();
