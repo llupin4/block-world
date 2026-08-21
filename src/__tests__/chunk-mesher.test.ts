@@ -456,7 +456,7 @@ describe('chunk-mesher water level mesh', () => {
   it('a lone level-7 flow cell over solid: top at 0.875, 4 side faces, no bottom', () => {
     const w = new World();
     const c = w.ensureChunk(0, 0, 0);
-    c.blocks[localIndex(8, 8, 7)] = Block.Stone; // floor below
+    c.blocks[localIndex(8, 7, 8)] = Block.Stone; // floor below
     water(c, 8, 8, 8, 7);
     const { opaque, trans } = meshChunk(w, 0, 0, 0, NO_LIGHT);
     expect(opaque!.positions.length / 3).toBe(6 * 4); // stone keeps all 6 faces (water never culls it)
@@ -469,8 +469,8 @@ describe('chunk-mesher water level mesh', () => {
   it('level 7 beside level 6: a skirt sits on the shared plane; only the taller emits it', () => {
     const w = new World();
     const c = w.ensureChunk(0, 0, 0);
-    c.blocks[localIndex(8, 8, 7)] = Block.Stone;
-    c.blocks[localIndex(9, 8, 7)] = Block.Stone;
+    c.blocks[localIndex(8, 7, 8)] = Block.Stone;
+    c.blocks[localIndex(9, 7, 8)] = Block.Stone;
     water(c, 8, 8, 8, 7);
     water(c, 9, 8, 8, 6);
     const { trans } = meshChunk(w, 0, 0, 0, NO_LIGHT);
@@ -492,8 +492,8 @@ describe('chunk-mesher water level mesh', () => {
   it('a source beside level-7 flow: the source skirts down to the flow; the flow culls toward the source', () => {
     const w = new World();
     const c = w.ensureChunk(0, 0, 0);
-    c.blocks[localIndex(8, 8, 7)] = Block.Stone;
-    c.blocks[localIndex(9, 8, 7)] = Block.Stone;
+    c.blocks[localIndex(8, 7, 8)] = Block.Stone;
+    c.blocks[localIndex(9, 7, 8)] = Block.Stone;
     water(c, 8, 8, 8, 7, 1); // source: full height
     water(c, 9, 8, 8, 7); // flow: 0.875
     const { trans } = meshChunk(w, 0, 0, 0, NO_LIGHT);
