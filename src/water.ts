@@ -9,7 +9,7 @@ import { World, chunkOf, chunkKey, localIndex, WORLD_Y_MIN, WORLD_Y_MAX, type Ch
 // re-checked every pulse until the low band loads.
 //
 // Model (LOCAL RE-DERIVATION — no provenance is tracked): a water cell stores only its own
-// state — full water (wsource=1, a source) or flow, plus a level (1..7, render-cosmetic).
+// state — full water (wsource=1, a source) or flow, plus a level (1..7).
 // Nothing remembers "which source fed me". When a flow cell is re-evaluated it re-derives
 // its level from its neighbourhood:
 //   level 7 — it is a PLACED spring (wplaced=1), or level-7 water sits directly above it
@@ -63,7 +63,7 @@ import { World, chunkOf, chunkKey, localIndex, WORLD_Y_MIN, WORLD_Y_MAX, type Ch
 //     nothing is ever adopted into a source body, so no body's level ever rises and a cut
 //     off flow is never left behind as an immortal source over the sea;
 //
-// RANGE: wlevel is a real (render-cosmetic) decay number: every fresh start is level 7; a
+// RANGE: wlevel is a real decay number: every fresh start is level 7; a
 // water cell spreads sideways to Air only at level >= 2, and the neighbour it writes is at
 // level-1. So a level-7 cell's flood reaches ~6 blocks out — a rounded fan (4-way
 // spread) — and a fall (pour or drop) writes the parcel back at level 7, so water always
