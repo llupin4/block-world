@@ -1,4 +1,4 @@
-import { Block, isOpaque, isDoor, doorOpen } from './blocks';
+import { Block, isOpaque, isDoor, doorOpen, waterSurfaceHeight } from './blocks';
 
 export const CHUNK_SIZE = 16;
 export const CHUNK_VOL = CHUNK_SIZE * CHUNK_SIZE * CHUNK_SIZE; // 4096
@@ -100,6 +100,20 @@ export class World {
     const c = this.getChunk(chunkOf(wx), chunkOf(wy), chunkOf(wz));
     if (!c) return 0;
     return c.meta[localIndex(wx - c.cx * CHUNK_SIZE, wy - c.cy * CHUNK_SIZE, wz - c.cz * CHUNK_SIZE)];
+  }
+
+  /**
+   * Water surface height (0..1) at a cell: waterSurfaceHeight of its
+   * wlevel/wsource/wstream bytes. Missing chunk reads 0 (dry), mirroring
+   * getBlock = Air. Only meaningful when the cell's block is Water — the
+   * mesher checks the block id first and consults this only for water
+   * neighbours (the skirt compare).
+   */
+  getWaterHeight(wx: number, wy: number, wz: number): number {
+    const c = this.getChunk(chunkOf(wx), chunkOf(wy), chunkOf(wz));
+    if (!c) return 0;
+    const i = localIndex(wx - c.cx * CHUNK_SIZE, wy - c.cy * CHUNK_SIZE, wz - c.cz * CHUNK_SIZE);
+    return waterSurfaceHeight(c.wlevel[i], c.wsource[i], c.wstream[i]);
   }
 
   /** Both light fields at a cell, [blight, skylight] (0..15 each). Missing chunk (incl. outside the generated y band) reads [0, 0] — light never propagates through ungenerated space, exactly like water. */

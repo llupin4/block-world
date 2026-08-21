@@ -149,4 +149,18 @@ describe('world', () => {
     expect(w.getLight(16, 8, 8)).toEqual([0, 0]);     // missing chunk (neighbor col)
     expect(w.getLight(8, 80, 8)).toEqual([0, 0]);     // above the generated band (band = y 0..79)
   });
+
+  it('getWaterHeight: flow level/8, source/stream full, missing chunk reads 0 (dry)', () => {
+    const w = new World();
+    const c = w.ensureChunk(0, 0, 0);
+    c.blocks[localIndex(5, 5, 5)] = Block.Water;
+    c.wlevel[localIndex(5, 5, 5)] = 6;
+    expect(w.getWaterHeight(5, 5, 5)).toBe(0.75);
+    c.wsource[localIndex(5, 5, 5)] = 1;
+    expect(w.getWaterHeight(5, 5, 5)).toBe(1);
+    c.wsource[localIndex(5, 5, 5)] = 0;
+    c.wstream[localIndex(5, 5, 5)] = 1;
+    expect(w.getWaterHeight(5, 5, 5)).toBe(1);
+    expect(w.getWaterHeight(64, 5, 5)).toBe(0); // chunk (1,0,0) not loaded: reads dry
+  });
 });
