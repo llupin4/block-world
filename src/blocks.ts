@@ -128,3 +128,18 @@ export function doorPlacementFromView(fx: number, fz: number, nx: number, nz: nu
   const side = (axis === 1 ? nz : nx) < 0 ? 1 : 0;
   return { axis, side };
 }
+
+// === water surface height (docs/superpowers/specs/2026-08-20-water-level-mesh-design.md) ===
+
+/**
+ * Water surface height (0..1) for a cell's flow state: source and stream cells render
+ * full height; resting flow renders wlevel/8 (level 1..7 -> 0.125..0.875). Pure in the
+ * three per-cell bytes (world.ts wlevel/wsource/wstream); callers invoke it for Water
+ * cells only, whose invariant (block == Water => wlevel >= 1) keeps the result in
+ * 0.125..1.0. Lives in blocks.ts (not chunk-mesher.ts) so world.ts can import it
+ * without a circular dependency.
+ */
+export function waterSurfaceHeight(wlevel: number, wsource: number, wstream: number): number {
+  if (wsource || wstream) return 1;
+  return wlevel / 8;
+}

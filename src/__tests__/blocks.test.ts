@@ -2,7 +2,7 @@ import { describe, it, expect } from 'vitest';
 import {
   Block, BLOCKS, isOpaque, PLACEABLE, iconPosition,
   torchMeta, torchFace, doorMeta, doorOpen, doorAxis, doorSide, isDoor,
-  doorPlacementFromView,
+  doorPlacementFromView, waterSurfaceHeight,
 } from '../blocks';
 
 describe('blocks', () => {
@@ -156,5 +156,19 @@ describe('blocks', () => {
       expect(BLOCKS[b].light, `light @ ${b}`).toBe(light);
       expect(BLOCKS[b].opacity, `opacity @ ${b}`).toBe(opacity);
     }
+  });
+});
+
+describe('waterSurfaceHeight', () => {
+  it('resting flow: wlevel / 8 (levels 1..7 -> 0.125..0.875)', () => {
+    expect(waterSurfaceHeight(1, 0, 0)).toBe(1 / 8);
+    expect(waterSurfaceHeight(4, 0, 0)).toBe(0.5);
+    expect(waterSurfaceHeight(7, 0, 0)).toBe(7 / 8);
+  });
+
+  it('source or stream: full height at any level', () => {
+    expect(waterSurfaceHeight(5, 1, 0)).toBe(1);
+    expect(waterSurfaceHeight(3, 0, 1)).toBe(1);
+    expect(waterSurfaceHeight(7, 1, 1)).toBe(1);
   });
 });
