@@ -88,7 +88,7 @@ src/
   ui.ts            hotbar + palette state
 index.html         app shell + DOM overlays
 PROJECT.md         the original POC design doc (stack, algorithms, known traps)
-docs/superpowers/  specs and plans behind each feature
+docs/adr/          architecture decision records, one per system (0001-0010)
 ```
 
 ## Design notes

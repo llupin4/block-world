@@ -570,7 +570,7 @@ pattern as the water flag arrays:
 
 ## 17. Sky — day/night, sun/moon, stars, clouds (post-POC, 2026-08-19)
 
-Spec: `docs/superpowers/specs/2026-08-19-day-night-clouds-design.md`.
+ADR: `docs/adr/0008-sky-day-night.md`.
 
 - `src/time.ts` — `WorldTime`, world-level state advanced in the **fixed 60 Hz
   physics substep** (never wall-clock): a lagging frame drops frames, it never
@@ -622,7 +622,7 @@ uploads. `fog: false`, opacity 0.70, tinted white → faint blue-grey by
 
 ## 18. Dynamic lighting with light levels (post-POC, 2026-08-19)
 
-Spec: `docs/superpowers/specs/2026-08-19-dynamic-lighting-design.md`.
+ADR: `docs/adr/0007-dynamic-lighting.md`.
 
 Two 0–15 integer light fields per chunk (`blight` torch light, `skylight`
 open-to-sky exposure) are propagated locally through the voxel grid — the
