@@ -57,9 +57,10 @@ Items deliberately not done in the POC. Rough order of value.
   (user-accepted behaviour).
 - ~~Levels are cosmetic constants (7 everywhere).~~ **Superseded:** levels are a real decay
   number now (fresh start 7, one lost per sideways spread step, level 1 spreads nothing) and
-  drive the ~6-block bounded fan and the "water runs down a slope" behaviour. They are still
-  *render*-cosmetic (a cell always draws full height, so "flow depth" is not simulated — a
-  flooded cave reads as full water, not a graded slope).
+  drive the ~6-block bounded fan and the "water runs down a slope" behaviour. They render
+  as surface height now: a resting flow cell draws at `wlevel / 8` (source and stream
+  cells draw full), so a flooded cave reads as a graded slope wherever the flow has
+  decayed (see the resolved "Distinguish flow water" item above).
 - Sideways spread is **isotropic** (a cell flows into all open side neighbours at once). The
   reference engine's bounded directional search ("which way can I fall first" — water seeking out
   a hole in a specific direction) is not modelled: a flow reaching a ledge spills equally to
