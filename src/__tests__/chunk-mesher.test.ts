@@ -67,16 +67,19 @@ describe('chunk-mesher', () => {
     expect(meshChunk(w, 0, 0, 0, NO_LIGHT).opaque).toBeNull();
   });
 
-  it('water: transparent pass only; faces against air, suppressed between water blocks', () => {
+  it('water: transparent pass only; faces against air, suppressed between water blocks; surface at wlevel/8', () => {
     const w = new World();
     const c = w.ensureChunk(0, 0, 0);
     c.blocks[localIndex(8, 8, 8)] = Block.Water;
+    c.wlevel[localIndex(8, 8, 8)] = 7; // the sim invariant: a Water cell always holds wlevel >= 1
     c.blocks[localIndex(9, 8, 8)] = Block.Water;
+    c.wlevel[localIndex(9, 8, 8)] = 7;
     const { opaque, trans } = meshChunk(w, 0, 0, 0, NO_LIGHT);
     expect(opaque).toBeNull();
     expect(trans).not.toBeNull();
     expect(trans!.positions.length / 3).toBe(10 * 4); // 5 + 5 faces, shared face not emitted
     expect(trans!.indices.length).toBe(10 * 6);
+    expect(posBounds(trans!).yMax).toBeCloseTo(8.875); // level 7 -> 7/8 surface (was 9.0 full height)
   });
 
   it('an all-air chunk produces no buffers', () => {
@@ -427,3 +430,122 @@ function makeWorldForMesher(b: Block): World {
   c.blocks[localIndex(8, 8, 8)] = b;
   return w;
 }
+
+describe('chunk-mesher water level mesh', () => {
+  // Set a cell's full water state (block + level + flags) in one call.
+  const water = (c: { blocks: Uint8Array; wlevel: Uint8Array; wsource: Uint8Array; wstream: Uint8Array }, lx: number, ly: number, lz: number, level: number, source = 0, stream = 0) => {
+    const i = localIndex(lx, ly, lz);
+    c.blocks[i] = Block.Water;
+    c.wlevel[i] = level;
+    c.wsource[i] = source;
+    c.wstream[i] = stream;
+  };
+
+  // True when one whole emitted face quad sits on the given world-plane coordinate
+  // (axis 0 = x, 1 = y, 2 = z). A face quad = the 4 unique vertices of one
+  // 6-index triangle pair; a mere corner on the plane does not count.
+  const faceOnPlane = (buf: { positions: Float32Array; indices: Uint32Array }, axis: number, v: number): boolean => {
+    const p = buf.positions;
+    for (let i = 0; i < buf.indices.length; i += 6) {
+      const quad = [buf.indices[i], buf.indices[i + 1], buf.indices[i + 2], buf.indices[i + 3]];
+      if (quad.every((vi) => p[vi * 3 + axis] === v)) return true;
+    }
+    return false;
+  };
+
+  it('a lone level-7 flow cell over solid: top at 0.875, 4 side faces, no bottom', () => {
+    const w = new World();
+    const c = w.ensureChunk(0, 0, 0);
+    c.blocks[localIndex(8, 8, 7)] = Block.Stone; // floor below
+    water(c, 8, 8, 8, 7);
+    const { opaque, trans } = meshChunk(w, 0, 0, 0, NO_LIGHT);
+    expect(opaque!.positions.length / 3).toBe(6 * 4); // stone keeps all 6 faces (water never culls it)
+    const b = posBounds(trans!);
+    expect(b.yMin).toBeCloseTo(8); // side faces start at the cell floor
+    expect(b.yMax).toBeCloseTo(8.875); // top at 7/8
+    expect(trans!.positions.length / 3).toBe(5 * 4); // top + 4 sides; the stone culls the bottom
+  });
+
+  it('level 7 beside level 6: a skirt sits on the shared plane; only the taller emits it', () => {
+    const w = new World();
+    const c = w.ensureChunk(0, 0, 0);
+    c.blocks[localIndex(8, 8, 7)] = Block.Stone;
+    c.blocks[localIndex(9, 8, 7)] = Block.Stone;
+    water(c, 8, 8, 8, 7);
+    water(c, 9, 8, 8, 6);
+    const { trans } = meshChunk(w, 0, 0, 0, NO_LIGHT);
+    expect(trans!.positions.length / 3).toBe(9 * 4); // taller 5 (top, 3 open sides, skirt) + shorter 4 (top, 3 open sides)
+    expect(faceOnPlane(trans!, 0, 9)).toBe(true); // a face on the shared x=9 plane (the skirt); without the rule both cells cull it
+    expect(posBounds(trans!).yMax).toBeCloseTo(8.875);
+  });
+
+  it('equal levels keep the no-face-between-water cull', () => {
+    const w = new World();
+    const c = w.ensureChunk(0, 0, 0);
+    water(c, 8, 8, 8, 7);
+    water(c, 9, 8, 8, 7);
+    const { trans } = meshChunk(w, 0, 0, 0, NO_LIGHT);
+    expect(trans!.positions.length / 3).toBe(10 * 4); // 5 + 5, exactly the full-block behaviour
+    expect(faceOnPlane(trans!, 0, 9)).toBe(false); // no face on the shared plane
+  });
+
+  it('a source beside level-7 flow: the source skirts down to the flow; the flow culls toward the source', () => {
+    const w = new World();
+    const c = w.ensureChunk(0, 0, 0);
+    c.blocks[localIndex(8, 8, 7)] = Block.Stone;
+    c.blocks[localIndex(9, 8, 7)] = Block.Stone;
+    water(c, 8, 8, 8, 7, 1); // source: full height
+    water(c, 9, 8, 8, 7); // flow: 0.875
+    const { trans } = meshChunk(w, 0, 0, 0, NO_LIGHT);
+    expect(trans!.positions.length / 3).toBe(9 * 4); // source 5 (top, 3 open sides, skirt) + flow 4
+    expect(posBounds(trans!).yMax).toBeCloseTo(9); // the source stays full height
+  });
+
+  it('a two-cell stream column: solid full height, no face between, no top on the lower', () => {
+    const w = new World();
+    const c = w.ensureChunk(0, 0, 0);
+    c.blocks[localIndex(8, 6, 8)] = Block.Stone;
+    water(c, 8, 7, 8, 7, 0, 1); // stream (riding column)
+    water(c, 8, 8, 8, 7, 0, 1); // stream
+    const { trans } = meshChunk(w, 0, 0, 0, NO_LIGHT);
+    expect(trans!.positions.length / 3).toBe(9 * 4); // lower 4 (4 sides only) + upper 5 (top + 4 sides)
+    const b = posBounds(trans!);
+    expect(b.yMin).toBeCloseTo(7);
+    expect(b.yMax).toBeCloseTo(9); // full-height column, unbroken
+  });
+
+  it('a flow cell under a stream column keeps its lip (top emitted) and the column keeps its underside', () => {
+    const w = new World();
+    const c = w.ensureChunk(0, 0, 0);
+    c.blocks[localIndex(8, 6, 8)] = Block.Stone;
+    water(c, 8, 7, 8, 7); // resting flow: 0.875
+    water(c, 8, 8, 8, 7, 0, 1); // stream riding above: full
+    const { trans } = meshChunk(w, 0, 0, 0, NO_LIGHT);
+    expect(trans!.positions.length / 3).toBe(11 * 4); // flow 5 (lip + 4 sides) + stream 6 (top, underside, 4 sides)
+    expect(faceOnPlane(trans!, 1, 7.875)).toBe(true); // the lip at y = 7 + 7/8
+    expect(faceOnPlane(trans!, 1, 8)).toBe(true); // the column's underside at y = 8
+  });
+
+  it('water faces carry FACE_SHADE without vertex AO, even with opaque corner occluders', () => {
+    const w = new World();
+    const c = w.ensureChunk(0, 0, 0);
+    water(c, 8, 8, 8, 7);
+    c.blocks[localIndex(9, 9, 8)] = Block.Stone; // F1: would darken a +Y face's x+ corner to 0.8
+    c.blocks[localIndex(8, 9, 9)] = Block.Stone; // F2: would darken its x+/z+ corner to 0.48
+    const { trans } = meshChunk(w, 0, 0, 0, NO_LIGHT);
+    // Face order of the lone water block: +X(0-3) -X(4-7) +Y(8-11) ...; the +Y corners'
+    // red channels sit at 32/36/40/44 and all read the full top shade (no AO multiplier).
+    for (const i of [32, 36, 40, 44]) expect(trans!.colors[i]).toBeCloseTo(1.0);
+  });
+
+  it('per-vertex light still bakes on water faces (the AO drop left the light path untouched)', () => {
+    const w = new World();
+    const c = w.ensureChunk(0, 0, 0);
+    water(c, 8, 8, 8, 7);
+    const lightAt: LightSampler = (x, y, z) => (x === 9 && y === 8 && z === 8 ? [12, 0] : [0, 0]);
+    const { trans } = meshChunk(w, 0, 0, 0, lightAt);
+    const l = trans!.light;
+    expect(Math.max(...l.filter((_, i) => i % 2 === 0))).toBeCloseTo(12 / 15, 6); // the +X face-across cell
+    expect(Math.max(...l.filter((_, i) => i % 2 === 1))).toBe(0);
+  });
+});

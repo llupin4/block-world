@@ -1,4 +1,4 @@
-import { Block, BLOCKS, isOpaque, torchFace, doorOpen, doorAxis, doorSide } from './blocks';
+import { Block, BLOCKS, isOpaque, torchFace, doorOpen, doorAxis, doorSide, waterSurfaceHeight } from './blocks';
 import { World, localIndex, type VoxelBuffer } from './world';
 
 export interface ChunkMesh {
@@ -264,6 +264,54 @@ function emitDoor(
   }
 }
 
+/**
+ * Water: a partial-geometry box in the trans pass (the mirror of pushBox, which owns
+ * the opaque pass). The cell's surface height h is waterSurfaceHeight of its
+ * wlevel/wsource/wstream: source and stream cells draw full, resting flow at wlevel/8.
+ * The top face sits at y+h; side faces scale to c[1]*h (the v-UV scales with them — the
+ * water tile is near-uniform, so the stretch is invisible); the bottom face stays at the
+ * cell floor. Face cull: an opaque neighbour culls; a WATER neighbour culls a side face
+ * only when its surface is >= mine (equal heights keep the no-face-between-water
+ * behaviour, strictly taller emits the SKIRT closing the step), a top face only when I
+ * am full (a partial cell under a full column keeps its lip), and a bottom face only
+ * when the neighbour draws full (coplanar). No vertex AO on water faces (partial
+ * geometry, the pushBox precedent); cornerLight unchanged.
+ */
+function emitWater(
+  buf: Buf,
+  gb: (x: number, y: number, z: number) => number,
+  gl: (x: number, y: number, z: number) => number,
+  wx: number, wy: number, wz: number,
+  h: number,
+  lightAt: LightSampler,
+): void {
+  const tile = BLOCKS[Block.Water].faces[0]; // water uses one tile for all 6 faces
+  const tileCol = tile % 16, tileRow = (tile / 16) | 0;
+  for (let f = 0; f < 6; f++) {
+    const face = FACES[f];
+    const nx = wx + face.dir[0], ny = wy + face.dir[1], nz = wz + face.dir[2];
+    const nB = gb(nx, ny, nz);
+    if (isOpaque(nB)) continue;
+    const nH = nB === Block.Water ? gl(nx, ny, nz) : 0;
+    if (f === 2) { if (nB === Block.Water && h >= 1 - EPS) continue; }     // +Y under a water neighbour
+    else if (f === 3) { if (nH >= 1 - EPS) continue; }                     // -Y over a full water neighbour
+    else if (nB === Block.Water && h <= nH) continue;                      // sides: equal/taller neighbour
+    const [au, av] = face.axes;
+    for (const c of face.corners) {
+      const [bl, sk] = cornerLight(lightAt, wx, wy, wz, face, c);
+      buf.push(
+        wx + c[0], wy + c[1] * h, wz + c[2],
+        FACE_SHADE[f],
+        (tileCol + c[au]) / 16,
+        (15 - tileRow + (av === 1 ? c[av] * h : c[av])) / 16,
+        bl, sk,
+      );
+    }
+    const base = buf.verts - 4;
+    buf.idx.push(base, base + 1, base + 2, base, base + 2, base + 3);
+  }
+}
+
 // Per-corner light: the max over the UP TO 4 outside cells the vertex corner pokes
 // into — the cell across the face, the two face-diagonal cells (one corner step along
 // each face axis), and the body-diagonal cell (both steps) — the same s1/s2/dg
@@ -290,7 +338,7 @@ function cornerLight(l: LightSampler, wx: number, wy: number, wz: number, face: 
 }
 
 /**
- * Pure, stateless: reads chunk data + neighbors via world.getBlock (missing = Air).
+ * Pure, stateless: reads chunk data + neighbors via world.getBlock / world.getWaterHeight (missing = Air / dry).
  * Emission order ly -> lz -> lx; per block the face table order. A pass with zero
  * faces yields null. `toGeometry` (BufferGeometry) lives in main.ts only, so this
  * module stays node-testable.
@@ -317,6 +365,17 @@ export function meshChunk(world: World, cx: number, cy: number, cz: number, ligh
     x >= bx && x < bx + 16 && y >= by && y < by + 16 && z >= bz && z < bz + 16
       ? chunk.meta[localIndex(x - bx, y - by, z - bz)]
       : world.getMeta(x, y, z);
+  // Sibling of gb/gm: the neighbour's water surface height (0 for non-water / missing).
+  // In-chunk fast path reads the chunk's water arrays; only water-water boundary faces
+  // ever pay the cross-chunk world.getWaterHeight (the skirt compare skips the rest).
+  const gl = (x: number, y: number, z: number): number =>
+    x >= bx && x < bx + 16 && y >= by && y < by + 16 && z >= bz && z < bz + 16
+      ? waterSurfaceHeight(
+          chunk.wlevel[localIndex(x - bx, y - by, z - bz)],
+          chunk.wsource[localIndex(x - bx, y - by, z - bz)],
+          chunk.wstream[localIndex(x - bx, y - by, z - bz)],
+        )
+      : world.getWaterHeight(x, y, z);
 
   for (let ly = 0; ly < 16; ly++) {
     for (let lz = 0; lz < 16; lz++) {
@@ -332,6 +391,15 @@ export function meshChunk(world: World, cx: number, cy: number, cz: number, ligh
           continue;
         }
         const sOp = isOpaque(b);
+        if (b === Block.Water) {
+          const hMe = waterSurfaceHeight(
+            chunk.wlevel[localIndex(lx, ly, lz)],
+            chunk.wsource[localIndex(lx, ly, lz)],
+            chunk.wstream[localIndex(lx, ly, lz)],
+          );
+          emitWater(trans, gb, gl, wx, wy, wz, hMe, lightAt);
+          continue;
+        }
         for (let f = 0; f < 6; f++) {
           const face = FACES[f];
           const nx = wx + face.dir[0], ny = wy + face.dir[1], nz = wz + face.dir[2];
