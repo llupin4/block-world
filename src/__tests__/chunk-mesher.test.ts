@@ -477,6 +477,16 @@ describe('chunk-mesher water level mesh', () => {
     expect(trans!.positions.length / 3).toBe(9 * 4); // taller 5 (top, 3 open sides, skirt) + shorter 4 (top, 3 open sides)
     expect(faceOnPlane(trans!, 0, 9)).toBe(true); // a face on the shared x=9 plane (the skirt); without the rule both cells cull it
     expect(posBounds(trans!).yMax).toBeCloseTo(8.875);
+    // The skirt spans the FULL box height (y … y+0.875), not just the strip above the
+    // neighbour's 0.75 surface: the x=9 quad's corners reach both the cell floor and the top.
+    const yOn9: number[] = [];
+    for (let i = 0; i < trans!.indices.length; i += 6) {
+      const quad = [trans!.indices[i], trans!.indices[i + 1], trans!.indices[i + 2], trans!.indices[i + 3]];
+      if (quad.every((vi) => trans!.positions[vi * 3] === 9))
+        for (const vi of quad) yOn9.push(trans!.positions[vi * 3 + 1]);
+    }
+    expect(Math.min(...yOn9)).toBeCloseTo(8);
+    expect(Math.max(...yOn9)).toBeCloseTo(8.875);
   });
 
   it('equal levels keep the no-face-between-water cull', () => {
@@ -547,5 +557,27 @@ describe('chunk-mesher water level mesh', () => {
     const l = trans!.light;
     expect(Math.max(...l.filter((_, i) => i % 2 === 0))).toBeCloseTo(12 / 15, 6); // the +X face-across cell
     expect(Math.max(...l.filter((_, i) => i % 2 === 1))).toBe(0);
+  });
+
+  it('the cross-chunk seam: the skirt compare reads the neighbour chunk via world.getWaterHeight (both directions)', () => {
+    // Chunk (0,0,0) cell (15,8,8) borders chunk (1,0,0) cell (0,8,8) = world (16,8,8):
+    // a cross-chunk water-water face, so the +X/-X cull depends on gl's world.getWaterHeight branch.
+    const seam = (aLevel: number, bLevel: number) => {
+      const w = new World();
+      const c0 = w.ensureChunk(0, 0, 0);
+      const c1 = w.ensureChunk(1, 0, 0);
+      water(c0, 15, 8, 8, aLevel);
+      water(c1, 0, 8, 8, bLevel);
+      return meshChunk(w, 0, 0, 0, NO_LIGHT).trans!; // only chunk (0,0,0) is meshed
+    };
+    // Taller neighbour (level 7 across the seam): A's +X face must CULL — if the cross-chunk
+    // read returned 0 instead of 0.875, A (0.75 > 0) would wrongly emit a skirt.
+    const culled = seam(6, 7);
+    expect(culled.positions.length / 3).toBe(5 * 4); // top, -X, -Y, +Z, -Z only
+    expect(faceOnPlane(culled, 0, 16)).toBe(false); // nothing on the shared x=16 plane
+    // Taller SELF (level 7 here, 6 across): the skirt IS emitted on the shared plane.
+    const skirt = seam(7, 6);
+    expect(skirt.positions.length / 3).toBe(6 * 4); // the 5 above + the +X skirt
+    expect(faceOnPlane(skirt, 0, 16)).toBe(true);
   });
 });

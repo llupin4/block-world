@@ -368,14 +368,12 @@ export function meshChunk(world: World, cx: number, cy: number, cz: number, ligh
   // Sibling of gb/gm: the neighbour's water surface height (0 for non-water / missing).
   // In-chunk fast path reads the chunk's water arrays; only water-water boundary faces
   // ever pay the cross-chunk world.getWaterHeight (the skirt compare skips the rest).
-  const gl = (x: number, y: number, z: number): number =>
-    x >= bx && x < bx + 16 && y >= by && y < by + 16 && z >= bz && z < bz + 16
-      ? waterSurfaceHeight(
-          chunk.wlevel[localIndex(x - bx, y - by, z - bz)],
-          chunk.wsource[localIndex(x - bx, y - by, z - bz)],
-          chunk.wstream[localIndex(x - bx, y - by, z - bz)],
-        )
-      : world.getWaterHeight(x, y, z);
+  const gl = (x: number, y: number, z: number): number => {
+    const inChunk = x >= bx && x < bx + 16 && y >= by && y < by + 16 && z >= bz && z < bz + 16;
+    if (!inChunk) return world.getWaterHeight(x, y, z);
+    const i = localIndex(x - bx, y - by, z - bz);
+    return waterSurfaceHeight(chunk.wlevel[i], chunk.wsource[i], chunk.wstream[i]);
+  };
 
   for (let ly = 0; ly < 16; ly++) {
     for (let lz = 0; lz < 16; lz++) {
