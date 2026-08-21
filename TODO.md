@@ -4,16 +4,17 @@ Items deliberately not done in the POC. Rough order of value.
 
 ## Water
 
-- **Distinguish flow water from source water visually** (user request, 2026-08-16). The mesher
-  reads only the block type, so a placed spring and the flow it pours out render identically.
-  The state already exists per cell — `wsource` (immortal: placed springs *and* static worldgen
-  water; `wplaced` tells the two apart), `wlevel` (the feed-reached decay level), `wstream`
-  (a stream column that never spreads) in each chunk (`src/world.ts`), written by `WaterSim`.
-  `meshChunk()` already takes the chunk, so it can read those arrays per cell. Ideas, in order of
-  cheapness: lower the surface of non-spring water by a few mm (a spring keeps the full cell
-  height), or a slightly different alpha/colour in the transparent pass, or a subtle animated UV
-  offset on flow quads. Whatever we pick, keep the `nb === b` face cull (no quads between
-  adjacent water) — the distinction must come from height/alpha, not extra faces.
+- ~~Distinguish flow water from source water visually~~ **Resolved (2026-08-20, branch
+  `water-level-mesh`):** the mesher now renders the level field — a resting flow cell's surface
+  sits at `wlevel / 8` (a spring's fan reads as a stepped gradient), while source water (sea,
+  lakes, springs) and stream cells (falling columns, riders) draw full height. A taller water
+  cell emits a skirt face against a lower water neighbour (`emitWater` in `src/chunk-mesher.ts`;
+  heights via `waterSurfaceHeight` in `src/blocks.ts` and `World.getWaterHeight` in
+  `src/world.ts`); equal-height water keeps the no-face-between-water cull, water faces skip
+  vertex AO (partial geometry), and the all-source ocean mesh is geometrically unchanged (the
+  only visual delta: water-face corners read at full shade where opaque land tucks into the
+  corner probes — the no-AO rule). Spec:
+  `docs/superpowers/specs/2026-08-20-water-level-mesh-design.md`.
 - ~~A waterfall flowing into the sea raised the loaded sea surface by one.~~ **Resolved (2026-08-16,
   round 4):** flow over deep water now vanishes instead of spreading sideways, and worldgen water
   is static (only placed water is a spring), so no water body's level ever rises — a falls-to-sea

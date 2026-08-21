@@ -179,8 +179,11 @@ self-correcting within the existing frame budget.
 
 Cost:
 
-- The ocean (all `wsource`, full height) produces a byte-identical mesh to
-  today — zero change for the most common water case.
+- The ocean (all `wsource`, full height) is geometrically identical to
+  today's — same faces, positions, UVs, indices, per-vertex light. The one
+  visual delta is the no-AO rule: a water-face corner that used to be
+  darkened by opaque land tucked into its corner probes now reads at the full
+  `FACE_SHADE` (subtly brighter where water meets high ground).
 - Skirt quads appear only at level steps (a handful per fan edge); top/side
   face counts elsewhere are unchanged.
 - Dropping AO on water faces removes up to 12 `gb` neighbour probes per water

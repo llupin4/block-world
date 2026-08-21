@@ -506,7 +506,7 @@ Expected: PASS — `tsc --noEmit` type-checks clean and the vite build succeeds.
 Run: `npm run dev` and open the local URL (the `?phase` query hook is available for any time of day).
 
 Check:
-1. Spawn near the sea: the ocean surface reads visually unchanged (all source water — full height, no skirts anywhere in the sea).
+1. Spawn near the sea: the ocean surface reads unchanged (all source water — full height, no skirts anywhere in the sea; the only visual delta is water-face corners reading subtly brighter where opaque land tucks into the corner probes — the no-AO rule).
 2. Select water (slot 8) and place a spring on a hillside: its fan reads as a stepped gradient (0.875 → 0.75 → … → 0.125) sloping away from the spring; the spring cell itself is full height with a skirt step down to the flow.
 3. Place a spring high above a basin/ledge so it pours: the falling column reads as a solid full-height column (no horizontal slits), meeting the landing sheet at a clean 1/16 step.
 4. Level changes settle within ~1 s (the slow-clock pulse) and the skirts update as the fan drains/re-derives — no lingering full-height boxes.
