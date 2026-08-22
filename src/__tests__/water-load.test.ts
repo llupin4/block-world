@@ -7,7 +7,7 @@ import { TerrainGen, generateChunkTerrain, TERRAIN_SEED } from '../terrain';
 import { update } from '../streaming';
 import { meshChunk } from '../chunk-mesher';
 
-// Load-path budget: replays main.ts exactly — boot column (0,·,2), then a 10-second
+// Load-path budget: replays main.ts's frame work for the water lineage — boot column (0,·,2), then a 10-second
 // session (600 frames at 60 fps) of streaming.update around the spawn (pcx=0, pcy=2,
 // pcz=2) with the frame loop's work: settle + remesh per rebuilt chunk, the
 // tick-heartbeat water pulse (one pulse of 1000 updates per 30 ticks = 0.5 sim s;
@@ -41,6 +41,10 @@ import { meshChunk } from '../chunk-mesher';
 //   + instant falls (round 6: a fall writes its whole column in one pass instead of
 //     dropping one level per pulse; water at the world floor rests on the void): the
 //     settle pass still processes the same cells, so the count still holds.
+//   + static-source refinement + slow-clock budget 250→1000 (the "placed water is a static
+//     source block" commit, d51ff41): larger pulses drain more of the residual queue per
+//     pulse, so the count rises 9,911 → 10,690 — the 9,911 above (and 12,797) are
+//     budget-250-era measurements.
 //   + tick heartbeat (ADR 0011: the pulse strides the substep tick lattice — every 30th
 //     tick — instead of a wall-clock accumulator): the float accumulator under-pulsed —
 //     19 pulses at f = 30, 61, …, 588 (accumulated 1/60 lands just under 0.5, drifting a
@@ -59,7 +63,7 @@ const POST = 10690; // tick heartbeat (ADR 0011): pulse frames f = 30, 61, …, 
 it('boot + a 10-second streaming session stays within the load-path work budget', () => {
   const w = new World();
   const gen = new TerrainGen(TERRAIN_SEED);
-  for (let cy = 0; cy <= 4; cy++) generateChunkTerrain(w, gen, 0, cy, 2); // main.ts:171
+  for (let cy = 0; cy <= 4; cy++) generateChunkTerrain(w, gen, 0, cy, 2); // main.ts boot: the spawn column
 
   let processes = 0;
   const proto = WaterSim.prototype as unknown as {
@@ -78,16 +82,16 @@ it('boot + a 10-second streaming session stays within the load-path work budget'
   const WATER_STRIDE = 30, WATER_PULSE = 1000; // main.ts tick-stride constants (ADR 0011)
   for (let f = 0; f < 600; f++) { // 10 s at 60 fps
     tick++;
-    const r = update(w, 0, 2, 2); // main.ts:528
+    const r = update(w, 0, 2, 2); // main.ts tickStreaming: the frame's streaming pass
     for (const c of r.rebuilt) {
       const t0 = performance.now();
-      sim.settle(c.cx, c.cy, c.cz); // main.ts:531
+      sim.settle(c.cx, c.cy, c.cz); // main.ts tickStreaming: settle per rebuilt chunk
       settleMs += performance.now() - t0;
       const t1 = performance.now();
-      meshChunk(w, c.cx, c.cy, c.cz); // main.ts:532 (scene side stubbed: pure buffers)
+      meshChunk(w, c.cx, c.cy, c.cz); // main.ts rebuildChunkMesh (scene side stubbed: pure buffers)
       meshMs += performance.now() - t1;
       const ch = w.getChunk(c.cx, c.cy, c.cz);
-      if (ch) ch.dirty = false; // main.ts:225
+      if (ch) ch.dirty = false; // main.ts rebuildChunkMesh: a rebuilt mesh is up to date
     }
     if (tickCrossed(tick - 1, tick, WATER_STRIDE)) {
       sim.tick(WATER_PULSE); // main.ts: the tick-heartbeat pulse (fires at f = 29, 59, …, 599)
