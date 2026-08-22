@@ -92,6 +92,7 @@ describe('tickCrossed — the frame-end water-pulse rule (ADR 0011)', () => {
     expect(tickCrossed(29, 30, 30)).toBe(true); // exact boundary
     expect(tickCrossed(29, 34, 30)).toBe(true); // boundary crossed mid-range — the case a bare `tick % 30` at frame end misses
     expect(tickCrossed(30, 30, 30)).toBe(false); // already past the boundary
+    expect(tickCrossed(30, 31, 30)).toBe(false); // prev is a multiple: the frame just after a pulse frame must not re-pulse (double-pulse guard)
     expect(tickCrossed(31, 35, 30)).toBe(false); // no multiple in (31, 35]
     expect(tickCrossed(29, 95, 30)).toBe(true); // multiple crossings still report one boolean (the ≤6-ticks/frame cap makes this unreachable in practice)
   });
