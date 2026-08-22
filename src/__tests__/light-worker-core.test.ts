@@ -184,6 +184,9 @@ describe('light worker core — boot replay equivalence (identical fields; the w
       expect(Array.from(m!.blight), `blight ${c.cx},${c.cy},${c.cz}`).toEqual(Array.from(c.blight));
       expect(Array.from(m!.skylight), `skylight ${c.cx},${c.cy},${c.cz}`).toEqual(Array.from(c.skylight));
     }
+    // the mirror's chunk set tracks the world 1:1 — both directions (the loop above covers
+    // world→mirror; a stale extra mirror chunk, e.g. a lost unload op, would show up here)
+    expect(state.chunkCount, 'mirror chunk count = world chunk count').toBe(world.count());
     // lineage: pinned per path. The direct replay is a faithful light-load.test.ts replica
     // (the engine's inline regression guard); the worker path carries its own lineage —
     // identical fields, one-time −24,251 pops. The delta is the inline engine's redundant
@@ -192,7 +195,8 @@ describe('light worker core — boot replay equivalence (identical fields; the w
     // face-shell cells and cascades them through the queue — throwaway work the siblings'
     // fresh-load prefill redoes when streaming remeshes them. The mirror correctly holds
     // only the streamed chunks, so it skips the wave; after boot its chunk set tracks the
-    // world 1:1 (every load/unload is mirrored), so the paths evolve identically from there.
+    // world 1:1 (every load/unload is mirrored): the same events drive both from there, and
+    // the one-time boot wave is the only delta this replay can produce.
     expect(direct.stats.pops, 'the inline replay pins the engine lineage').toBe(459_134);
     expect(state.stats.pops, 'the worker-path lineage (the redundant boot wave is skipped)').toBe(434_883);
   }, 60_000);

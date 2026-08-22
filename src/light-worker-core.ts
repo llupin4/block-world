@@ -32,6 +32,9 @@ export class MirrorWorld {
     return this.chunks.get(chunkKey(cx, cy, cz));
   }
 
+  /** The mirror's loaded-chunk count. */
+  get size(): number { return this.chunks.size; }
+
   /** Fresh installs get zeroed light fields; duplicates (the remesh path) refresh blocks/meta in place. */
   load(cx: number, cy: number, cz: number, blocks: Uint8Array, meta: Uint8Array): void {
     const key = chunkKey(cx, cy, cz);
@@ -76,6 +79,11 @@ export class LightWorkerState {
   /** A read accessor for tests. */
   chunk(cx: number, cy: number, cz: number): MirrorChunk | undefined {
     return this.world.getChunk(cx, cy, cz);
+  }
+
+  /** The mirror's loaded-chunk count (the world↔mirror 1:1 guard in the boot-replay test). */
+  get chunkCount(): number {
+    return this.world.size;
   }
 
   get stats(): LightStats {
