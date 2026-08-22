@@ -462,8 +462,10 @@ git commit -m "feat: LightWorkerState — the unmodified LightSim over a chunk-f
 The test re-drives the production boot sequence (the exact replay of
 `light-load.test.ts` — same spawn ring, same streaming loop, same collapsed 100,000-pop
 drains) through BOTH paths: (a) the engine inline on the world (today's main thread) and
-(b) the same ops through the protocol. Identical final fields and identical cumulative
-stats — with the 459,134 lineage pin holding through the worker path.
+(b) the same ops through the protocol. Identical final fields — and pinned per-path
+lineages: the direct replay pins the engine's 459,134 (a faithful light-load.test.ts
+replica), the worker path its own 434,883 (the one-time redundant boot wave the mirror
+skips; see the test's rationale comment).
 
 - [ ] **Step 1: Append the test**
 
@@ -472,8 +474,8 @@ Append to `src/__tests__/light-worker-core.test.ts` (extend the import lines fir
 `../terrain`, `* as streaming` from `../streaming`, and `WaterSim` from `../water`):
 
 ```ts
-describe('light worker core — boot replay equivalence (the 459,134 lineage through the protocol)', () => {
-  it('the same boot sequence driven through the protocol reaches identical fields and the same pop counts', () => {
+describe('light worker core — boot replay equivalence (identical fields; the worker-path lineage)', () => {
+  it('the same boot sequence through the protocol reaches identical fields; the worker-path lineage is the inline lineage minus the one-time boot wave', () => {
     const world = new World();
     const gen = new TerrainGen(TERRAIN_SEED);
     for (let cy = 0; cy <= 4; cy++) generateChunkTerrain(world, gen, 0, cy, 2); // main.ts:239 boot column (0,·,2)
@@ -524,18 +526,24 @@ describe('light worker core — boot replay equivalence (the 459,134 lineage thr
       else state.handle({ t: 'tick', tick: tickN++, budget: 100_000 });
     }
 
-    // equivalence: every chunk's fields and the cumulative stats
+    // equivalence: every chunk's fields — the worker path reaches the identical fixpoint
     for (const c of world.allChunks()) {
       const m = state.chunk(c.cx, c.cy, c.cz);
       expect(m, `the mirror holds chunk ${c.cx},${c.cy},${c.cz}`).toBeDefined();
       expect(Array.from(m!.blight), `blight ${c.cx},${c.cy},${c.cz}`).toEqual(Array.from(c.blight));
       expect(Array.from(m!.skylight), `skylight ${c.cx},${c.cy},${c.cz}`).toEqual(Array.from(c.skylight));
     }
-    // the protocol did not change a single pop: the lineage holds through the worker path
-    expect(state.stats.pops).toBe(459_134);
-    expect(state.stats.pops).toBe(direct.stats.pops);
-    expect(state.stats.seeds).toBe(direct.stats.seeds);
-    expect(state.stats.fieldChanges).toBe(direct.stats.fieldChanges);
+    // lineage: pinned per path. The direct replay is a faithful light-load.test.ts replica
+    // (the engine's inline regression guard); the worker path carries its own lineage —
+    // identical fields, one-time −24,251 pops. The delta is the inline engine's redundant
+    // pre-streaming boot wave: at the boot settleChunk(0,2,2) the real world already holds
+    // all 5 boot-column chunks, so seedSeamNeighbor seeds the two adjacent siblings' 512
+    // face-shell cells and cascades them through the queue — throwaway work the siblings'
+    // fresh-load prefill redoes when streaming remeshes them. The mirror correctly holds
+    // only the streamed chunks, so it skips the wave; after boot its chunk set tracks the
+    // world 1:1 (every load/unload is mirrored), so the paths evolve identically from there.
+    expect(direct.stats.pops, 'the inline replay pins the engine lineage').toBe(459_134);
+    expect(state.stats.pops, 'the worker-path lineage (the redundant boot wave is skipped)').toBe(434_883);
   }, 60_000);
 });
 ```
@@ -939,10 +947,12 @@ the real Worker round-trip in the browser — the only part node cannot reach.
 - [ ] **Step 1: Stationary-spawn parity (the headline check)**
 
 Have the user run `npm run dev`, open the page, and do nothing (no input). In the console,
-watch `__lightDebug` — `queue` drains to 0 in ~15–20 s (459,134 pops at 512/frame ≈ 900
+watch `__lightDebug` — `queue` drains to 0 in ~14–18 s (434,883 pops at 512/frame ≈ 850
 frames). When `queue` is 0 and stable, read `__lightDebug.stats.pops`.
-Expected: **459,134** — exactly the node replay's lineage (same seed, same stationary load
-order; light events are frame-ordered, not time-ordered, so an exact match is expected).
+Expected: **434,883** — exactly the node worker-path lineage (same seed, same stationary
+load order; the production worker skips the inline's one-time redundant boot wave —
+459,134 − 24,251 — so the browser reads the worker-path number, not the inline one).
+Light events are frame-ordered, not time-ordered, so an exact match is expected.
 If it differs, capture the number + `stats` + any console errors and STOP — report the
 discrepancy to the controller (do not "fix" toward the number; the node tests already pin
 the engine, so a mismatch is a transport/round-trip bug to diagnose).
