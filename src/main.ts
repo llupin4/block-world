@@ -11,7 +11,8 @@ import { WaterSim } from './water';
 import { WorldTime, formatClock, tickCrossed } from './time';
 import { sampleSky, createSky } from './sky';
 import { createClouds } from './clouds';
-import { LightSim, LIGHT_AMBIENT, LIGHT_TICK_BUDGET } from './light';
+import { LIGHT_AMBIENT, LIGHT_TICK_BUDGET } from './light';
+import { LightClient } from './light-transport';
 
 // === boot ===
 
@@ -245,10 +246,12 @@ for (let cy = 0; cy <= 4; cy++) generateChunkTerrain(world, gen, 0, cy, 2); // c
 // caves read as already filled.
 const sim = new WaterSim(world);
 
-// Light sim (PROJECT.md §18, src/light.ts): two 0..15 fields streamed with each chunk;
-// drained every substep (near-instant), settled per loaded chunk (like sim), and its
-// `touched` set re-meshes changed chunks at the frame end (the sim.touched contract).
-const lightSim = new LightSim(world);
+// Light sim (PROJECT.md §18, src/light.ts): two 0..15 fields streamed with each chunk.
+// Runs in a web worker (ADR 0012): the unmodified LightSim drains/settles over a mirror of
+// the chunk fields; the replies push the touched chunks' fields back into the world and
+// feed the frame-end re-mesh via `touched` (the sim.touched contract, one reply late).
+const lightSim = new LightClient(world, worldTime);
+window.__lightDebug = lightSim; // debug surface: cumulative pops/seeds/fieldChanges, latest queue, lastTick
 
 // Spawn on MEASURED ground. Plan deviation (recorded): the plan's probe reported (33,41) as a
 // grass shelf at surface y=33, but under the T4-pinned generator that column is a sea-basin
@@ -286,8 +289,9 @@ const chunkObjs = new Map<string, { opaque: THREE.Mesh | null; trans: THREE.Mesh
 // into pendingRebuild and re-meshed CLOSEST-FIRST, up to REBUILD_BUDGET per frame; the rest carry
 // one frame. That is safe because the light is a LOWER BOUND (the frontier relaxes inward) and the
 // water settles converge, so a briefly-stale mesh self-corrects as the pending set drains — the
-// visible (near) chunks are always re-meshed first. The streaming's own 1 load + 1 remesh stay
-// immediate (the worldgen budget, keeps the ring filling).
+// visible (near) chunks are always re-meshed first. The streaming's own 1 load + 1 remesh join
+// this same budgeted set (ADR 0012: their first/fresh mesh waits one frame for the worker's
+// light fields).
 const REBUILD_BUDGET = 3; // light/water-touched chunks re-meshed per frame
 const pendingRebuild = new Set<string>(); // chunk keys awaiting a rebuildChunkMesh (carries across frames)
 
@@ -780,20 +784,21 @@ window.addEventListener(
 // world side (generate new chunks, remove far ones); main.ts does the scene side (rebuild/dispose
 // meshes). The stream is a pure function of the player position, so one call per frame is enough —
 // and it enforces the §9 ≤1 load + ≤1 remesh/frame budget (calling it per substep let the frame
-// clamp multiply the budget by the substep count, up to ~12 chunks/frame). The load+remesh are
-// rebuilt immediately (they're the new world content the player is moving into); the light/water
-// touched are drained through the frame's budgeted re-mesh below (REBUILD_BUDGET).
+// clamp multiply the budget by the substep count, up to ~12 chunks/frame). The loaded/remeshed
+// chunks' first/fresh mesh goes through the frame-end budgeted re-mesh below (REBUILD_BUDGET) —
+// ADR 0012 defers it one frame so the mesh reads the worker's settled light; the light/water
+// touched carry the same way.
 function tickStreaming(): void {
   const r = streaming.update(world, chunkOf(player.pos.x), chunkOf(player.pos.z), chunkOf(player.pos.y));
   for (const c of r.unloaded) {
     removeChunkMesh(c.cx, c.cy, c.cz);
-    lightSim.onChunkUnloaded(c.cx, c.cy, c.cz); // cells lit through the removed chunk darken
+    lightSim.unload(c.cx, c.cy, c.cz); // the worker re-seeds the surviving seams (the darkness wave)
     pendingRebuild.delete(chunkKey(c.cx, c.cy, c.cz)); // don't re-mesh a chunk we just unloaded
   }
   for (const c of r.rebuilt) {
     sim.settle(c.cx, c.cy, c.cz); // POC form of worldgen-fluid settling: settle BEFORE meshing so the new chunk's mesh already shows flooded caves. The settled flag makes re-settling a re-meshed chunk a no-op. settle() never clears sim.touched: cross-seam marks from any settle this frame survive here and to the end-of-frame drain below, which re-meshes them.
-    lightSim.settleChunk(c.cx, c.cy, c.cz);
-    rebuildChunkMesh(c.cx, c.cy, c.cz);
+    lightSim.load(c.cx, c.cy, c.cz); // the worker settles it; the fields land with the tick reply
+    pendingRebuild.add(chunkKey(c.cx, c.cy, c.cz)); // ADR 0012: first/fresh mesh deferred to the frame-end budgeted path, after the settle fields have arrived — fully lit on first appearance (was an immediate rebuildChunkMesh with still-zero light)
   }
 }
 
@@ -847,7 +852,7 @@ function frame(now: number): void {
     if (player.pos.y < WORLD_Y_MIN) player.place(SPAWN); // fell out of the world (open cave / dug-away floor)
   }
   tickStreaming(); // ONCE per frame (was inside the substep loop, where the frame-time clamp multiplied the streaming budget by the substep count, up to ~12 chunks/frame)
-  lightSim.tick(LIGHT_TICK_BUDGET); // light drain ONCE per frame (was per substep: budget × up to 6 catch-up substeps = ~15k pops/frame); idle cost ~0 (an empty queue is a no-op)
+  lightSim.tick(LIGHT_TICK_BUDGET); // the worker drains once per frame (ADR 0012) — off the renderer's critical path; idle cost ~0 (an empty queue is a no-op)
   if (tickCrossed(tickBefore, worldTime.tick, WATER_STRIDE)) sim.tick(WATER_PULSE); // water on the tick heartbeat (ADR 0011): one pulse per 30 substeps = 0.5 sim s (was a wall-clock accumulator); settles are event-driven and stay snappy
   // Merge this frame's water + light touched chunks into the pending re-mesh set (both sims keep
   // their exact sim.touched contract: consumed and cleared exactly once per frame here).

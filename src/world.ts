@@ -23,12 +23,12 @@ export interface Chunk {
   wsource: Uint8Array; // 0/1 per cell: this cell is a source body — the worldgen sea/lake (settle re-seeds it), the player's placed water, or water regenerated within a placed body. Flow is never adopted into a source body (a body's level never rises and no flow can become an immortal source): sources are immortal, their level never rises or decays and they re-derive to themselves
   wplaced: Uint8Array; // 0/1 per source cell: a PLACED source (spring) — created by the player placing water, or regenerated within a placed body. A placed source is a static block: it never falls, pours no column through itself, emits only a side halo into air, and is the only water the player can break (breaking it is how you stop its flow). 0 = worldgen water settle re-seeded as a source (the sea): it stands, falls and pours where its support goes, but never emits, grows or feeds flow — the sea is not a spring
   wstream: Uint8Array; // 0/1 per flow cell: RIDING support (below is water over solid / another column / the void base) vs RESTING on its own (over solid or the void). Riding cells spread nothing — a waterfall column cannot climb a pool, fill a basin or raise the sea; a rider stays a rider only while alive flow holds it (water above, a spring or an active column alongside) — when nothing alive holds it the cell re-derives as resting water on its next pass, so a frozen column can never outlive its source
-  blight: Uint8Array;   // block light level per cell, 0..15 (torch emission propagated); owned by src/light.ts
-  skylight: Uint8Array; // sky light level per cell, 0..15 (open-to-sky exposure propagated); owned by src/light.ts
-  colSum: Uint8Array;   // 256: per (lx,lz) column, capped-at-15 sum of light opacities over the chunk's own 16 cells (skyEmit's per-chunk cache; localIndex(lx, 0, lz) indexing)
+  blight: Uint8Array;   // block light level per cell, 0..15 (torch emission propagated); owned by src/light.ts — in production the light worker's mirror is the live copy, refreshed into these arrays from the worker's replies before the mesher reads them (ADR 0012)
+  skylight: Uint8Array; // sky light level per cell, 0..15 (open-to-sky exposure propagated); owned by src/light.ts — same: worker-owned in production (ADR 0012)
+  colSum: Uint8Array;   // 256: per (lx,lz) column, capped-at-15 sum of light opacities over the chunk's own 16 cells (skyEmit's per-chunk cache; localIndex(lx, 0, lz) indexing) — worker-internal in production (ADR 0012): the main-thread copy is vestigial, the engine maintains it on the mirror
   dirty: boolean;
   settled: boolean;    // water sim has settled this chunk's worldgen water (makes settle idempotent)
-  lightSettled: boolean; // light sim has settled this chunk's interior (fresh-load full settle done; remeshes only re-seed the seam)
+  lightSettled: boolean; // light sim has settled this chunk's interior (fresh-load full settle done; remeshes only re-seed the seam) — the mirror's flag is live in production (ADR 0012)
   opaqueMesh: VoxelBuffer | null;
   transMesh: VoxelBuffer | null;
 }
