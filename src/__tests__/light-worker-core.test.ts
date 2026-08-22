@@ -1,9 +1,12 @@
 import { describe, it, expect } from 'vitest';
-import { World, chunkKey, localIndex } from '../world';
+import { World, chunkKey, localIndex, chunkOf } from '../world';
 import { Block } from '../blocks';
 import { LightSim } from '../light';
 import { LightWorkerState } from '../light-worker-core';
 import type { LightMsg } from '../light-protocol';
+import { TERRAIN_SEED, TerrainGen, generateChunkTerrain } from '../terrain';
+import * as streaming from '../streaming';
+import { WaterSim } from '../water';
 
 function chunkMsg(world: World, cx: number, cy: number, cz: number, tick: number): LightMsg {
   const c = world.getChunk(cx, cy, cz)!;
@@ -120,4 +123,77 @@ describe('light worker core (the protocol driving an unmodified LightSim over a 
     }
     expect(state.chunk(1, 0, 0)!.blocks[localIndex(1, 8, 8)], 'the duplicate load re-synced the mirror with the changed content').toBe(Block.Torch);
   });
+});
+
+describe('light worker core — boot replay equivalence (identical fields; the worker-path lineage)', () => {
+  it('the same boot sequence through the protocol reaches identical fields; the worker-path lineage is the inline lineage minus the one-time boot wave', () => {
+    const world = new World();
+    const gen = new TerrainGen(TERRAIN_SEED);
+    for (let cy = 0; cy <= 4; cy++) generateChunkTerrain(world, gen, 0, cy, 2); // main.ts:239 boot column (0,·,2)
+    const water = new WaterSim(world); // settled like main.ts for sequence fidelity (light is water-blind)
+    const direct = new LightSim(world); // path (a): the engine inline on the world (today's main thread)
+
+    type Op =
+      | { k: 'load'; cx: number; cy: number; cz: number; blocks: Uint8Array; meta: Uint8Array }
+      | { k: 'unload'; cx: number; cy: number; cz: number }
+      | { k: 'tick' };
+    const ops: Op[] = [];
+    const recordLoad = (cx: number, cy: number, cz: number): void => {
+      const c = world.getChunk(cx, cy, cz)!; // capture the data NOW — a later-unloaded chunk is gone from the world by replay time
+      ops.push({ k: 'load', cx, cy, cz, blocks: c.blocks.slice(), meta: c.meta.slice() });
+    };
+
+    water.settle(0, 2, 2); // main.ts settles the boot chunk before the first ring turn
+    recordLoad(0, 2, 2);
+    direct.settleChunk(0, 2, 2);
+
+    let guard = 0;
+    for (;;) {
+      const r = streaming.update(world, chunkOf(6), chunkOf(46), 2); // main.ts:787 (spawn 6,46, pcy 2)
+      if (r.rebuilt.length === 0 && r.unloaded.length === 0) break;
+      for (const c of r.rebuilt) {
+        water.settle(c.cx, c.cy, c.cz);
+        recordLoad(c.cx, c.cy, c.cz);
+        direct.settleChunk(c.cx, c.cy, c.cz);
+        const ch = world.getChunk(c.cx, c.cy, c.cz);
+        if (ch) ch.dirty = false; // main.ts:317 — rebuildChunkMesh clears dirty
+      }
+      for (const c of r.unloaded) {
+        ops.push({ k: 'unload', cx: c.cx, cy: c.cy, cz: c.cz });
+        direct.onChunkUnloaded(c.cx, c.cy, c.cz);
+      }
+      ops.push({ k: 'tick' });
+      direct.tick(100_000); // the collapsed drain, like light-load.test.ts:35
+      water.tick(100_000);
+      if (++guard > 500) throw new Error('replay did not stabilize in 500 streaming calls');
+    }
+
+    // path (b): the SAME ops through the protocol
+    const state = new LightWorkerState();
+    let tickN = 1;
+    for (const op of ops) {
+      if (op.k === 'load') state.handle({ t: 'load', tick: tickN++, cx: op.cx, cy: op.cy, cz: op.cz, blocks: op.blocks, meta: op.meta });
+      else if (op.k === 'unload') state.handle({ t: 'unload', tick: tickN++, cx: op.cx, cy: op.cy, cz: op.cz });
+      else state.handle({ t: 'tick', tick: tickN++, budget: 100_000 });
+    }
+
+    // equivalence: every chunk's fields — the worker path reaches the identical fixpoint
+    for (const c of world.allChunks()) {
+      const m = state.chunk(c.cx, c.cy, c.cz);
+      expect(m, `the mirror holds chunk ${c.cx},${c.cy},${c.cz}`).toBeDefined();
+      expect(Array.from(m!.blight), `blight ${c.cx},${c.cy},${c.cz}`).toEqual(Array.from(c.blight));
+      expect(Array.from(m!.skylight), `skylight ${c.cx},${c.cy},${c.cz}`).toEqual(Array.from(c.skylight));
+    }
+    // lineage: pinned per path. The direct replay is a faithful light-load.test.ts replica
+    // (the engine's inline regression guard); the worker path carries its own lineage —
+    // identical fields, one-time −24,251 pops. The delta is the inline engine's redundant
+    // pre-streaming boot wave: at the boot settleChunk(0,2,2) the real world already holds
+    // all 5 boot-column chunks, so seedSeamNeighbor seeds the two adjacent siblings' 512
+    // face-shell cells and cascades them through the queue — throwaway work the siblings'
+    // fresh-load prefill redoes when streaming remeshes them. The mirror correctly holds
+    // only the streamed chunks, so it skips the wave; after boot its chunk set tracks the
+    // world 1:1 (every load/unload is mirrored), so the paths evolve identically from there.
+    expect(direct.stats.pops, 'the inline replay pins the engine lineage').toBe(459_134);
+    expect(state.stats.pops, 'the worker-path lineage (the redundant boot wave is skipped)').toBe(434_883);
+  }, 60_000);
 });

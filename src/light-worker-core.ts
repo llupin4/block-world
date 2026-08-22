@@ -2,8 +2,12 @@
 // loaded chunks' fields. Kept node-importable (no Worker/self references) so vitest can
 // drive handle() directly — the Worker entry (src/light-worker.ts) is thin plumbing.
 // Determinism by construction: the engine sees the same event sequence in the same order
-// as the main thread's inline calls (FIFO both ways, one in-flight tick), so the pop
-// sequence — and the 459,134 boot lineage — is preserved (pinned by light-worker-core.test.ts).
+// as the main thread's inline calls (FIFO both ways, one in-flight tick). The boot pop
+// lineage is pinned per path — inline 459,134 (light-load.test.ts), worker path 434,883
+// (light-worker-core.test.ts): the delta is the one-time redundant boot wave the mirror
+// skips (the boot settle seeds the two boot siblings' 512 face shells inline; the mirror
+// holds only the streamed chunks), which the siblings' fresh-load prefill throws away.
+// Fields are byte-identical at quiescence.
 
 import { LightSim, type LightStats } from './light';
 import { CHUNK_SIZE, CHUNK_VOL, chunkKey, chunkOf, localIndex, type World } from './world';
