@@ -2,7 +2,7 @@
 
 - **Status:** Accepted
 - **Last updated:** 2026-08-22
-- **Sources:** the working docs (still on disk until this project merges):
+- **Sources:** the working docs —
   `docs/superpowers/specs/2026-08-22-simulation-clocks-design.md` (spec, committed at
   `4919cd1`) and `docs/superpowers/plans/2026-08-22-simulation-clocks.md` (implementation
   plan, committed at `d466efe`); plus the resolved TODO.md item "World time & simulation
