@@ -275,14 +275,16 @@ describe('light worker core (the protocol driving an unmodified LightSim over a 
     world.setBlock(16, 8, 8, Block.Torch);
     direct.settleChunk(1, 0, 0);
     direct.tick(100_000);
-    direct.settleChunk(1, 0, 0); // a remesh: lightSettled => seam-only
-    direct.tick(100_000);
 
     const state = new LightWorkerState();
     state.handle(chunkMsg(world, 0, 0, 0, 1));
-    state.handle(chunkMsg(world, 1, 0, 0, 2));
+    state.handle(chunkMsg(world, 1, 0, 0, 2)); // initial load: torch A only
     state.handle({ t: 'tick', tick: 3, budget: 100_000 })!;
-    state.handle(chunkMsg(world, 1, 0, 0, 4)); // the duplicate load
+
+    world.setBlock(17, 8, 8, Block.Torch); // content changed between the initial load and the remesh
+    direct.settleChunk(1, 0, 0); // a remesh: lightSettled => seam-only
+    direct.tick(100_000);
+    state.handle(chunkMsg(world, 1, 0, 0, 4)); // the duplicate load carries the new torch
     state.handle({ t: 'tick', tick: 5, budget: 100_000 })!;
 
     expect(state.stats.pops, 'same sequence, same pops').toBe(direct.stats.pops);
@@ -292,6 +294,7 @@ describe('light worker core (the protocol driving an unmodified LightSim over a 
       expect(Array.from(m.blight)).toEqual(Array.from(c.blight));
       expect(Array.from(m.skylight)).toEqual(Array.from(c.skylight));
     }
+    expect(state.chunk(1, 0, 0)!.blocks[localIndex(1, 8, 8)], 'the duplicate load re-synced the mirror with the changed content').toBe(Block.Torch);
   });
 });
 ```
@@ -377,7 +380,7 @@ export class LightWorkerState {
   // stays byte-identical on purpose (its node tests and the 459,134 pin are untouched).
   private readonly sim: LightSim = new LightSim(this.world as unknown as World);
 
-  /** A read accessor for tests and the debug surface. */
+  /** A read accessor for tests. */
   chunk(cx: number, cy: number, cz: number): MirrorChunk | undefined {
     return this.world.getChunk(cx, cy, cz);
   }
