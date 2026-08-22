@@ -2,14 +2,16 @@ import { it, expect } from 'vitest';
 import { World, localIndex } from '../world';
 import { Block } from '../blocks';
 import { WaterSim } from '../water';
+import { tickCrossed } from '../time';
 import { TerrainGen, generateChunkTerrain, TERRAIN_SEED } from '../terrain';
 import { update } from '../streaming';
 import { meshChunk } from '../chunk-mesher';
 
 // Load-path budget: replays main.ts exactly — boot column (0,·,2), then a 10-second
 // session (600 frames at 60 fps) of streaming.update around the spawn (pcx=0, pcy=2,
-// pcz=2) with the frame loop's work: settle + remesh per rebuilt chunk, the slow
-// water clock (one pulse of 1000 updates every 0.5 s), frame-end touched drain.
+// pcz=2) with the frame loop's work: settle + remesh per rebuilt chunk, the
+// tick-heartbeat water pulse (one pulse of 1000 updates per 30 ticks = 0.5 sim s;
+// ADR 0011), frame-end touched drain.
 // Lineage of the process() count on this replay:
 //   old code (per-cell seeding, unguarded spread): 2,463,202 — every world-edge settle
 //     looped: a spread write into missing/out-of-band space is a state no-op, but
@@ -39,6 +41,11 @@ import { meshChunk } from '../chunk-mesher';
 //   + instant falls (round 6: a fall writes its whole column in one pass instead of
 //     dropping one level per pulse; water at the world floor rests on the void): the
 //     settle pass still processes the same cells, so the count still holds.
+//   + tick heartbeat (ADR 0011: the pulse strides the substep tick lattice — every 30th
+//     tick — instead of a wall-clock accumulator): the float accumulator under-pulsed —
+//     19 pulses at f = 30, 61, …, 588 (accumulated 1/60 lands just under 0.5, drifting a
+//     frame later each cycle); the integer tick fires 20 at f = 29, 59, …, 599.
+//     count: 10,690 → 10,690 — the extra 20th pulse lands on an already-empty residual queue and the shifted pulse frames drain the same cells, so the count holds.
 // The pin is the original pre-fix budget floor (2,463,202 / 2 = 1,231,601): it
 // separates the fixed pipeline from the old code and the two-pass-only intermediate.
 // process() is counted via a runtime prototype patch (TS `private` is
@@ -47,6 +54,7 @@ import { meshChunk } from '../chunk-mesher';
 // unchanged by the fix) and the replay ends on a full 5x5x5 ring: 125 chunks, like
 // main.ts at rest.
 const PIN = 1231601; // old code: 2,463,202 (SETTLE_GUARD-saturated edge loop); two-pass-only: 2,463,202; guarded fix measured 358,734
+const POST = 10690; // tick heartbeat (ADR 0011): pulse frames f = 30, 61, …, 588 (float accumulator, 19) → f = 29, 59, …, 599 (integer tick, 20)
 
 it('boot + a 10-second streaming session stays within the load-path work budget', () => {
   const w = new World();
@@ -66,10 +74,10 @@ it('boot + a 10-second streaming session stays within the load-path work budget'
 
   let settleMs = 0, meshMs = 0;
   const tStart = performance.now();
-  let waterAcc = 0;
-  const STEP = 1 / 60, WATER_STEP = 0.5, WATER_PULSE = 1000; // main.ts slow-clock constants
+  let tick = 0; // main.ts substep tick: one per frame at the replay's 60 fps (worldTime.advance increments it); tick - 1 is the frame's tickBefore
+  const WATER_STRIDE = 30, WATER_PULSE = 1000; // main.ts tick-stride constants (ADR 0011)
   for (let f = 0; f < 600; f++) { // 10 s at 60 fps
-    waterAcc += STEP;
+    tick++;
     const r = update(w, 0, 2, 2); // main.ts:528
     for (const c of r.rebuilt) {
       const t0 = performance.now();
@@ -81,9 +89,8 @@ it('boot + a 10-second streaming session stays within the load-path work budget'
       const ch = w.getChunk(c.cx, c.cy, c.cz);
       if (ch) ch.dirty = false; // main.ts:225
     }
-    if (waterAcc >= WATER_STEP) {
-      waterAcc = 0;
-      sim.tick(WATER_PULSE); // main.ts: the 0.5 s slow-clock pulse
+    if (tickCrossed(tick - 1, tick, WATER_STRIDE)) {
+      sim.tick(WATER_PULSE); // main.ts: the tick-heartbeat pulse (fires at f = 29, 59, …, 599)
     }
     const touched = sim.touched; // main.ts frame-end drain
     if (touched.size) {
@@ -106,7 +113,7 @@ it('boot + a 10-second streaming session stays within the load-path work budget'
   console.log('LOAD wall=', wall.toFixed(0), 'ms');
   console.log('LOAD settle=', settleMs.toFixed(0), 'ms');
   console.log('LOAD mesh=', meshMs.toFixed(0), 'ms');
-  console.log('LOAD processes=', processes, '(old code: 2463202; guarded fix: 358734; slow clock: 12797; placed-water split: 9911; PIN', PIN + ')');
+  console.log('LOAD processes=', processes, '(old code: 2463202; guarded fix: 358734; slow clock: 12797; placed-water split: 9911; tick heartbeat:', POST, '; PIN', PIN + ')');
   console.log('LOAD chunks=', w.count());
 
   expect(w.count()).toBe(125); // the replay really walked to the full 5x5x5 ring
