@@ -565,7 +565,7 @@ Expected: 16 files / 164 tests passed; build clean.
 
 ```bash
 git add src/__tests__/light-worker-core.test.ts
-git commit -m "test: boot replay through the protocol — identical fields, the 459,134 lineage holds through the worker path (determinism by construction, pinned)"
+git commit -m "test: boot replay through the protocol — identical fields; worker-path lineage pinned at 434,883 (inline replica 459,134; one-time redundant boot wave skipped by the mirror)"
 ```
 
 ---
