@@ -10,6 +10,13 @@ restructure; their substance now lives in the relevant ADR under `docs/adr/`.
 
 ## Streaming / rendering
 
+- **Offload chunk generation/meshing to workers.** Worldgen (pure seeded noise — no mirror or
+  queue, poolable) and the mesh build (~2–5 ms per chunk, the load path in `main.ts`) both run on
+  the main thread inside the §9 ≤1 load + ≤1 remesh per frame budget. A worldgen worker makes the
+  load path an async two-hop (generate in thread → insert chunk → settle → forward to the light
+  worker) and reworks that budget model; a separate project. Reuse the light-worker project's
+  worker lifecycle, tick-numbered message protocol, and debug-stats pattern. (ADR 0002 — World
+  model & terrain; pattern from the light web-worker offload, ADR 0007's follow-up.)
 - **Adaptive frame budget.** Load/remesh budgets are fixed at 1 chunk per frame (dropped from 2
   after the stutter measurements in PROJECT.md §9 — at 2+2, walking over open ocean walked
   25–138 ms frames). A measured-but-blunt fix: a cheap frame-time governor could raise the
