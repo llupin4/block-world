@@ -163,9 +163,10 @@ touches it, a springless fan dries to the last cell. Two flows that merge share
 one level field — the probe finds the strongest feed and the merged water
 "belongs" to nothing.
 
-**Clock & budget.** An independent slow clock, decoupled from physics and from
-WorldTime: `main.ts` accumulates frame time and calls `sim.tick(1000)` on a
-pulse every 0.5 s (≈2 Hz). Budget: 1000 cell updates per pulse (was 250 before
+**Clock & budget.** A 0.5-s slow clock, now tick-strided per ADR 0011 — every 30th
+`WorldTime.tick` (one 60 Hz substep) drives `sim.tick(1000)`, replacing the original
+independent frame-time accumulator (struck through in Consequences below).
+Budget: 1000 cell updates per pulse (was 250 before
 round 7); the remainder of the queue persists into later pulses. The budget is
 sized so a cut-off body's re-stabilization cascade — the level wave re-deriving
 the disconnected water to air — finishes within a pulse or two: a stopped flow

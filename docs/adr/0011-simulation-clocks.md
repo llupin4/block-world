@@ -2,9 +2,12 @@
 
 - **Status:** Accepted
 - **Last updated:** 2026-08-22
-- **Sources:** (superseded by this ADR; recoverable via `git show 4919cd1:<path>`)
-  - `docs/superpowers/specs/2026-08-22-simulation-clocks-design.md`
-  - `TODO.md` (the resolved "World time & simulation clocks — align the simulation clocks on one tick system" item, originating from ADR 0008 — Sky & day/night)
+- **Sources:** the working docs (still on disk until this project merges):
+  `docs/superpowers/specs/2026-08-22-simulation-clocks-design.md` (spec, committed at
+  `4919cd1`) and `docs/superpowers/plans/2026-08-22-simulation-clocks.md` (implementation
+  plan, committed at `d466efe`); plus the resolved TODO.md item "World time & simulation
+  clocks — align the simulation clocks on one tick system" (originating from ADR 0008 —
+  Sky & day/night).
 
 ## Context
 
@@ -17,10 +20,11 @@ was the exception: its pulse was driven by an independent floating-point dt accu
 `main.ts` (`waterAcc += dt`, a pulse when `waterAcc >= WATER_STEP`, `WATER_STEP = 0.5` s).
 It accumulated the same clamped `dt` as physics, but on its own boundary: the pulse fired
 on accumulated-time crossings, dropped the fractional remainder at every pulse, and its
-phase walked relative to the substep lattice — in the deterministic 10-second replay the
-accumulator fired only **19** pulses (frames 30, 61, …, 588) where the tick lattice has
-**20** (frames 29, 59, …, 599). The light sim has no clock of its own: its queue drains on
-a per-frame budget (`lightSim.tick(LIGHT_TICK_BUDGET)`, once per frame) — a drain budget,
+phase walked relative to the substep lattice (the regular grid of 60 Hz substep positions) —
+in the deterministic 10-second replay the accumulator fired only **19** pulses (frames 30,
+61, …, 588) where the tick lattice has **20** (frames 29, 59, …, 599). The light sim has
+no clock of its own: its queue drains on a per-frame budget (`lightSim.tick(LIGHT_TICK_BUDGET)`,
+once per frame) — a drain budget,
 not a clock (ADR 0007 — Dynamic lighting).
 
 The open follow-up (ADR 0008, Consequences; TODO.md): align the simulation clocks on one
@@ -65,7 +69,8 @@ off-thread light project (below) changes its cadence.
 
 **Determinism.** After this change no simulation system reads the wall clock; the only
 wall-clock input is the rAF timestamp, which enters as clamped `dt`. Identical clamped-`dt`
-sequences ⇒ identical tick sequences ⇒ identical pulse sequences ⇒ identical water state.
+sequences ⇒ identical tick sequences ⇒ identical pulse sequences ⇒ identical water state
+(given a fixed input sequence — placement and player position drive streaming and edits).
 This is the property a server needs to own the simulation in multiplayer, and why the
 off-thread light project will carry tick numbers in its message protocol: `WorldTime.tick`
 is the basis both sides derive from.
@@ -74,12 +79,13 @@ is the basis both sides derive from.
 replay clock was updated from the float accumulator to the same tick crossing (one substep
 per frame in the replay). The pulse frames move from f = 30, 61, …, 588 (19) to
 f = 29, 59, …, 599 (20); the replay's process count holds at **10,690** (the extra 20th
-pulse lands on an already-empty residual queue and the shifted pulse frames drain the same
-cells). The count-neutral heartbeat step is recorded in the test's lineage header, which
-also carries the pre-existing steps — including the 250→1000 pulse-budget step that moved
-the count 9,911 → 10,690 before this change (the 9,911 figure is a budget-250-era
-measurement). The pin (`PIN = 1,231,601` upper bound) is unchanged, and the light boot
-lineage (459,134 pops, ADR 0007) is untouched (drain cadence unchanged).
+pulse lands on an already-empty residual work queue (cells re-marked for later pulses) and
+the shifted pulse frames drain the same cells). The count-neutral heartbeat step is recorded
+in the test's lineage header, which also carries the pre-existing steps — including the
+250→1000 pulse-budget step that moved the count 9,911 → 10,690 before this change (the
+9,911 figure is a budget-250-era measurement). The pin (`PIN = 1,231,601` upper bound) is
+unchanged, and the light boot lineage (459,134 pops, ADR 0007) is untouched (drain cadence
+unchanged).
 
 ## Alternatives considered
 
