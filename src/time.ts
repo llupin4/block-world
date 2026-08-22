@@ -5,6 +5,8 @@
 // 1:1 with `time` via DAY_LENGTH), so the daylight cycle can later be frozen,
 // rescaled, or set independently of the simulation clock. See
 // docs/superpowers/specs/2026-08-19-day-night-clouds-design.md.
+// `tick` is the canonical heartbeat (ADR 0011 — Simulation clocks): one per advance()
+// call = one 60 Hz substep; the water pulse strides on it (every WATER_STRIDE ticks).
 // Pure module: no three.js, no DOM — node-testable.
 
 export const DAY_LENGTH = 240; // seconds for one full day/night cycle (2 min day + 2 min night)
@@ -14,6 +16,8 @@ export class WorldTime {
   time = 0;
   /** Total phase progressed, in cycles. Stored, not derived from `time`, so the cycle can later run independently. */
   private phaseTotal: number;
+  /** The canonical heartbeat (ADR 0011): one tick per advance() call = one 60 Hz substep, independent of dt magnitude. The water pulse strides on it (every WATER_STRIDE ticks). */
+  tick = 0;
 
   /** `startPhase` (default 0 = noon) lets verification/URL hooks (main.ts `?phase=`) reach any time of day without a real-time wait. */
   constructor(startPhase = 0) {
@@ -35,10 +39,11 @@ export class WorldTime {
     return (12 + 24 * this.dayPhase) % 24;
   }
 
-  /** Advance the simulation clock and (by default) the daylight cycle in lockstep. */
+  /** Advance the simulation clock, the daylight cycle (in lockstep), and the tick heartbeat. */
   advance(dt: number): void {
     this.time += dt;
     this.phaseTotal += dt / DAY_LENGTH;
+    this.tick++;
   }
 }
 
@@ -49,4 +54,9 @@ export function formatClock(day: number, hour: number): string {
   const h = Math.floor(hour) % 24;
   const m = Math.floor((hour - h) * 60 + 1e-9);
   return `Day ${day} · ${pad2(h)}:${pad2(m)}`;
+}
+
+/** True iff the tick sequence (prev, now] crossed a multiple of `stride` — the frame-end water-pulse rule (ADR 0011). A frame can run ≤ 6 substeps (dt clamped at 0.1 s), so a bare `now % stride === 0` read once per frame would miss a boundary crossed mid-frame (ticks 29 → 34); this counts the crossing instead. With ≤ 6 < stride ticks per frame, at most one multiple is crossable, so the result drives at most one pulse. */
+export function tickCrossed(prev: number, now: number, stride: number): boolean {
+  return Math.floor(now / stride) > Math.floor(prev / stride);
 }

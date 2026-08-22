@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { WorldTime, formatClock, DAY_LENGTH } from '../time';
+import { WorldTime, formatClock, DAY_LENGTH, tickCrossed } from '../time';
 
 describe('world time', () => {
   it('starts at noon of day 1', () => {
@@ -59,5 +59,40 @@ describe('formatClock', () => {
 
   it('handles minutes by floor, not round', () => {
     expect(formatClock(3, 23.983)).toBe('Day 3 · 23:58');
+  });
+});
+
+describe('tick — the canonical heartbeat (ADR 0011)', () => {
+  it('starts at 0 and counts advances 1:1, independent of dt magnitude', () => {
+    const t = new WorldTime();
+    expect(t.tick).toBe(0);
+    t.advance(1 / 60);
+    expect(t.tick).toBe(1);
+    t.advance(5); // a giant dt is still one substep: tick counts advances, not time
+    expect(t.tick).toBe(2);
+    t.advance(1 / 60);
+    expect(t.tick).toBe(3);
+  });
+
+  it('is deterministic: identical dt sequences give identical tick sequences', () => {
+    const a = new WorldTime();
+    const b = new WorldTime();
+    for (const dt of [1 / 60, 1 / 60, 0.02, 1 / 60, 0.1, 5]) {
+      a.advance(dt);
+      b.advance(dt);
+    }
+    expect(a.tick).toBe(b.tick);
+    expect(a.tick).toBe(6);
+  });
+});
+
+describe('tickCrossed — the frame-end water-pulse rule (ADR 0011)', () => {
+  it('reports a multiple-of-stride crossing inside (prev, now]', () => {
+    expect(tickCrossed(29, 29, 30)).toBe(false); // no ticks ran
+    expect(tickCrossed(29, 30, 30)).toBe(true); // exact boundary
+    expect(tickCrossed(29, 34, 30)).toBe(true); // boundary crossed mid-range — the case a bare `tick % 30` at frame end misses
+    expect(tickCrossed(30, 30, 30)).toBe(false); // already past the boundary
+    expect(tickCrossed(31, 35, 30)).toBe(false); // no multiple in (31, 35]
+    expect(tickCrossed(29, 95, 30)).toBe(true); // multiple crossings still report one boolean (the ≤6-ticks/frame cap makes this unreachable in practice)
   });
 });
