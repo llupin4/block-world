@@ -339,6 +339,9 @@ export class MirrorWorld {
     return this.chunks.get(chunkKey(cx, cy, cz));
   }
 
+  /** The mirror's loaded-chunk count. */
+  get size(): number { return this.chunks.size; }
+
   /** Fresh installs get zeroed light fields; duplicates (the remesh path) refresh blocks/meta in place. */
   load(cx: number, cy: number, cz: number, blocks: Uint8Array, meta: Uint8Array): void {
     const key = chunkKey(cx, cy, cz);
@@ -383,6 +386,11 @@ export class LightWorkerState {
   /** A read accessor for tests. */
   chunk(cx: number, cy: number, cz: number): MirrorChunk | undefined {
     return this.world.getChunk(cx, cy, cz);
+  }
+
+  /** The mirror's loaded-chunk count (the world↔mirror 1:1 guard in the boot-replay test). */
+  get chunkCount(): number {
+    return this.world.size;
   }
 
   get stats(): LightStats {
@@ -533,6 +541,9 @@ describe('light worker core — boot replay equivalence (identical fields; the w
       expect(Array.from(m!.blight), `blight ${c.cx},${c.cy},${c.cz}`).toEqual(Array.from(c.blight));
       expect(Array.from(m!.skylight), `skylight ${c.cx},${c.cy},${c.cz}`).toEqual(Array.from(c.skylight));
     }
+    // the mirror's chunk set tracks the world 1:1 — both directions (the loop above covers
+    // world→mirror; a stale extra mirror chunk, e.g. a lost unload op, would show up here)
+    expect(state.chunkCount, 'mirror chunk count = world chunk count').toBe(world.count());
     // lineage: pinned per path. The direct replay is a faithful light-load.test.ts replica
     // (the engine's inline regression guard); the worker path carries its own lineage —
     // identical fields, one-time −24,251 pops. The delta is the inline engine's redundant
@@ -541,7 +552,8 @@ describe('light worker core — boot replay equivalence (identical fields; the w
     // face-shell cells and cascades them through the queue — throwaway work the siblings'
     // fresh-load prefill redoes when streaming remeshes them. The mirror correctly holds
     // only the streamed chunks, so it skips the wave; after boot its chunk set tracks the
-    // world 1:1 (every load/unload is mirrored), so the paths evolve identically from there.
+    // world 1:1 (every load/unload is mirrored): the same events drive both from there, and
+    // the one-time boot wave is the only delta this replay can produce.
     expect(direct.stats.pops, 'the inline replay pins the engine lineage').toBe(459_134);
     expect(state.stats.pops, 'the worker-path lineage (the redundant boot wave is skipped)').toBe(434_883);
   }, 60_000);
@@ -949,13 +961,17 @@ the real Worker round-trip in the browser — the only part node cannot reach.
 Have the user run `npm run dev`, open the page, and do nothing (no input). In the console,
 watch `__lightDebug` — `queue` drains to 0 in ~14–18 s (434,883 pops at 512/frame ≈ 850
 frames). When `queue` is 0 and stable, read `__lightDebug.stats.pops`.
-Expected: **434,883** — exactly the node worker-path lineage (same seed, same stationary
-load order; the production worker skips the inline's one-time redundant boot wave —
-459,134 − 24,251 — so the browser reads the worker-path number, not the inline one).
-Light events are frame-ordered, not time-ordered, so an exact match is expected.
-If it differs, capture the number + `stats` + any console errors and STOP — report the
-discrepancy to the controller (do not "fix" toward the number; the node tests already pin
-the engine, so a mismatch is a transport/round-trip bug to diagnose).
+Expected: **≈434,883** — the node worker-path lineage (the production worker skips the
+inline's one-time redundant boot wave — 459,134 − 24,251 — so the browser reads the
+worker-path number, not the inline one). An exact match is NOT guaranteed: production's
+2 Hz water pulses (ADR 0011) shift when water placements re-mark chunks dirty, so remesh
+load ops carry block data at slightly different times than the node replay's collapsed
+water drains (the test's canonical-replay convention, the same one light-load's 459,134
+uses). A small deviation (a few percent at most) is EXPECTED — record the exact number in
+the ADR 0012 acceptance entry. If the number is off by more than ~2% (or `queue` never
+reaches a stable 0), capture the number + `stats` + any console errors and STOP — report
+it to the controller (do not "fix" toward the number): that is a transport/round-trip bug
+to diagnose (a lost load op or a double-settle moves the count by thousands).
 
 - [ ] **Step 2: Torch behavior**
 
