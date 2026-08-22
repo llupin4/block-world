@@ -8,7 +8,7 @@ import { meshChunk } from './chunk-mesher';
 import { Player, EYE, type MoveInput } from './player';
 import { raycastVoxel, REACH, type RayHit } from './raycast';
 import { WaterSim } from './water';
-import { WorldTime, formatClock } from './time';
+import { WorldTime, formatClock, tickCrossed } from './time';
 import { sampleSky, createSky } from './sky';
 import { createClouds } from './clouds';
 import { LightSim, LIGHT_AMBIENT, LIGHT_TICK_BUDGET } from './light';
@@ -239,9 +239,10 @@ const gen = new TerrainGen(TERRAIN_SEED);
 for (let cy = 0; cy <= 4; cy++) generateChunkTerrain(world, gen, 0, cy, 2); // chunk column (0,·,2) → world x 0..15, z 32..47 — contains the (T9) spawn (6,46)
 
 // Water sim (PROJECT.md §9, src/water.ts): flow state streams with each chunk; it is
-// settled per chunk as streaming loads them (tickStreaming) and advanced on a slower
-// clock than physics (every 5th frame). The boot-generated spawn column is settled by
-// the first tickStreaming, before the first rendered frame, so caves read as already filled.
+// settled per chunk as streaming loads them (tickStreaming) and advanced on the tick
+// heartbeat (one pulse per WATER_STRIDE substeps; ADR 0011). The boot-generated spawn
+// column is settled by the first tickStreaming, before the first rendered frame, so
+// caves read as already filled.
 const sim = new WaterSim(world);
 
 // Light sim (PROJECT.md §18, src/light.ts): two 0..15 fields streamed with each chunk;
@@ -827,18 +828,18 @@ function setWireframe(on: boolean): void {
 // === loop ===
 
 const STEP = 1 / 60;
-const WATER_STEP = 0.5;   // slow-clock pulse interval (s): water takes one "tick" per pulse — placement and drain visibly take time
+const WATER_STRIDE = 30;  // substep ticks per water pulse (ADR 0011): 30 × (1/60 s) = 0.5 sim s — water takes one "tick" per pulse, so placement and drain visibly take time (was WATER_STEP = 0.5 wall-clock s on a floating accumulator that drifted a frame later each cycle: 19 pulses/10 s instead of 20)
 const WATER_PULSE = 1000; // cell updates budgeted per pulse: big enough that a cut-off body's re-stabilization cascade (level wave + drain) finishes within a pulse or two, so a stopped flow settles in ~1 s instead of crawling for many seconds (and visibly re-expanding before it drains); smaller pulses made that crawl read as "flow that keeps moving"
 
 let last = performance.now();
 let acc = 0;
-let waterAcc = 0;
 
 function frame(now: number): void {
   let dt = (now - last) / 1000;
   last = now;
   if (dt > 0.1) dt = 0.1; // clamp after tab-switch/hitch
   acc += dt;
+  const tickBefore = worldTime.tick; // ADR 0011: the water pulse strides the tick lattice; capture pre-substep tick for the frame-end crossing check
   while (acc >= STEP) {
     acc -= STEP;
     player.update(STEP, readMove());
@@ -847,11 +848,7 @@ function frame(now: number): void {
   }
   tickStreaming(); // ONCE per frame (was inside the substep loop, where the frame-time clamp multiplied the streaming budget by the substep count, up to ~12 chunks/frame)
   lightSim.tick(LIGHT_TICK_BUDGET); // light drain ONCE per frame (was per substep: budget × up to 6 catch-up substeps = ~15k pops/frame); idle cost ~0 (an empty queue is a no-op)
-  waterAcc += dt;
-  if (waterAcc >= WATER_STEP) {
-    waterAcc = 0;
-    sim.tick(WATER_PULSE); // water on a ~2 Hz slow clock (PROJECT.md §9); settles are event-driven and stay snappy
-  }
+  if (tickCrossed(tickBefore, worldTime.tick, WATER_STRIDE)) sim.tick(WATER_PULSE); // water on the tick heartbeat (ADR 0011): one pulse per 30 substeps = 0.5 sim s (was a wall-clock accumulator); settles are event-driven and stay snappy
   // Merge this frame's water + light touched chunks into the pending re-mesh set (both sims keep
   // their exact sim.touched contract: consumed and cleared exactly once per frame here).
   for (const key of sim.touched) pendingRebuild.add(key);
