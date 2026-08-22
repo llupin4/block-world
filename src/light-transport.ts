@@ -57,6 +57,9 @@ export class LightClient implements LightClientState {
     this.worldTime = worldTime;
     this.worker = new Worker(new URL('./light-worker.ts', import.meta.url), { type: 'module' });
     this.worker.onmessage = (e: MessageEvent<LightResult>) => applyLightResult(this, world, e.data);
+    // a crashed worker would otherwise freeze the light updates silently (the scene keeps
+    // running on the last-applied fields) — the console error is the only diagnostic
+    this.worker.onerror = (e) => { console.error('[light-worker] worker crashed — light updates are frozen', e); };
   }
 
   /** main.ts's settleChunk equivalent: clone the chunk's block data and settle it in the worker. */
@@ -71,7 +74,7 @@ export class LightClient implements LightClientState {
     this.worker.postMessage({ t: 'unload', tick: this.worldTime.tick, cx, cy, cz });
   }
 
-  /** main.ts's edit equivalent — the new (block, meta) at (x, y, z), read live from the world (the mirror is stale without it). */
+  /** main.ts's edit equivalent — call AFTER world.setBlock / a door-meta change: the new (block, meta) at (x, y, z), read live from the world (the mirror is stale without it). A pre-write call would silently capture the stale block and desync the mirror. */
   edit(x: number, y: number, z: number): void {
     this.worker.postMessage({ t: 'edit', tick: this.worldTime.tick, x, y, z, block: this.world.getBlock(x, y, z), meta: this.world.getMeta(x, y, z) });
   }

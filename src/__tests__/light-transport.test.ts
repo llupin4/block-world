@@ -27,7 +27,7 @@ describe('applyLightResult (the main-thread side of the worker replies)', () => 
     applyLightResult(state, world, makeResult([{ cx: 0, cy: 0, cz: 0, blight, skylight }], 42));
     expect(Array.from(c.blight)).toEqual(Array.from(blight));
     expect(Array.from(c.skylight)).toEqual(Array.from(skylight));
-    expect(state.touched).toContain(chunkKey(0, 0, 0));
+    expect(state.touched).toEqual(new Set([chunkKey(0, 0, 0)]));
     expect(state.stats).toEqual({ pops: 42, seeds: 1, fieldChanges: 1 });
     expect(state.lastTick).toBe(7);
   });
@@ -44,12 +44,26 @@ describe('applyLightResult (the main-thread side of the worker replies)', () => 
     expect(state.lastTick).toBe(13);
   });
 
-  it('a reply for a chunk unloaded in flight is a guarded no-op', () => {
+  it('a reply mixing a present and an unloaded-in-flight chunk applies the survivor and skips the gone one', () => {
     const world = new World();
     world.ensureChunk(0, 0, 0);
-    world.removeChunk(0, 0, 0);
+    world.ensureChunk(1, 0, 0);
+    world.removeChunk(1, 0, 0); // chunk 1 was unloaded between the reply's send and now
     const state = freshState();
-    applyLightResult(state, world, makeResult([{ cx: 0, cy: 0, cz: 0, blight: new Uint8Array(4096), skylight: new Uint8Array(4096) }], 1));
+    const survivor = { cx: 0, cy: 0, cz: 0, blight: new Uint8Array(4096), skylight: new Uint8Array(4096) };
+    survivor.blight[5] = 7;
+    applyLightResult(state, world, makeResult([survivor, { cx: 1, cy: 0, cz: 0, blight: new Uint8Array(4096), skylight: new Uint8Array(4096) }], 1));
+    expect(state.touched).toEqual(new Set([chunkKey(0, 0, 0)])); // the gone one is not marked
+    expect(world.getChunk(0, 0, 0)!.blight[5]).toBe(7); // the survivor was applied
+  });
+
+  it('an idle reply (empty changed) still advances the bookkeeping', () => {
+    const world = new World();
+    world.ensureChunk(0, 0, 0);
+    const state = freshState();
+    applyLightResult(state, world, makeResult([], 99, 3));
     expect(state.touched.size).toBe(0);
+    expect(state.stats).toEqual({ pops: 99, seeds: 1, fieldChanges: 1 });
+    expect(state.lastTick).toBe(3);
   });
 });
