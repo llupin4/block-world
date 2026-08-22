@@ -69,7 +69,7 @@ export class LightWorkerState {
   // stays byte-identical on purpose (its node tests and the 459,134 pin are untouched).
   private readonly sim: LightSim = new LightSim(this.world as unknown as World);
 
-  /** A read accessor for tests and the debug surface. */
+  /** A read accessor for tests. */
   chunk(cx: number, cy: number, cz: number): MirrorChunk | undefined {
     return this.world.getChunk(cx, cy, cz);
   }
