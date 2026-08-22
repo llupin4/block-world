@@ -17,6 +17,7 @@ recoverable via git history at pre-restructure `main`, `0cf878c`).
 | [0008](0008-sky-day-night.md) | Sky & day/night | `WorldTime`, keyframed sky sampler, dome/stars/sun-moon, world-locked clouds |
 | [0009](0009-special-blocks.md) | Special blocks | per-cell `meta`, torch/door partial geometry, state-dependent solidity |
 | [0010](0010-ui-inventory.md) | UI & inventory | data-only hotbar, scrollable palette, H-toggled help overlay |
+| [0011](0011-simulation-clocks.md) | Simulation clocks | `WorldTime.tick` heartbeat, water pulse on a 30-tick stride, frame-end crossing rule |
 
 ## Conventions
 

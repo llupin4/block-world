@@ -1,7 +1,7 @@
 # 0008. Sky & day/night — a canonical WorldTime advanced in the fixed substep drives a keyframed sky sampler, dome/stars/sun-moon renderer, and a world-locked scrolling cloud layer
 
 - **Status:** Accepted
-- **Last updated:** 2026-08-20
+- **Last updated:** 2026-08-22
 - **Sources:** (superseded by this ADR; recoverable via `git show 0cf878c:<path>`)
   - `docs/superpowers/specs/2026-08-19-day-night-clouds-design.md`
   - `docs/superpowers/plans/2026-08-19-day-night-clouds.md` (incl. the post-execution clouds v2/v3/v4 amendment record)
@@ -65,7 +65,7 @@ A small semi-transparent monospace readout top-left — `Day 2 · 19:41` — a s
 ## Consequences
 
 - The global `worldDim` was a stopgap: ADR 0007 — Dynamic lighting replaced it with real per-block skylight baked into the vertex colour buffer, leaving `worldDim` only as the cloud/sky tint.
-- Open follow-up, tracked in TODO.md: **align the simulation clocks on one tick system.** The water sim keeps its own independent slow clock (`WATER_STEP`/`waterAcc`) while the sky reads `WorldTime`; converging on a single heartbeat that every simulation derives from (water's pulse as one stride; world time, cloud wind, and future weather/lighting as siblings) is worth it for determinism and for future server-authoritative multiplayer, where a shared tick basis is what lets a server own the simulation.
+- ~~Open follow-up: **align the simulation clocks on one tick system.**~~ Resolved 2026-08-22 by **ADR 0011 — Simulation clocks**: `WorldTime.tick` is the canonical heartbeat and the water pulse strides it (every 30th tick). The light drain remains a per-frame budget (ADR 0007); the off-thread light worker will carry tick numbers in its protocol.
 - Performance: O(1) per frame apart from the transition-band gradient redraws; the cloud layer is one draw call.
 
 ## Superseded decisions
