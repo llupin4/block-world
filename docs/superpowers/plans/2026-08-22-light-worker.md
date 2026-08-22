@@ -269,10 +269,10 @@ describe('light worker core (the protocol driving an unmodified LightSim over a 
   it('duplicate load (the remesh path): seam-only re-settle, same pops and fields as the direct engine', () => {
     const world = new World();
     world.ensureChunk(0, 0, 0);
+    const direct = new LightSim(world);
+    direct.settleChunk(0, 0, 0); // same sequence as the worker: chunk 0 settles while chunk 1 is absent
     world.ensureChunk(1, 0, 0);
     world.setBlock(16, 8, 8, Block.Torch);
-    const direct = new LightSim(world);
-    direct.settleChunk(0, 0, 0);
     direct.settleChunk(1, 0, 0);
     direct.tick(100_000);
     direct.settleChunk(1, 0, 0); // a remesh: lightSettled => seam-only
@@ -400,6 +400,11 @@ export class LightWorkerState {
         return null;
       }
       case 'edit': {
+        // main.ts only edits loaded chunks (raycast hit): a message for a chunk absent from the
+        // mirror is a TRUE no-op. (Unguarded, the engine's edit() would still seed 7 phantom
+        // cells — seed() counts unconditionally — so the worker guards instead of replaying
+        // impossible work.)
+        if (!this.world.getChunk(chunkOf(msg.x), chunkOf(msg.y), chunkOf(msg.z))) return null;
         this.world.applyEdit(msg.x, msg.y, msg.z, msg.block, msg.meta);
         this.sim.edit(msg.x, msg.y, msg.z);
         return null;
