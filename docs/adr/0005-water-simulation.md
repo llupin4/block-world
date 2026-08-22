@@ -1,7 +1,7 @@
 # 0005. Water simulation — local re-derivation cellular automaton with static worldgen sources, eternal placed springs, instant whole-column falls, and a 0.5 s slow clock (1000 updates per pulse)
 
 - **Status:** Accepted
-- **Last updated:** 2026-08-20
+- **Last updated:** 2026-08-22
 - **Sources:** (superseded by this ADR; recoverable via `git show 0cf878c:<path>`)
   - `docs/superpowers/specs/2026-08-16-water-simulation-design.md` (original design: data model, tick rules, queue, clock & budget, settle, chunk-boundary & streaming rules)
   - `docs/superpowers/plans/2026-08-16-water-simulation.md` (original implementation plan: data-model and terrain-fix details)
@@ -276,11 +276,11 @@ Rejected options, as recorded:
   equally to every open side. The reference engine's bounded directional search
   ("which way can I fall first" — water seeking out a hole in a specific
   direction) is not modelled. Open follow-up, tracked in TODO.md.
-- The sim clock is independent of `WorldTime` (the canonical 60 Hz clock the
+- ~~The sim clock is independent of `WorldTime` (the canonical 60 Hz clock the
   sky/cloud systems read): water keeps its own `WATER_STEP`/`waterAcc` slow
-  clock in `main.ts`. Open follow-up, tracked in TODO.md: align simulation
-  clocks on one tick system (water's pulse as one stride on a shared tick; worth
-  it for determinism and multiplayer).
+  clock in `main.ts`.~~ Resolved 2026-08-22 by **ADR 0011 — Simulation clocks**:
+  `WorldTime.tick` is the canonical heartbeat and the water pulse strides it
+  (every 30th tick).
 - Performance: the 1000-update / 0.5 s budget keeps a cut-off body settling in
   ~1–2 s. The load path stays cheap: one settle run is capped at 2000 cell
   updates (~5–10 ms), and the two-pass settle took the 60-frame boot replay from
