@@ -625,7 +625,7 @@ describe('applyLightResult (the main-thread side of the worker replies)', () => 
     applyLightResult(state, world, makeResult([{ cx: 0, cy: 0, cz: 0, blight, skylight }], 42));
     expect(Array.from(c.blight)).toEqual(Array.from(blight));
     expect(Array.from(c.skylight)).toEqual(Array.from(skylight));
-    expect(state.touched).toContain(chunkKey(0, 0, 0));
+    expect(state.touched).toEqual(new Set([chunkKey(0, 0, 0)]));
     expect(state.stats).toEqual({ pops: 42, seeds: 1, fieldChanges: 1 });
     expect(state.lastTick).toBe(7);
   });
@@ -642,13 +642,27 @@ describe('applyLightResult (the main-thread side of the worker replies)', () => 
     expect(state.lastTick).toBe(13);
   });
 
-  it('a reply for a chunk unloaded in flight is a guarded no-op', () => {
+  it('a reply mixing a present and an unloaded-in-flight chunk applies the survivor and skips the gone one', () => {
     const world = new World();
     world.ensureChunk(0, 0, 0);
-    world.removeChunk(0, 0, 0);
+    world.ensureChunk(1, 0, 0);
+    world.removeChunk(1, 0, 0); // chunk 1 was unloaded between the reply's send and now
     const state = freshState();
-    applyLightResult(state, world, makeResult([{ cx: 0, cy: 0, cz: 0, blight: new Uint8Array(4096), skylight: new Uint8Array(4096) }], 1));
+    const survivor = { cx: 0, cy: 0, cz: 0, blight: new Uint8Array(4096), skylight: new Uint8Array(4096) };
+    survivor.blight[5] = 7;
+    applyLightResult(state, world, makeResult([survivor, { cx: 1, cy: 0, cz: 0, blight: new Uint8Array(4096), skylight: new Uint8Array(4096) }], 1));
+    expect(state.touched).toEqual(new Set([chunkKey(0, 0, 0)])); // the gone one is not marked
+    expect(world.getChunk(0, 0, 0)!.blight[5]).toBe(7); // the survivor was applied
+  });
+
+  it('an idle reply (empty changed) still advances the bookkeeping', () => {
+    const world = new World();
+    world.ensureChunk(0, 0, 0);
+    const state = freshState();
+    applyLightResult(state, world, makeResult([], 99, 3));
     expect(state.touched.size).toBe(0);
+    expect(state.stats).toEqual({ pops: 99, seeds: 1, fieldChanges: 1 });
+    expect(state.lastTick).toBe(3);
   });
 });
 ```
@@ -722,6 +736,9 @@ export class LightClient implements LightClientState {
     this.worldTime = worldTime;
     this.worker = new Worker(new URL('./light-worker.ts', import.meta.url), { type: 'module' });
     this.worker.onmessage = (e: MessageEvent<LightResult>) => applyLightResult(this, world, e.data);
+    // a crashed worker would otherwise freeze the light updates silently (the scene keeps
+    // running on the last-applied fields) — the console error is the only diagnostic
+    this.worker.onerror = (e) => { console.error('[light-worker] worker crashed — light updates are frozen', e); };
   }
 
   /** main.ts's settleChunk equivalent: clone the chunk's block data and settle it in the worker. */
@@ -736,7 +753,7 @@ export class LightClient implements LightClientState {
     this.worker.postMessage({ t: 'unload', tick: this.worldTime.tick, cx, cy, cz });
   }
 
-  /** main.ts's edit equivalent — the new (block, meta) at (x, y, z), read live from the world (the mirror is stale without it). */
+  /** main.ts's edit equivalent — call AFTER world.setBlock / a door-meta change: the new (block, meta) at (x, y, z), read live from the world (the mirror is stale without it). A pre-write call would silently capture the stale block and desync the mirror. */
   edit(x: number, y: number, z: number): void {
     this.worker.postMessage({ t: 'edit', tick: this.worldTime.tick, x, y, z, block: this.world.getBlock(x, y, z), meta: this.world.getMeta(x, y, z) });
   }
@@ -751,7 +768,7 @@ export class LightClient implements LightClientState {
 - [ ] **Step 4: Run the tests to verify they pass**
 
 Run: `npx vitest run src/__tests__/light-transport.test.ts`
-Expected: PASS (3 tests).
+Expected: PASS (4 tests).
 
 - [ ] **Step 5: Typecheck (the Worker/URL code compiles under the DOM lib)**
 
