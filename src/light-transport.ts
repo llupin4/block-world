@@ -38,7 +38,7 @@ export function applyLightResult(state: LightClientState, world: World, r: Light
 
 declare global {
   interface Window {
-    /** The debug surface: cumulative pops/seeds/fieldChanges, latest queue, lastTick, touched. */
+    /** The debug surface: cumulative pops/seeds/fieldChanges, latest queue, lastTick, touched. Read-only by convention — it is the LIVE LightClient: console calls to its load/unload/edit/tick desync the mirror, and worker.terminate() freezes the light. */
     __lightDebug?: LightClient;
   }
 }

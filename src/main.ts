@@ -294,6 +294,7 @@ const chunkObjs = new Map<string, { opaque: THREE.Mesh | null; trans: THREE.Mesh
 // light fields).
 const REBUILD_BUDGET = 3; // light/water-touched chunks re-meshed per frame
 const pendingRebuild = new Set<string>(); // chunk keys awaiting a rebuildChunkMesh (carries across frames)
+const deferredFirstMesh = new Set<string>(); // streamed-chunk keys whose FIRST/fresh mesh waits one frame for the worker's light fields (ADR 0012: replies are macrotasks — a load-frame drain would mesh from still-zero light) — moved into pendingRebuild at the frame end
 
 /** (dx^2+dz^2) dominates x/z; |cy-pcy| breaks ties — mirrors streaming.score so the nearest chunk re-meshes first. */
 function rebuildScore(c: [number, number, number], pcx: number, pcy: number, pcz: number): number {
@@ -794,11 +795,12 @@ function tickStreaming(): void {
     removeChunkMesh(c.cx, c.cy, c.cz);
     lightSim.unload(c.cx, c.cy, c.cz); // the worker re-seeds the surviving seams (the darkness wave)
     pendingRebuild.delete(chunkKey(c.cx, c.cy, c.cz)); // don't re-mesh a chunk we just unloaded
+    deferredFirstMesh.delete(chunkKey(c.cx, c.cy, c.cz)); // it may still be waiting for its first mesh
   }
   for (const c of r.rebuilt) {
     sim.settle(c.cx, c.cy, c.cz); // POC form of worldgen-fluid settling: settle BEFORE meshing so the new chunk's mesh already shows flooded caves. The settled flag makes re-settling a re-meshed chunk a no-op. settle() never clears sim.touched: cross-seam marks from any settle this frame survive here and to the end-of-frame drain below, which re-meshes them.
     lightSim.load(c.cx, c.cy, c.cz); // the worker settles it; the fields land with the tick reply
-    pendingRebuild.add(chunkKey(c.cx, c.cy, c.cz)); // ADR 0012: first/fresh mesh deferred to the frame-end budgeted path, after the settle fields have arrived — fully lit on first appearance (was an immediate rebuildChunkMesh with still-zero light)
+    deferredFirstMesh.add(chunkKey(c.cx, c.cy, c.cz)); // ADR 0012: the first/fresh mesh waits a guaranteed frame (replies are macrotasks — a load-frame drain would mesh from still-zero light); the frame end moves it into pendingRebuild after the first reply has landed
   }
 }
 
@@ -852,7 +854,7 @@ function frame(now: number): void {
     if (player.pos.y < WORLD_Y_MIN) player.place(SPAWN); // fell out of the world (open cave / dug-away floor)
   }
   tickStreaming(); // ONCE per frame (was inside the substep loop, where the frame-time clamp multiplied the streaming budget by the substep count, up to ~12 chunks/frame)
-  lightSim.tick(LIGHT_TICK_BUDGET); // the worker drains once per frame (ADR 0012) — off the renderer's critical path; idle cost ~0 (an empty queue is a no-op)
+  lightSim.tick(LIGHT_TICK_BUDGET); // the worker drains once per frame (ADR 0012) — off the renderer's critical path; idle cost = one worker round-trip per frame (a small reply object)
   if (tickCrossed(tickBefore, worldTime.tick, WATER_STRIDE)) sim.tick(WATER_PULSE); // water on the tick heartbeat (ADR 0011): one pulse per 30 substeps = 0.5 sim s (was a wall-clock accumulator); settles are event-driven and stay snappy
   // Merge this frame's water + light touched chunks into the pending re-mesh set (both sims keep
   // their exact sim.touched contract: consumed and cleared exactly once per frame here).
@@ -860,6 +862,11 @@ function frame(now: number): void {
   sim.touched.clear();
   for (const key of lightSim.touched) pendingRebuild.add(key);
   lightSim.touched.clear();
+  // First/fresh meshes of this frame's streamed chunks enter pendingRebuild only now — they were
+  // loaded this frame or an earlier one, so their first worker reply has already landed (or the
+  // chunk settled to all-zero light, which the move still meshes, correctly dark).
+  deferredFirstMesh.forEach((key) => pendingRebuild.add(key));
+  deferredFirstMesh.clear();
   // Re-mesh up to REBUILD_BUDGET, closest to the player first; the rest carry to the next frame
   // (their light/water is a self-correcting lower bound, so a briefly-stale mesh is fine).
   if (pendingRebuild.size) {
