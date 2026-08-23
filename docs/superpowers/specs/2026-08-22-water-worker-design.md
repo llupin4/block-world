@@ -14,9 +14,10 @@ mirror, a tick-numbered structured-clone protocol, and a main-thread client
 (`src/light-transport.ts`) that applies replies into the real `Chunk` objects. The water
 sim (ADR 0005 — Water simulation) is the remaining simulation work on the main thread: the
 1,000-cell pulse every 30 ticks (ADR 0011's stride, `WATER_PULSE = 1000`) and the
-per-chunk load settle. Individually small, but the same string-queue churn pattern (the
-water queue is the same array+Set design), and its state feeds the mesher's water surfaces
-exactly as the light fields do — the water analog of ADR 0012's offload.
+per-chunk load settle. Individually small, but the same string-queue churn pattern
+(string-keyed insertion-ordered dedup; the structures differ — water's queue is a bare
+`Set<string>`, light's an array + parallel Set), and its state feeds the mesher's water
+surfaces exactly as the light fields do — the water analog of ADR 0012's offload.
 
 ## Scope
 
@@ -56,9 +57,9 @@ reply — the same one-frame-late pattern as light (frame N's re-mesh consumes t
 tick N−1; `REBUILD_BUDGET` + the water-convergence argument, ADR 0005/0012).
 
 **First-mesh deferral is shared.** ADR 0012 already defers a new chunk's first mesh to the
-frame-end budgeted path; the water's settled `wlevel` arrives with the same reply, so the
-deferred mesh reads water that is *fresher* than today's inline mesh (settle + the first
-pulse drain). No new change.
+frame-end budgeted path; the water's settled `wlevel` arrives with the same reply — equal
+to today's inline mesh (which also settles before meshing), and strictly fresher only when
+a pulse frame lands between the load and the deferred mesh. No new change.
 
 **Determinism.** The engine-level 10,690 lineage (`water-load.test.ts`) is untouched —
 `src/water.ts` stays pin-identical (the settle path gains the fresh-settle `touched` mark,
@@ -101,4 +102,5 @@ identical `wlevel`/`wsource`/`wstream` fields + identical cumulative water stats
 ## Documentation (at its implementation)
 
 ADR 0013 — Water simulation on the sim worker; ADR 0005's Consequences (a worker
-follow-up line, if added there); the ADR README index; the TODO item.
+follow-up line, if added there); the ADR README index; the ADR 0012 follow-up (its
+Consequences "water offload" line — no TODO.md entry exists for it yet).
