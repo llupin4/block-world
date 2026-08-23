@@ -1512,9 +1512,10 @@ Expected: clean build; the staged-file list includes `assets/index.js`,
 - [ ] **Step 4: Branch review**
 
 Run: `git log --oneline main..light-worker && git status --short`
-Expected: **28 commits** (the original "9" was stale — the two-stage review discipline
-added per-task review-fix commits and the controller's `docs:` plan-sync commits; see the
-actual log for the real list), clean working tree. Report the log to the controller.
+Expected: **27 commits at the gate's run** (the original "9" was stale — the two-stage
+review discipline added per-task review-fix commits and the controller's `docs:` plan-sync
+commits; the plan-sync commit recording this expectation brings the branch to 28). Clean
+working tree. Report the log to the controller.
 
 ---
 
