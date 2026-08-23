@@ -1514,8 +1514,8 @@ Expected: clean build; the staged-file list includes `assets/index.js`,
 Run: `git log --oneline main..light-worker && git status --short`
 Expected: **27 commits at the gate's run** (the original "9" was stale — the two-stage
 review discipline added per-task review-fix commits and the controller's `docs:` plan-sync
-commits; the plan-sync commit recording this expectation brings the branch to 28). Clean
-working tree. Report the log to the controller.
+commits; the count grows by one with each plan-sync commit, this one included — report the
+actual log). Clean working tree. Report the log to the controller.
 
 ---
 
@@ -1542,5 +1542,7 @@ git commit -m "docs: remove the superpowers working docs — ephemeral by conven
 - [ ] **Step 2: Verify the branch is merge-ready**
 
 Run: `git status --short && git log --oneline main..light-worker | wc -l`
-Expected: clean tree; **29 commits** (28 + this removal). The branch is ready for
+Expected: clean tree; report the actual commit count (the original "10" undercounted the
+review-fix/plan-sync commits added after the plan was written — every plan-sync commit
+shifts the number, so the log is the source of truth). The branch is ready for
 `finishing-a-development-branch` (merge to main).
