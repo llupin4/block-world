@@ -48,5 +48,4 @@ Open follow-ups from the dynamic-lighting work (ADR 0007 — Dynamic lighting):
 - Light persistence once a world save system exists.
 - Flow-level-dependent water opacity (O by `wlevel`).
 - Cloud shadows (attenuation by the cloud layer — requires the layer to become world state).
-- Web-worker offload of settle/propagation.
 - Per-flow "which way" directional light / colored light.

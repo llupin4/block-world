@@ -110,8 +110,8 @@ unchanged).
 - Water pulse cadence is nominally unchanged (one per 0.5 s — now *simulation* seconds,
   and exactly 20 per 10 s where the float accumulator managed 19); a pulse's exact *frame*
   is anchored to the tick lattice instead of walking with accumulation history.
-- Off-thread light settle/propagation (TODO.md — Sky & lighting) is the next project to
-  consume this heartbeat: its message protocol will carry tick numbers, and a future
-  server owns the tick sequence.
+- Off-thread light settle/propagation consumes this heartbeat — resolved by ADR 0012 —
+  Light simulation on a web worker: its message protocol carries tick numbers, and a
+  future server owns the tick sequence.
 - Performance: unchanged. One `floor` comparison per frame; the pulse's work and cadence
   are as before.
