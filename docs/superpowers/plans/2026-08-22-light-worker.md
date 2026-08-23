@@ -717,7 +717,7 @@ export function applyLightResult(state: LightClientState, world: World, r: Light
 
 declare global {
   interface Window {
-    /** The debug surface: cumulative pops/seeds/fieldChanges, latest queue, lastTick, touched. */
+    /** The debug surface: cumulative pops/seeds/fieldChanges, latest queue, lastTick, touched. Read-only by convention — it is the LIVE LightClient: console calls to its load/unload/edit/tick desync the mirror, and worker.terminate() freezes the light. */
     __lightDebug?: LightClient;
   }
 }
@@ -878,6 +878,7 @@ window.__lightDebug = lightSim; // debug surface: cumulative pops/seeds/fieldCha
 becomes:
 ```ts
     lightSim.unload(c.cx, c.cy, c.cz); // the worker re-seeds the surviving seams (the darkness wave)
+    deferredFirstMesh.delete(chunkKey(c.cx, c.cy, c.cz)); // it may still be waiting for its first mesh
 ```
 
 - [ ] **Step 4: The load site + first-mesh deferral (lines 795-796)**
@@ -889,9 +890,30 @@ becomes:
 becomes:
 ```ts
     lightSim.load(c.cx, c.cy, c.cz); // the worker settles it; the fields land with the tick reply
-    pendingRebuild.add(chunkKey(c.cx, c.cy, c.cz)); // ADR 0012: first/fresh mesh deferred to the frame-end budgeted path, after the settle fields have arrived — fully lit on first appearance (was an immediate rebuildChunkMesh with still-zero light)
+    deferredFirstMesh.add(chunkKey(c.cx, c.cy, c.cz)); // ADR 0012: the first/fresh mesh waits a guaranteed frame (replies are macrotasks — a load-frame drain would mesh from still-zero light); the frame end moves it into pendingRebuild after the first reply has landed
 ```
-(`pendingRebuild` is declared at main.ts:292; `chunkKey` is already imported.)
+(`deferredFirstMesh` is declared next to `pendingRebuild` at main.ts:292 — Step 4b; `chunkKey` is already imported.)
+
+**Step 4b: the `deferredFirstMesh` declaration + frame-end move (the guaranteed one-frame deferral)**
+
+Worker replies are macrotasks that land AFTER `frame()` returns, so a chunk drained in its own
+load frame would mesh from still-zero light (the dark flash the deferral exists to remove — the
+browser acceptance explicitly rejects it). The set holds streamed-chunk keys until the next
+frame, when their first worker reply has landed:
+
+Next to the `pendingRebuild` declaration:
+```ts
+const deferredFirstMesh = new Set<string>(); // streamed-chunk keys whose FIRST/fresh mesh waits one frame for the worker's light fields (ADR 0012: replies are macrotasks — a load-frame drain would mesh from still-zero light) — moved into pendingRebuild at the frame end
+```
+
+In the frame-end section, AFTER `lightSim.touched.clear();` and BEFORE the `// Re-mesh up to REBUILD_BUDGET` block:
+```ts
+  // First/fresh meshes of this frame's streamed chunks enter pendingRebuild only now — they were
+  // loaded this frame or an earlier one, so their first worker reply has already landed (or the
+  // chunk settled to all-zero light, which the move still meshes, correctly dark).
+  deferredFirstMesh.forEach((key) => pendingRebuild.add(key));
+  deferredFirstMesh.clear();
+```
 
 - [ ] **Step 5: The tick site comment (line 850) — the call itself is unchanged**
 
@@ -900,7 +922,7 @@ becomes:
 ```
 becomes:
 ```ts
-  lightSim.tick(LIGHT_TICK_BUDGET); // the worker drains once per frame (ADR 0012) — off the renderer's critical path; idle cost ~0 (an empty queue is a no-op)
+  lightSim.tick(LIGHT_TICK_BUDGET); // the worker drains once per frame (ADR 0012) — off the renderer's critical path; idle cost = one worker round-trip per frame (a small reply object)
 ```
 (The tick stamping happens inside the client via `worldTime` — the call shape is
 deliberately unchanged.)
