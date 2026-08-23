@@ -2,13 +2,17 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Move the light sim's settle/propagation off the main thread — an *unmodified*
+**Goal:** Move the light sim's settle/propagation off the main thread — a pin-identical
 `LightSim` running in a web worker over a mirror of the chunk fields, fed by a
 tick-numbered structured-clone protocol — so the 459,134-pop boot cascade and cave
 propagation churn the renderer's critical path no longer does (the TODO item "Web-worker
 offload of settle/propagation"; ADR 0007's open follow-up).
 
-**Architecture:** `src/light.ts` stays byte-identical (the engine's only world call is
+**Architecture:** `src/light.ts` stays pin-identical — the sole deliberate change is
+`settleChunk` marking a fresh settle `touched` (705c663: prefill writes the fields without
+a pop, so a settle with zero pop-driven changes — an open flat surface, an isolated load —
+never entered a worker reply and the main copy stayed zero: the dark-surface bug; the mark
+adds no pops/fields, both pins preserved) — and the engine's only world call is
 `world.getChunk()`, so a `MirrorWorld` of chunk-shaped objects is a complete stand-in,
 instantiated as `new LightSim(mirror as unknown as World)` — the single localized cast).
 `src/light-worker-core.ts` holds all worker logic (`LightWorkerState.handle(msg)`,
@@ -37,8 +41,9 @@ hence structured clone, not SAB).
 **Pre-change baselines (measured 2026-08-22, commit `10ad45c`):**
 
 - Full suite: **15 files / 158 tests** green.
-- Light boot lineage: **459,134** pops (`src/__tests__/light-load.test.ts`) — untouched by
-  this work (engine byte-identical, drain cadence unchanged); must stay green as-is.
+- Light boot lineage: **459,134** pops (`src/__tests__/light-load.test.ts`) — preserved by
+  this work (drain cadence unchanged; 705c663's touched-mark adds no pops); must stay green
+  as-is.
 - Water boot lineage: **10,690** processes (`src/__tests__/water-load.test.ts`) — untouched
   (the water sim is out of scope).
 - `npm run build` clean. **Known pre-existing deploy breakage this plan fixes:**
@@ -64,7 +69,7 @@ hence structured clone, not SAB).
 
 | File | Responsibility | Change |
 |---|---|---|
-| `src/light.ts` | the light engine | **byte-identical — do not touch** |
+| `src/light.ts` | the light engine | **pin-identical** — sole change: `settleChunk` marks fresh settles `touched` (705c663); no pops/fields |
 | `src/light-protocol.ts` | the message protocol (types only) | **new** |
 | `src/light-worker-core.ts` | worker logic: `MirrorWorld` + `LightWorkerState` (node-importable) | **new** |
 | `src/light-worker.ts` | thin worker entry (`self.onmessage` plumbing) | **new** |
@@ -380,7 +385,8 @@ export class LightWorkerState {
   private readonly world: MirrorWorld = new MirrorWorld();
   // The engine is typed against World; the mirror is a structural stand-in (its getChunk
   // returns the chunk shape the engine reads). The single localized cast — src/light.ts
-  // stays byte-identical on purpose (its node tests and the 459,134 pin are untouched).
+  // stays pin-identical (its node tests and the 459,134 pin preserved; the sole change is
+  // settleChunk's fresh-settle touched mark, 705c663).
   private readonly sim: LightSim = new LightSim(this.world as unknown as World);
 
   /** A read accessor for tests. */
@@ -1189,7 +1195,8 @@ Four structural facts made the offload clean:
 ## Decision
 
 **Approach A — a dedicated light worker on structured-clone messages.** Four new modules
-plus a thin rewiring of `main.ts`; `src/light.ts` stays byte-identical.
+plus a thin rewiring of `main.ts`; `src/light.ts` stays pin-identical (the sole change:
+`settleChunk`'s fresh-settle `touched` mark — 705c663, below).
 
 - **`src/light-worker-core.ts`** (node-importable): `LightWorkerState` owns a
   `MirrorWorld` (`Map<chunkKey, {cx,cy,cz,blocks,meta,blight,skylight,colSum,lightSettled}>`
@@ -1201,9 +1208,13 @@ plus a thin rewiring of `main.ts`; `src/light.ts` stays byte-identical.
   via the mirror's `lightSettled`); `unload` deletes the mirror chunk **then**
   `onChunkUnloaded` (main.ts's exact order); `edit` applies the message's `(block, meta)`
   to the mirror (it is otherwise stale after `world.setBlock`) **then** `LightSim.edit`;
-  `tick` drains `budget` pops and replies with the touched chunks' whole fields
-  (`blight`/`skylight` snapshots — `colSum` is worker-internal and never pushed), the
-  post-drain `queue` size, and the cumulative `stats`.
+`tick` drains `budget` pops and replies with the touched chunks' whole fields
+   (`blight`/`skylight` snapshots — `colSum` is worker-internal and never pushed), the
+   post-drain `queue` size, and the cumulative `stats`. `touched` is the reply's push
+   contract: `pop`/`edit` mark it on field change, and `settleChunk` marks a FRESH settle
+   (prefill writes the fields without a pop — without the mark a changeless settle, e.g.
+   an open flat surface, would never be pushed and the main copy would stay zero: the
+   dark-surface bug, 705c663).
 - **`src/light-worker.ts`**: ~10 lines of `self.onmessage` plumbing; Vite bundles it as
   the worker chunk via `new Worker(new URL(...))` (no `vite.config.ts` change).
 - **`src/light-transport.ts`** (main side): `LightClient(world, worldTime)` spawns the
@@ -1235,13 +1246,16 @@ plus a thin rewiring of `main.ts`; `src/light.ts` stays byte-identical.
 **Determinism — by construction.** Both sides are single-threaded FIFO queues with one
 in-flight `tick`; the worker's engine therefore sees the same event sequence in the same
 order as the main thread's inline calls — same loads (same data, captured at load time),
-edits, unloads, budgets, frame slots — so the pop sequence, and the **459,134 lineage, is
-preserved structurally**. Pinned twice: the node engine suite is byte-identical and
-untouched, and a new boot-replay equivalence test (`light-worker-core.test.ts`) drives
-the production boot sequence through the protocol and asserts identical per-chunk fields
-and identical cumulative stats — including 459,134 pops through the worker path. The
-runtime sanity check is the browser stationary-spawn parity (the `__lightDebug` pops
-reach 459,134 at the drained queue).
+edits, unloads, budgets, frame slots — so the pop sequence is preserved structurally: the
+inline lineage **459,134** (`light-load.test.ts` + the test's direct replay) and the
+worker path its own **434,883** (the one-time redundant boot wave the mirror skips — the
+boot settle seeds the two boot siblings' 512 face shells inline; the siblings' fresh-load
+prefill redoes that work when streaming remeshes them). Pinned: the node engine suite's
+pins are preserved (the engine's sole change is the 705c663 touched-mark — no pops), and a
+boot-replay equivalence test (`light-worker-core.test.ts`) drives the production boot
+sequence through the protocol and asserts identical per-chunk fields + both lineages. The
+runtime sanity check is the browser stationary-spawn parity (the `__lightDebug` pops reach
+≈434,883 at the drained queue — a band, as production water pulses shift remesh timing).
 
 ## Alternatives considered
 
@@ -1263,9 +1277,9 @@ reach 459,134 at the drained queue).
   are small and budgeted), and one mirror / one `load` message is simpler. The
   water-worker design doc re-examines it and lands on one worker for both sims.
 - **Typing the engine against a minimal world view** — rejected: it would touch
-  `src/light.ts`, and "engine byte-identical" was a load-bearing constraint (the node
-  pins stay exactly as they are); the mirror is cast at the single construction site
-  instead.
+  `src/light.ts`, and "engine pin-identical" was a load-bearing constraint (the node pins
+  stay exactly as they are; 705c663's touched-mark keeps them); the mirror is cast at the
+  single construction site instead.
 - **Offloading the mesher too** — out of scope: the worldgen/meshing worker is a separate
   project (TODO.md), a different pattern with a cross-worker data dependency (it needs
   the light fields the light worker owns).
@@ -1290,7 +1304,8 @@ reach 459,134 at the drained queue).
   (blocks/meta + light fields + colSum) ≈ 2MB worst case.
 - The deploy script pins only the entry assets to static names; the worker chunk keeps
   its hashed name (its runtime ref is a same-folder relative `new URL(...)`).
-- The engine-level 459,134 pin is untouched; the water lineage (10,690) is untouched.
+- The engine-level pins are preserved (the engine's sole change is the 705c663 fresh-settle
+  touched mark — no pops/fields); the water lineage (10,690) is untouched.
 - **Follow-ups:** the water offload — `docs/superpowers/specs/2026-08-22-water-worker-design.md`
   (draft; one worker for both sims, pulse pacing stays on main via `tickCrossed`); the
   worldgen/meshing worker (TODO.md — Streaming / rendering).
@@ -1332,7 +1347,7 @@ with:
 
 After the 0011 row (`docs/adr/README.md:20`):
 ```
-| [0012](0012-light-worker.md) | Light simulation on a web worker | unmodified engine over a chunk-field mirror, tick-numbered structured-clone protocol |
+| [0012](0012-light-worker.md) | Light simulation on a web worker | pin-identical engine over a chunk-field mirror, tick-numbered structured-clone protocol |
 ```
 
 - [ ] **Step 5: TODO.md — remove the resolved line (line 44)**
@@ -1431,7 +1446,10 @@ deferred mesh reads water that is *fresher* than today's inline mesh (settle + t
 pulse drain). No new change.
 
 **Determinism.** The engine-level 10,690 lineage (`water-load.test.ts`) is untouched —
-`src/water.ts` stays byte-identical, exactly as `src/light.ts` does. The worker-core
+`src/water.ts` stays byte-identical. (Check when drafting whether water's fresh settle has
+the same no-process direct-write pattern that forced light's 705c663 touched-mark — if
+`WaterSim`'s fresh-settle writes fields without any queue-driven change, the water worker
+needs the same mark or water states would suffer light's dark-surface bug.) The worker-core
 equivalence test gains a water arm: the same boot replay sequence driven through the
 protocol → identical `wlevel`/`wsource`/`wstream` fields + identical cumulative water
 stats; the 10,690 pin is re-verified through the protocol (the same assertion shape as the

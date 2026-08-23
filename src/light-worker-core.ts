@@ -73,7 +73,8 @@ export class LightWorkerState {
   private readonly world: MirrorWorld = new MirrorWorld();
   // The engine is typed against World; the mirror is a structural stand-in (its getChunk
   // returns the chunk shape the engine reads). The single localized cast — src/light.ts
-  // stays byte-identical on purpose (its node tests and the 459,134 pin are untouched).
+  // stays pin-identical (its node tests and the 459,134 pin preserved; the sole change is
+  // settleChunk's fresh-settle touched mark, 705c663 — the reply's push contract).
   private readonly sim: LightSim = new LightSim(this.world as unknown as World);
 
   /** A read accessor for tests. */
