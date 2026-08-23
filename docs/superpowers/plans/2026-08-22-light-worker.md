@@ -1512,9 +1512,9 @@ Expected: clean build; the staged-file list includes `assets/index.js`,
 - [ ] **Step 4: Branch review**
 
 Run: `git log --oneline main..light-worker && git status --short`
-Expected: 9 commits (Tasks 1–6, 8–10: protocol, core, equivalence test, transport,
-worker entry, main.ts rewire, deploy fix, ADR 0012 docs, water draft), clean working
-tree. Report the log to the controller.
+Expected: **28 commits** (the original "9" was stale — the two-stage review discipline
+added per-task review-fix commits and the controller's `docs:` plan-sync commits; see the
+actual log for the real list), clean working tree. Report the log to the controller.
 
 ---
 
@@ -1541,5 +1541,5 @@ git commit -m "docs: remove the superpowers working docs — ephemeral by conven
 - [ ] **Step 2: Verify the branch is merge-ready**
 
 Run: `git status --short && git log --oneline main..light-worker | wc -l`
-Expected: clean tree; **10 commits** (Tasks 1–6, 8–12). The branch is ready for
+Expected: clean tree; **29 commits** (28 + this removal). The branch is ready for
 `finishing-a-development-branch` (merge to main).
