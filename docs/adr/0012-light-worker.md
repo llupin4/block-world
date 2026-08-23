@@ -160,4 +160,8 @@ runtime sanity check is the browser stationary-spawn parity (the `__lightDebug` 
   production's 2 Hz water pulses shift remesh-op timing versus the node replay's collapsed
   drains). First run confirmed lit-on-load after the 705c663 fresh-settle touched-mark fix
   (before it, a chunk settling with zero pop-driven changes — e.g. an open flat surface —
-  was never pushed and stayed dark).
+  was never pushed and stayed dark). First measurement: `stats.pops` = **430,856**,
+  `queue` = 0 (load + a little movement near spawn) — ≈0.9 % under the pin, inside the
+  band: real-time water pacing trails the replay's collapsed water drain (which settles
+  water instantly and generates the full water-driven remesh cascade), and a little
+  movement perturbs the op sequence; the count converges as the water settles.
