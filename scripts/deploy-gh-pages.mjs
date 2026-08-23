@@ -41,21 +41,25 @@ sh('npm run build');
   const dist = join(root, 'dist');
   const assets = join(dist, 'assets');
 
-  // Pin the entry files to static names (vite emits index-<hash>.js / .css for
-  // this single-entry app).
+  // Pin the ENTRY files to static names — only the assets index.html references. Worker
+  // chunks (the light worker, ADR 0012) and any future extra assets keep their hashed
+  // names: the worker ref inside the bundle is a hashed sibling in the same folder, so
+  // renaming it would break the new URL(...) resolution at runtime.
+  const html0 = readFileSync(join(dist, 'index.html'), 'utf8');
+  const entryJs = html0.match(/src="(?:\.\/)?\/?assets\/([^"]+\.js)"/)?.[1];
+  const entryCss = html0.match(/href="(?:\.\/)?\/?assets\/([^"]+\.css)"/)?.[1];
   for (const f of readdirSync(assets)) {
-    if (f.endsWith('.js') && f !== 'index.js') renameSync(join(assets, f), join(assets, 'index.js'));
-    else if (f.endsWith('.css') && f !== 'index.css') renameSync(join(assets, f), join(assets, 'index.css'));
+    if (f === entryJs) renameSync(join(assets, f), join(assets, 'index.js'));
+    else if (f === entryCss) renameSync(join(assets, f), join(assets, 'index.css'));
   }
 
-  // index.html: drop `crossorigin`, and point the entry files at the static
-  // relative paths (works whether vite emitted /assets/ or ./assets/).
-  const htmlPath = join(dist, 'index.html');
-  const html = readFileSync(htmlPath, 'utf8')
+  // index.html: drop `crossorigin`, and point the entry files at the static relative
+  // paths (works whether vite emitted /assets/ or ./assets/).
+  const html = html0
     .replace(/ crossorigin/g, '')
     .replace(/src="(?:\.\/)?\/?assets\/[^"]+\.js"/g, 'src="./assets/index.js"')
     .replace(/href="(?:\.\/)?\/?assets\/[^"]+\.css"/g, 'href="./assets/index.css"');
-  writeFileSync(htmlPath, html);
+  writeFileSync(join(dist, 'index.html'), html);
 }
 
 // 3. Mirror dist/ into gh-pages, commit + push; restore the branch on exit.
