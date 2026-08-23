@@ -309,9 +309,9 @@ material colors no longer change (white).
   once a world save system exists (until then the fields re-derive on chunk
   load exactly like water does); flow-level-dependent water opacity (O by
   `wlevel` — today flat O=2); cloud shadows (attenuation by the cloud layer —
-requires the layer to become world state); ~~web-worker offload of
-   settle/propagation (the PROJECT.md §15 deferral)~~ — resolved by ADR 0012 — Light
-   simulation on a web worker; directional/colored light
+  requires the layer to become world state); ~~web-worker offload of
+  settle/propagation (the PROJECT.md §15 deferral)~~ — resolved by ADR 0012 — Light
+  simulation on a web worker; directional/colored light
   (per-flow "which way").
 - **Performance.** The load-path settle is a small drain, not a full
   re-derive: column prefill + frontier, bounded to `LIGHT_SETTLE_GUARD` inline

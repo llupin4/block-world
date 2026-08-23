@@ -1,4 +1,4 @@
-// The light worker's logic (ADR 0012): an unmodified LightSim running over a mirror of the
+// The light worker's logic (ADR 0012): a pin-identical LightSim running over a mirror of the
 // loaded chunks' fields. Kept node-importable (no Worker/self references) so vitest can
 // drive handle() directly — the Worker entry (src/light-worker.ts) is thin plumbing.
 // Determinism by construction: the engine sees the same event sequence in the same order

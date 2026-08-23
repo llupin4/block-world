@@ -247,7 +247,7 @@ for (let cy = 0; cy <= 4; cy++) generateChunkTerrain(world, gen, 0, cy, 2); // c
 const sim = new WaterSim(world);
 
 // Light sim (PROJECT.md §18, src/light.ts): two 0..15 fields streamed with each chunk.
-// Runs in a web worker (ADR 0012): the unmodified LightSim drains/settles over a mirror of
+// Runs in a web worker (ADR 0012): the pin-identical LightSim drains/settles over a mirror of
 // the chunk fields; the replies push the touched chunks' fields back into the world and
 // feed the frame-end re-mesh via `touched` (the sim.touched contract, one reply late).
 const lightSim = new LightClient(world, worldTime);

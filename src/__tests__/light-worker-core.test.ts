@@ -14,7 +14,7 @@ function chunkMsg(world: World, cx: number, cy: number, cz: number, tick: number
   return { t: 'load', tick, cx, cy, cz, blocks: c.blocks.slice(), meta: c.meta.slice() };
 }
 
-describe('light worker core (the protocol driving an unmodified LightSim over a mirror)', () => {
+describe('light worker core (the protocol driving a pin-identical LightSim over a mirror)', () => {
   it('push content: a torch chunk settles, the reply carries its fields, and the idle reply is empty', () => {
     const world = new World();
     world.ensureChunk(0, 0, 0);

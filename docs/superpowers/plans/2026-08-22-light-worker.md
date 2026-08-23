@@ -191,7 +191,7 @@ function chunkMsg(world: World, cx: number, cy: number, cz: number, tick: number
   return { t: 'load', tick, cx, cy, cz, blocks: c.blocks.slice(), meta: c.meta.slice() };
 }
 
-describe('light worker core (the protocol driving an unmodified LightSim over a mirror)', () => {
+describe('light worker core (the protocol driving a pin-identical LightSim over a mirror)', () => {
   it('push content: a torch chunk settles, the reply carries its fields, and the idle reply is empty', () => {
     const world = new World();
     world.ensureChunk(0, 0, 0);
@@ -314,7 +314,7 @@ Expected: FAIL — `Cannot find module '../light-worker-core'` (import error).
 Create `src/light-worker-core.ts`:
 
 ```ts
-// The light worker's logic (ADR 0012): an unmodified LightSim running over a mirror of the
+// The light worker's logic (ADR 0012): a pin-identical LightSim running over a mirror of the
 // loaded chunks' fields. Kept node-importable (no Worker/self references) so vitest can
 // drive handle() directly — the Worker entry (src/light-worker.ts) is thin plumbing.
 // Determinism by construction: the engine sees the same event sequence in the same order
@@ -868,7 +868,7 @@ const lightSim = new LightSim(world);
 becomes:
 ```ts
 // Light sim (PROJECT.md §18, src/light.ts): two 0..15 fields streamed with each chunk.
-// Runs in a web worker (ADR 0012): the unmodified LightSim drains/settles over a mirror of
+// Runs in a web worker (ADR 0012): the pin-identical LightSim drains/settles over a mirror of
 // the chunk fields; the replies push the touched chunks' fields back into the world and
 // feed the frame-end re-mesh via `touched` (the sim.touched contract, one reply late).
 const lightSim = new LightClient(world, worldTime);
@@ -983,7 +983,7 @@ becomes:
 - [ ] **Step 8: Verify**
 
 Run: `npm run build && npm test`
-Expected: build clean; 17 files / 167 tests passed (the suite is main.ts-agnostic — all green).
+Expected: build clean; 17 files / 169 tests passed (the suite is main.ts-agnostic — all green).
 
 - [ ] **Step 9: Commit**
 
@@ -1154,7 +1154,7 @@ git commit -m "chore(deploy): keep worker chunks under hashed names — pin only
 Create `docs/adr/0012-light-worker.md`:
 
 ````markdown
-# 0012. Light simulation on a web worker — the unmodified engine over a chunk-field mirror, on a tick-numbered structured-clone protocol
+# 0012. Light simulation on a web worker — the pin-identical engine over a chunk-field mirror, on a tick-numbered structured-clone protocol
 
 - **Status:** Accepted
 - **Last updated:** 2026-08-22
@@ -1181,7 +1181,8 @@ in its message protocol*.
 Four structural facts made the offload clean:
 
 - The engine only talks to the world through `world.getChunk()` — a mirror of the chunk
-  fields is a complete stand-in, so `LightSim` runs **unmodified** in the worker.
+  fields is a complete stand-in, so `LightSim` runs in the worker **pin-identical** (its
+  one deliberate change: `settleChunk`'s fresh-settle `touched` mark — see Decision).
 - The only main-thread consumer of the light fields is the mesher (`world.getLight`);
   `colSum`/`lightSettled` are engine-internal — so the worker→main traffic is the
   touched chunks' fields and nothing else.
@@ -1200,9 +1201,9 @@ plus a thin rewiring of `main.ts`; `src/light.ts` stays pin-identical (the sole 
 
 - **`src/light-worker-core.ts`** (node-importable): `LightWorkerState` owns a
   `MirrorWorld` (`Map<chunkKey, {cx,cy,cz,blocks,meta,blight,skylight,colSum,lightSettled}>`
-  answering `getChunk`) and an unmodified `LightSim` — the single localized
+  answering `getChunk`) and a pin-identical `LightSim` — the single localized
   `as unknown as World` cast at the construction site, since the engine is typed against
-  `World` and stays untouched on purpose. `handle(msg)` applies one message and returns
+  `World`. `handle(msg)` applies one message and returns
   the reply (`null` for non-`tick` messages). `load` installs/refreshes the mirror chunk
   then `settleChunk` (fresh = prefill+frontier, duplicate = the seam-only remesh path,
   via the mirror's `lightSettled`); `unload` deletes the mirror chunk **then**
@@ -1264,7 +1265,7 @@ runtime sanity check is the browser stationary-spawn parity (the `__lightDebug` 
   reads directly — zero per-frame field clones. Rejected for now: the clone traffic it
   saves is sub-millisecond at this scale, while it costs a `_headers` (COOP/COEP) file in
   the gh-pages deploy, a `world.ts` refactor touching the mesher's read path, and it
-  breaks "engine unchanged." **Revisit condition: profiling shows structured-clone cost
+  breaks "engine pin-identical." **Revisit condition: profiling shows structured-clone cost
   is real** (e.g., the boot-cascade reply traffic measurably hitches the main thread).
 - **Settle-only offload** (the worker does `settleChunk`; main keeps `tick`) — rejected:
   settle and tick share *one* queue; you cannot split a FIFO across threads without
@@ -1359,12 +1360,12 @@ After the 0011 row (`docs/adr/README.md:20`):
 
 - [ ] **Step 6: Verify + commit**
 
-Run: `npm test` (docs-only change — the suite must stay green; 17 files / 167 tests)
+Run: `npm test` (docs-only change — the suite must stay green; 17 files / 169 tests)
 Expected: PASS.
 
 ```bash
 git add docs/adr/0012-light-worker.md docs/adr/0007-dynamic-lighting.md docs/adr/0011-simulation-clocks.md docs/adr/README.md TODO.md
-git commit -m "docs(adr): 0012 light simulation on a web worker — unmodified engine over a mirror, tick-numbered structured-clone protocol (resolves ADR 0007's worker follow-up and the TODO item; SAB kept as the back-pocket optimization)"
+git commit -m "docs(adr): 0012 light simulation on a web worker — pin-identical engine over a mirror, tick-numbered structured-clone protocol (resolves ADR 0007's worker follow-up and the TODO item; SAB kept as the back-pocket optimization)"
 ```
 
 ---
@@ -1394,7 +1395,7 @@ Create `docs/superpowers/specs/2026-08-22-water-worker-design.md`:
 
 ## Context
 
-ADR 0012 moved the light sim off the main thread: an unmodified engine over a chunk-field
+ADR 0012 moved the light sim off the main thread: a pin-identical engine over a chunk-field
 mirror, a tick-numbered structured-clone protocol, and a main-thread client
 (`src/light-transport.ts`) that applies replies into the real `Chunk` objects. The water
 sim (ADR 0005 — Water simulation) is the remaining simulation work on the main thread: the
@@ -1476,7 +1477,7 @@ follow-up line, if added there); the ADR README index; the TODO item.
 
 - [ ] **Step 2: Verify + commit**
 
-Run: `npm test` (docs-only — 17 files / 167 tests)
+Run: `npm test` (docs-only — 17 files / 169 tests)
 Expected: PASS.
 
 ```bash
@@ -1491,9 +1492,9 @@ git commit -m "docs: water-worker design doc (draft) — one worker for both sim
 - [ ] **Step 1: Full suite**
 
 Run: `npm test`
-Expected: **17 files / 167 tests passed** (15 + 2 new files; 158 + 9 new tests — the 5
-core unit/edge tests + the boot-replay equivalence + the 3 transport tests). Record the
-actual count if it differs.
+Expected: **17 files / 169 tests passed** (15 + 2 new files; 158 + 11 new tests — the 5
+core unit/edge tests + the boot-replay equivalence + the 4 transport tests + the 1
+reply→apply seam test, 705c663). Record the actual count if it differs.
 
 - [ ] **Step 2: Build**
 
