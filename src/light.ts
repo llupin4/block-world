@@ -164,7 +164,7 @@ export class LightSim {
     }
   }
 
-  /** Load-path settle (main.ts calls it for each newly loaded chunk, next to sim.settle): maintains the chunk's colSum (skyEmit reads neighbors' entries), and — on a FRESH load only — settles the chunk via COLUMN PREFILL + FRONTIER SEEDING (prefillAndFrontier) instead of re-deriving all 4096 cells. On a REMESH the interior is already settled and stays converged by the wave, so only the one-cell seam is re-seeded (a neighbor may have loaded/unloaded, changing the boundary light — including sky columns whose upper band just appeared). The `lightSettled` flag mirrors WaterSim's `settled` and makes re-settling a re-meshed chunk cheap. */
+  /** Load-path settle (main.ts calls it for each newly loaded chunk, next to sim.settle): maintains the chunk's colSum (skyEmit reads neighbors' entries), and — on a FRESH load only — settles the chunk via COLUMN PREFILL + FRONTIER SEEDING (prefillAndFrontier) instead of re-deriving all 4096 cells. On a REMESH the interior is already settled and stays converged by the wave, so only the one-cell seam is re-seeded (a neighbor may have loaded/unloaded, changing the boundary light — including sky columns whose upper band just appeared). The `lightSettled` flag mirrors WaterSim's `settled` and makes re-settling a re-meshed chunk cheap. A fresh settle also marks the chunk `touched` (prefill writes the fields without a pop, so a changeless settle would otherwise never reach a consumer — in the worker, its reply). */
   settleChunk(cx: number, cy: number, cz: number): void {
     const c = this.world.getChunk(cx, cy, cz);
     if (!c) return;
@@ -172,6 +172,10 @@ export class LightSim {
     if (!c.lightSettled) {
       this.prefillAndFrontier(c);
       c.lightSettled = true;
+      // prefill writes the fresh fields directly (no pop ran yet): without this mark a chunk that
+      // settles to its column prefill with zero pop-driven changes (an open flat surface, an
+      // isolated load) would never enter a worker reply and the main copy would stay zero — dark.
+      this.touched.add(chunkKey(cx, cy, cz));
     }
     for (const [sx, sy, sz] of N6) this.seedSeamNeighbor(cx, cy, cz, sx, sy, sz);
     this.drain(LIGHT_SETTLE_GUARD);

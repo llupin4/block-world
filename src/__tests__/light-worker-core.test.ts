@@ -3,6 +3,7 @@ import { World, chunkKey, localIndex, chunkOf } from '../world';
 import { Block } from '../blocks';
 import { LightSim } from '../light';
 import { LightWorkerState } from '../light-worker-core';
+import { applyLightResult, type LightClientState } from '../light-transport';
 import type { LightMsg } from '../light-protocol';
 import { TERRAIN_SEED, TerrainGen, generateChunkTerrain } from '../terrain';
 import * as streaming from '../streaming';
@@ -122,6 +123,32 @@ describe('light worker core (the protocol driving an unmodified LightSim over a 
       expect(Array.from(m.skylight)).toEqual(Array.from(c.skylight));
     }
     expect(state.chunk(1, 0, 0)!.blocks[localIndex(1, 8, 8)], 'the duplicate load re-synced the mirror with the changed content').toBe(Block.Torch);
+  });
+});
+
+describe('light worker core — the reply→apply seam (a settled chunk\'s fields reach the main world)', () => {
+  it('a fresh chunk whose settle changes no field via pop is still pushed, and the main copy receives its fields', () => {
+    const world = new World();
+    world.ensureChunk(0, 2, 2);
+    const c = world.getChunk(0, 2, 2)!;
+    for (let i = 0; i < c.blocks.length; i++) c.blocks[i] = Block.Dirt; // flat dirt — the user's acceptance world
+    for (let lx = 0; lx < 16; lx++) for (let lz = 0; lz < 16; lz++) for (let ly = 12; ly < 16; ly++) c.blocks[localIndex(lx, ly, lz)] = Block.Air; // open sky above the surface
+    const state = new LightWorkerState();
+    state.handle(chunkMsg(world, 0, 2, 2, 1)); // prefill writes the column emission directly; in this isolated flat chunk no pop changes a field
+    const r = state.handle({ t: 'tick', tick: 2, budget: 100_000 })!;
+
+    const pushed = r.changed.find((ch) => chunkKey(ch.cx, ch.cy, ch.cz) === chunkKey(0, 2, 2));
+    expect(pushed, 'the settled chunk is in the reply even though its settle changed no field via pop').toBeDefined();
+
+    // the full seam: the reply lands in the MAIN world's copy (the mesher's only light source)
+    const client: LightClientState = { touched: new Set(), stats: { pops: 0, seeds: 0, fieldChanges: 0 }, queue: 0, lastTick: 0 };
+    applyLightResult(client, world, r);
+    const m = state.chunk(0, 2, 2)!;
+    expect(Array.from(c.blight)).toEqual(Array.from(m.blight));
+    expect(Array.from(c.skylight)).toEqual(Array.from(m.skylight));
+    expect(c.skylight[localIndex(8, 15, 8)], 'an open-sky air cell is lit in the main copy').toBe(15);
+    expect(c.skylight[localIndex(8, 11, 8)], 'and the surface block\'s own cell').toBe(15);
+    expect(c.skylight[localIndex(8, 10, 8)], 'a buried cell stays dark').toBe(0);
   });
 });
 
