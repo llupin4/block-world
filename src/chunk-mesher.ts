@@ -175,10 +175,12 @@ function pushBox(
   tiles: [number, number, number, number, number, number],
   hidden: (faceIdx: number) => boolean,
   lightAt: LightSampler,
+  budget: VertBudget,
   wx: number, wy: number, wz: number,
 ): void {
   for (let f = 0; f < 6; f++) {
     if (hidden(f)) continue;
+    if (!budget.takeFace()) return;
     const face = FACES[f];
     const [au, av] = face.axes;
     const tile = tiles[f];
@@ -208,6 +210,7 @@ function emitTorch(
   wx: number, wy: number, wz: number,
   meta: number,
   lightAt: LightSampler,
+  budget: VertBudget,
 ): void {
   const hidden = makeHidden(gb, gm, wx, wy, wz, Block.Torch, meta);
   const face = torchFace(meta);
@@ -218,7 +221,7 @@ function emitTorch(
       [0.18, 0.875, 0.18],
       [TILE_TORCH_STEM, TILE_TORCH_STEM, TILE_TORCH_FLAME, TILE_TORCH_STEM, TILE_TORCH_STEM, TILE_TORCH_STEM],
       hidden,
-      lightAt, wx, wy, wz,
+      lightAt, budget, wx, wy, wz,
     );
     return;
   }
@@ -226,10 +229,10 @@ function emitTorch(
   const tiles: [number, number, number, number, number, number] =
     [TILE_TORCH_STEM, TILE_TORCH_STEM, TILE_TORCH_STEM, TILE_TORCH_STEM, TILE_TORCH_STEM, TILE_TORCH_STEM];
   tiles[TIP_FACE[face]] = TILE_TORCH_FLAME;
-  if (face === 1) pushBox(buf, [wx, wy + 0.41, wz + 0.41], [0.375, 0.18, 0.18], tiles, hidden, lightAt, wx, wy, wz);
-  else if (face === 2) pushBox(buf, [wx + 1 - 0.375, wy + 0.41, wz + 0.41], [0.375, 0.18, 0.18], tiles, hidden, lightAt, wx, wy, wz);
-  else if (face === 3) pushBox(buf, [wx + 0.41, wy + 0.41, wz], [0.18, 0.18, 0.375], tiles, hidden, lightAt, wx, wy, wz);
-  else pushBox(buf, [wx + 0.41, wy + 0.41, wz + 1 - 0.375], [0.18, 0.18, 0.375], tiles, hidden, lightAt, wx, wy, wz);
+  if (face === 1) pushBox(buf, [wx, wy + 0.41, wz + 0.41], [0.375, 0.18, 0.18], tiles, hidden, lightAt, budget, wx, wy, wz);
+  else if (face === 2) pushBox(buf, [wx + 1 - 0.375, wy + 0.41, wz + 0.41], [0.375, 0.18, 0.18], tiles, hidden, lightAt, budget, wx, wy, wz);
+  else if (face === 3) pushBox(buf, [wx + 0.41, wy + 0.41, wz], [0.18, 0.18, 0.375], tiles, hidden, lightAt, budget, wx, wy, wz);
+  else pushBox(buf, [wx + 0.41, wy + 0.41, wz + 1 - 0.375], [0.18, 0.18, 0.375], tiles, hidden, lightAt, budget, wx, wy, wz);
 }
 
 /**
@@ -248,6 +251,7 @@ function emitDoor(
   wx: number, wy: number, wz: number,
   meta: number,
   lightAt: LightSampler,
+  budget: VertBudget,
 ): void {
   // Both halves emit the identical panel, so either door id yields the same geometry.
   const hidden = makeHidden(gb, gm, wx, wy, wz, Block.DoorBottom, meta);
@@ -256,11 +260,11 @@ function emitDoor(
   const tiles: [number, number, number, number, number, number] =
     [TILE_DOOR, TILE_DOOR, TILE_DOOR, TILE_DOOR, TILE_DOOR, TILE_DOOR];
   if (doorOpen(meta)) {
-    pushBox(buf, [wx, wy, wz], xThin ? [1, 1, 0.2] : [0.2, 1, 1], tiles, hidden, lightAt, wx, wy, wz);
+    pushBox(buf, [wx, wy, wz], xThin ? [1, 1, 0.2] : [0.2, 1, 1], tiles, hidden, lightAt, budget, wx, wy, wz);
   } else if (xThin) {
-    pushBox(buf, side === 1 ? [wx + 0.8, wy, wz] : [wx, wy, wz], [0.2, 1, 1], tiles, hidden, lightAt, wx, wy, wz);
+    pushBox(buf, side === 1 ? [wx + 0.8, wy, wz] : [wx, wy, wz], [0.2, 1, 1], tiles, hidden, lightAt, budget, wx, wy, wz);
   } else {
-    pushBox(buf, side === 1 ? [wx, wy, wz + 0.8] : [wx, wy, wz], [1, 1, 0.2], tiles, hidden, lightAt, wx, wy, wz);
+    pushBox(buf, side === 1 ? [wx, wy, wz + 0.8] : [wx, wy, wz], [1, 1, 0.2], tiles, hidden, lightAt, budget, wx, wy, wz);
   }
 }
 
@@ -284,6 +288,7 @@ function emitWater(
   wx: number, wy: number, wz: number,
   h: number,
   lightAt: LightSampler,
+  budget: VertBudget,
 ): void {
   const tile = BLOCKS[Block.Water].faces[0]; // water uses one tile for all 6 faces
   const tileCol = tile % 16, tileRow = (tile / 16) | 0;
@@ -296,6 +301,7 @@ function emitWater(
     if (f === 2) { if (nB === Block.Water && h >= 1 - EPS) continue; }     // +Y under a water neighbour
     else if (f === 3) { if (nH >= 1 - EPS) continue; }                     // -Y over a full water neighbour
     else if (nB === Block.Water && h <= nH) continue;                      // sides: equal/taller neighbour
+    if (!budget.takeFace()) return;
     const [au, av] = face.axes;
     for (const c of face.corners) {
       const [bl, sk] = cornerLight(lightAt, wx, wy, wz, face, c);
@@ -337,19 +343,46 @@ function cornerLight(l: LightSampler, wx: number, wy: number, wz: number, face: 
   return [bl / 15, sk / 15];
 }
 
+/** Chargeable vertex budget shared by both passes: a face (4 verts) is emitted only while it
+ * fits; `Infinity` = unlimited (the default meshChunk path). Truncation is per-face, so a
+ * partial buffer always holds whole faces (the drain discards truncated buffers anyway). */
+class VertBudget {
+  private remaining: number;
+  truncated = false;
+  constructor(max: number) {
+    this.remaining = max;
+  }
+  takeFace(): boolean {
+    if (this.remaining < 4) {
+      this.truncated = true;
+      return false;
+    }
+    this.remaining -= 4;
+    return true;
+  }
+}
+
+export interface MeshResult {
+  mesh: ChunkMesh;
+  complete: boolean;
+}
+
 /**
- * Pure, stateless: reads chunk data + neighbors via world.getBlock / world.getWaterHeight (missing = Air / dry).
- * Emission order ly -> lz -> lx; per block the face table order. A pass with zero
- * faces yields null. `toGeometry` (BufferGeometry) lives in main.ts only, so this
- * module stays node-testable.
+ * Pure, stateless: reads chunk data + neighbors via world.getBlock / world.getWaterHeight
+ * (missing = Air / dry). Emission order ly -> lz -> lx; per block the face table order.
+ * `ly0..ly1` bounds the row range (whole chunk = 0..16); `maxVerts` caps total emitted
+ * vertices across both passes (Infinity = unlimited) — on truncation `complete` is false and
+ * the partial buffers hold whatever whole faces were emitted (callers discard them). A pass
+ * with zero faces yields null. `toGeometry` (BufferGeometry) lives in src/geometry.ts, so
+ * this module stays node-testable.
  */
-const noLight: LightSampler = () => [0, 0]; // zero-light default for callers not yet wired for light (e.g. the perf bench in water-load.test.ts)
-export function meshChunk(world: World, cx: number, cy: number, cz: number, lightAt: LightSampler = noLight): ChunkMesh {
+function meshChunkImpl(world: World, cx: number, cy: number, cz: number, lightAt: LightSampler, ly0: number, ly1: number, maxVerts: number): MeshResult {
   const chunk = world.getChunk(cx, cy, cz);
-  if (!chunk) return { opaque: null, trans: null };
+  if (!chunk) return { mesh: { opaque: null, trans: null }, complete: true };
   const bx = cx * 16, by = cy * 16, bz = cz * 16;
   const opaque = new Buf();
   const trans = new Buf();
+  const budget = new VertBudget(maxVerts);
 
   // Neighbour block read: in-chunk neighbours read this chunk's array directly (no string
   // key / Map lookup); only the ~30% of samples on a chunk boundary pay the cross-chunk
@@ -375,7 +408,8 @@ export function meshChunk(world: World, cx: number, cy: number, cz: number, ligh
     return waterSurfaceHeight(chunk.wlevel[i], chunk.wsource[i], chunk.wstream[i]);
   };
 
-  for (let ly = 0; ly < 16; ly++) {
+  outer:
+  for (let ly = ly0; ly < ly1; ly++) {
     for (let lz = 0; lz < 16; lz++) {
       for (let lx = 0; lx < 16; lx++) {
         const b = chunk.blocks[localIndex(lx, ly, lz)];
@@ -384,8 +418,8 @@ export function meshChunk(world: World, cx: number, cy: number, cz: number, ligh
         const wx = bx + lx, wy = by + ly, wz = bz + lz;
         if (kind !== 'cube') {
           // Special blocks are partial geometry, always in the opaque pass (never trans).
-          if (kind === 'torch') emitTorch(opaque, gb, gm, wx, wy, wz, chunk.meta[localIndex(lx, ly, lz)], lightAt);
-          else emitDoor(opaque, gb, gm, wx, wy, wz, chunk.meta[localIndex(lx, ly, lz)], lightAt);
+          if (kind === 'torch') emitTorch(opaque, gb, gm, wx, wy, wz, chunk.meta[localIndex(lx, ly, lz)], lightAt, budget);
+          else emitDoor(opaque, gb, gm, wx, wy, wz, chunk.meta[localIndex(lx, ly, lz)], lightAt, budget);
           continue;
         }
         const sOp = isOpaque(b);
@@ -395,7 +429,7 @@ export function meshChunk(world: World, cx: number, cy: number, cz: number, ligh
             chunk.wsource[localIndex(lx, ly, lz)],
             chunk.wstream[localIndex(lx, ly, lz)],
           );
-          emitWater(trans, gb, gl, wx, wy, wz, hMe, lightAt);
+          emitWater(trans, gb, gl, wx, wy, wz, hMe, lightAt, budget);
           continue;
         }
         for (let f = 0; f < 6; f++) {
@@ -405,6 +439,7 @@ export function meshChunk(world: World, cx: number, cy: number, cz: number, ligh
           const wantOpaque = sOp && !isOpaque(nB);
           const wantTrans = !sOp && !isOpaque(nB) && nB !== b; // b is already != Air
           if (!wantOpaque && !wantTrans) continue;
+          if (!budget.takeFace()) break outer;
           const buf = wantOpaque ? opaque : trans;
           const [au, av] = face.axes;
           const tile = BLOCKS[b as Block].faces[f];
@@ -435,5 +470,23 @@ export function meshChunk(world: World, cx: number, cy: number, cz: number, ligh
     }
   }
 
-  return { opaque: opaque.toBuffer(), trans: trans.toBuffer() };
+  return { mesh: { opaque: opaque.toBuffer(), trans: trans.toBuffer() }, complete: !budget.truncated };
+}
+
+const noLight: LightSampler = () => [0, 0]; // zero-light default for callers not yet wired for light (e.g. the perf bench in water-load.test.ts)
+
+/** Whole-chunk mesh — today's exact behavior (all 16 rows, unlimited vertices). */
+export function meshChunk(world: World, cx: number, cy: number, cz: number, lightAt: LightSampler = noLight): ChunkMesh {
+  return meshChunkImpl(world, cx, cy, cz, lightAt, 0, 16, Infinity).mesh;
+}
+
+/** Row-band mesh [y0, y1) — the slice path (no vertex budget: the band is already bounded). */
+export function meshChunkRange(world: World, cx: number, cy: number, cz: number, lightAt: LightSampler, y0: number, y1: number): ChunkMesh {
+  return meshChunkImpl(world, cx, cy, cz, lightAt, y0, y1, Infinity).mesh;
+}
+
+/** Vertex-budget probe: `complete === true` → `mesh` IS the full mesh; `false` → the chunk is
+ * heavier than `maxVerts` verts (the drain discards `mesh` and slices instead). */
+export function probeMeshChunk(world: World, cx: number, cy: number, cz: number, lightAt: LightSampler, maxVerts: number): MeshResult {
+  return meshChunkImpl(world, cx, cy, cz, lightAt, 0, 16, maxVerts);
 }
