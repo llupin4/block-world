@@ -57,17 +57,26 @@ zero-light default):
    and vertex count**; the phase fractions `r_mesh = T_mesh / T_node` and
    `r_geom = T_geom / T_node`; the final geometry's byte size `B`.
 5. Compute the slice count from the measured browser tail (15–28 ms, ADR 0002):
-   **`N = ceil(28 × r_mesh / 8)`, capped at 4.** The heavy threshold is the non-air cell count
-   separating the worst chunk from the 2–5 ms class; the test **asserts both sides of the
-   gap** (worst ≥ threshold > every 2–5 ms-class chunk).
+   **`N = max(2, ceil(28 × r_mesh / 8))`, capped at 4.** If the raw formula yields < 2, the
+   mesh CPU alone is < 8 ms, so the tail is not sliceable CPU work and the gate decision
+   below applies. The heavy threshold is the non-air cell count separating the worst chunk
+   from the 2–5 ms class; the test **asserts both sides of the gap** (worst ≥ threshold >
+   every 2–5 ms-class chunk). The test also **pins the number of heavy chunks in the band**
+   (≥ threshold) — expected 1 (ADR 0002's "single largest water/cave chunk"); the drain's
+   serialized-start rule below assumes that, and if the scan finds more the plan revisits
+   start priority before implementation.
 
-**Gate condition.** The merge frame costs `28 × r_geom + upload(B) + 28 × r_mesh / N` — the
-geometry build and upload do **not** shrink with N. If `28 × r_geom + upload_est(B)` alone
-exceeds ~10 ms (no headroom left for the last slice), the split cannot meet goal B: record the
-breakdown in an ADR note and re-scope this item to TODO 2/3 instead of shipping a no-op.
-Expected outcome: CPU-bound (the 4096-cell face-emission loop with cross-chunk light lookups
-dominates), `N ∈ {2, 3}`. The mechanism is content-agnostic — if the true worst chunk is not
-the water/cave one the docs assume, the design is unchanged and only the pins differ.
+**Gate condition.** The merge frame costs `28 × r_geom + upload_est(B) + 28 × r_mesh / N` —
+the geometry build and upload do **not** shrink with N. The last slice is ≤ 8 ms by
+construction, so the merge frame fits a 16.7 ms budget only if
+`28 × r_geom + upload_est(B) ≤ 8.7 ms`. If it exceeds that, the split cannot meet goal B:
+record the breakdown in an ADR note and re-scope this item to TODO 2/3 instead of shipping a
+no-op. `upload_est(B) = B / 1 MB` (ms per MB of attribute+index bytes — a conservative
+desktop-class upper bound for the single `gl.bufferData` at merge; if the gate is borderline,
+a manual browser micro-check settles it before N is chosen). Expected outcome: CPU-bound (the
+4096-cell face-emission loop with cross-chunk light lookups dominates), `N ∈ {2, 3}`. The
+mechanism is content-agnostic — if the true worst chunk is not the water/cave one the docs
+assume, the design is unchanged and only the pins differ.
 
 ## Slice mechanics
 
@@ -85,14 +94,16 @@ partitioned API.
   non-air cells per row; total < threshold → `null` (chunk is not heavy); otherwise returns `n`
   contiguous bands split at the row-count quantiles (balanced by cell count, which proxies
   loop cost).
-- `mergeSlices(meshes: ChunkMesh[]): ChunkMesh` — concat the five attribute arrays
-  (positions/colors/uvs/light per pass, indices rebased by the sum of preceding passes'
-  vertex counts). A null pass contributes nothing; the merged pass is null iff all bands'
-  passes are null.
+- `mergeSlices(meshes: ChunkMesh[]): ChunkMesh` — per pass (opaque, then trans): if any
+  band's pass is non-null, concat the four attribute arrays (positions, colors, uvs, light)
+  in band order and rebuild the index array with each band's indices rebased by the sum of
+  preceding bands' vertex counts. A null pass contributes nothing; the merged pass is null
+  iff every band's pass is null.
 - `SliceScheduler` — `Map<key, { bands, next, partial: (ChunkMesh | null)[] }>` with
   `start(key, bands)`, `advance(key) → { y0, y1 } | null` (null = no in-flight plan),
-  `finish(key) → ChunkMesh | null` (merges the collected passes), `cancel(key)`,
-  `has(key)`. Pure state machine — vitest drives it directly.
+  `store(key, mesh: ChunkMesh)` (records the just-meshed band's buffers),
+  `finish(key) → ChunkMesh | null` (`mergeSlices` over the collected bands, then removes the
+  plan), `cancel(key)`, `has(key)`. Pure state machine — vitest drives it directly.
 - `HEAVY_CELL_THRESHOLD` and `SLICE_COUNT` pinned as module constants with a comment pointing
   at `remesh-perf.test.ts` (the `TERRAIN_SEED` / `LOAD_BUDGET` pattern).
 
@@ -101,16 +112,20 @@ nothing to dispose mid-split. The single upload happens at merge, on the merge f
 
 ## Drain integration (frame-end, `main.ts`)
 
-The existing closest-first drain over `pendingRebuild` becomes, per candidate chunk:
+The existing closest-first drain over `pendingRebuild` gets a **pre-check**, then the same
+per-candidate walk:
 
-1. **In-flight split** (`scheduler.has(key)`) → advance one slice (mesh that band, store the
-   buffer); **the frame is reserved** — no other rebuilds run this frame (a slice is ~8 ms;
-   the other 2 budget slots would risk 16.7 ms). On the last slice: `finish` → `toGeometry` →
-   swap the scene entry.
-2. **No in-flight split and `decideSlices` says heavy** → `start`, run slice 0, reserve the
-   frame.
-3. **Otherwise** → today's `rebuildChunkMesh`, up to `REBUILD_BUDGET = 3` per frame, exactly
-   as now.
+- **Pre-check — any in-flight plan?** If `scheduler` has an in-flight chunk, **this frame is
+  reserved for it**: advance the *closest* in-flight chunk one slice (mesh that band,
+  `store`), and on the last slice `finish` → `toGeometry` → swap the scene entry. No other
+  rebuilds run this frame (a slice is ~8 ms; running the other budget slots alongside would
+  risk the 16.7 ms budget — closer normal chunks simply carry one more frame, the
+  already-accepted self-correcting staleness).
+- **Otherwise**, walk the sorted candidates:
+  1. **`decideSlices` says heavy** (and no plan exists yet — starts are serialized) →
+     `start`, mesh slice 0, `store`; the frame is reserved (no other rebuilds).
+  2. **Otherwise** → today's `rebuildChunkMesh`, up to `REBUILD_BUDGET = 3` per frame,
+     exactly as now.
 
 - **Old mesh kept until merge completes.** An existing chunk shows at most `N − 1` frames of
   the stale mesh — the same "briefly-stale self-correcting lower bound" the drain already
@@ -130,8 +145,10 @@ The existing closest-first drain over `pendingRebuild` becomes, per candidate ch
   entry in `pendingRebuild` guarantees a full re-mesh within a frame of the merge.
 - **All-air band** → null pass; `mergeSlices` handles it (final pass null iff all null —
   today's behavior).
-- **Two heavy chunks pending** → the closest advances one slice per frame; the other waits at
-  most ~2 frames per slice (closer chunks drain at 3/frame) — no starvation.
+- **Two heavy chunks pending** → plans are serialized: the closest starts first, its N
+  reserved frames block all other rebuilds (they carry and self-correct), and the second
+  starts the frame after the first finishes. Phase 0 pins the heavy-chunk count in the band
+  (expected 1), so this is a corner case, not the common path.
 - **Scheduler map** is bounded by the ring (≤ 125 keys); cancels cover every exit path
   (merge, unload, edit, walk-away).
 - **Documented residual (out of scope):** the synchronous edit-remesh path
@@ -157,8 +174,9 @@ The existing closest-first drain over `pendingRebuild` becomes, per candidate ch
    the water-load / light / streaming replays are the safety net.
 
 **Acceptance (browser, recorded per the ADR 0012 precedent):** manual walk loading the pinned
-worst chunk — **no frame > 16.7 ms** during its load + first mesh + remesh; open-ocean walk
-unchanged vs the existing profile.
+worst chunk — the frames that run its slices and merge stay inside the vsync budget: per-phase
+CPU work ≤ 16.7 ms in DevTools and **no dropped frames (no ~33 ms frame gaps)** during its
+load + first mesh + remesh; open-ocean walk unchanged vs the existing profile.
 
 **Docs (at finish):** new **ADR 0013** recording the decision, the Phase 0 breakdown, and the
 measured browser acceptance; `TODO.md` item resolved; `PROJECT.md` §11 note.
