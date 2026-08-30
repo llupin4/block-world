@@ -1,10 +1,11 @@
 import * as THREE from 'three';
 import { Block, BLOCKS, isOpaque, PLACEABLE, iconPosition, torchMeta, doorMeta, doorOpen, doorAxis, doorSide, isDoor, doorPlacementFromView } from './blocks';
-import { World, chunkKey, chunkOf, CHUNK_SIZE, WORLD_Y_MAX, WORLD_Y_MIN, type VoxelBuffer } from './world';
+import { World, chunkKey, chunkOf, CHUNK_SIZE, WORLD_Y_MAX, WORLD_Y_MIN } from './world';
 import { TERRAIN_SEED, TerrainGen, generateChunkTerrain } from './terrain';
 import * as streaming from './streaming';
 import { Hotbar } from './ui';
 import { meshChunk } from './chunk-mesher';
+import { toGeometry } from './geometry';
 import { Player, EYE, type MoveInput } from './player';
 import { raycastVoxel, REACH, type RayHit } from './raycast';
 import { WaterSim } from './water';
@@ -266,20 +267,6 @@ while (sy >= 0 && !isOpaque(world.getBlock(sx, sy, sz))) sy--;
 const SPAWN = new THREE.Vector3(sx + 0.5, sy + 1, sz + 0.5);
 
 // === chunks-meshing ===
-
-// T5 emits world-space vertex positions; meshes live at the origin.
-// (POC deviation from the spec's "chunk-local vertices + per-chunk mesh offset":
-//  identical rendered output, and T10 streaming avoids per-frame offset bookkeeping.)
-function toGeometry(b: VoxelBuffer): THREE.BufferGeometry {
-  const g = new THREE.BufferGeometry();
-  g.setAttribute('position', new THREE.BufferAttribute(b.positions, 3));
-  g.setAttribute('color', new THREE.BufferAttribute(b.colors, 4)); // rgb + baked alpha
-  g.setAttribute('uv', new THREE.BufferAttribute(b.uvs, 2));
-  g.setAttribute('aLight', new THREE.BufferAttribute(b.light, 2));
-  g.setIndex(new THREE.BufferAttribute(b.indices, 1));
-  g.computeBoundingSphere();
-  return g;
-}
 
 const chunkObjs = new Map<string, { opaque: THREE.Mesh | null; trans: THREE.Mesh | null }>();
 
