@@ -2,7 +2,12 @@
 
 - **Date:** 2026-08-29
 - **Branch:** `slice-heavy-remesh`
-- **Status:** Design approved (2026-08-29); implementation plan follows
+- **Status:** Design approved (2026-08-29); implementation plan follows. **Revision R1
+  (2026-08-29, pre-plan scratch measurement):** the measurement gate ran before the plan and
+  refuted the static cell-count decision (the worst chunk is NOT the largest by cell count —
+  no proxy separates the slow class cleanly). The decision is now a **vertex-budget probe**
+  (`PROBE_VERTS = 3764`, `SLICE_COUNT = 4`), derived from the measured pins below. All other
+  sections unchanged in intent.
 - **Resolves:** `TODO.md` → Streaming / rendering — "One-shot heavy remesh still shows as a
   15–28 ms hiccup … Slicing a huge remesh over 2 frames (half the vertices per frame) would
   remove the last visible hitch."
@@ -53,47 +58,73 @@ zero-light default):
    `computeBoundingSphere`).
 3. To make the geometry build measurable in node, **move `toGeometry` out of `main.ts` into a
    new `src/geometry.ts`** (pure three, node-importable, ~10 lines; `main.ts` imports it).
-4. Pin (hardware-independent counts, per project convention): the **worst chunk's coordinates
-   and vertex count**; the phase fractions `r_mesh = T_mesh / T_node` and
-   `r_geom = T_geom / T_node`; the final geometry's byte size `B`.
-5. Compute the slice count from the measured browser tail (15–28 ms, ADR 0002):
-   **`N = max(2, ceil(28 × r_mesh / 8))`, capped at 4.** If the raw formula yields < 2, the
-   mesh CPU alone is < 8 ms, so the tail is not sliceable CPU work and the gate decision
-   below applies. The heavy threshold is the non-air cell count separating the worst chunk
-   from the 2–5 ms class; the test **asserts both sides of the gap** (worst ≥ threshold >
-   every 2–5 ms-class chunk). The test also **pins the number of heavy chunks in the band**
-   (≥ threshold) — expected 1 (ADR 0002's "single largest water/cave chunk"); the drain's
-   serialized-start rule below assumes that, and if the scan finds more the plan revisits
-   start priority before implementation.
+4. Pin (hardware-independent counts, per project convention): the **worst chunk's key and
+   vertex count** (`2,1,0`, **6312** opaque+trans vertices — the ADR 0002 "single largest
+   water/cave chunk"); the phase fractions `r_mesh = T_mesh / T_node` and
+   `r_geom = T_geom / T_node` (measured **0.982 / 0.018** — the cost is the mesh CPU, not the
+   geometry build); the merged geometry's byte size `B` (**315,600 B**).
+5. Derive the two pinned constants from those pins plus the ADR 0002 browser tail (15–28 ms):
+   - **`PROBE_VERTS = floor(6312 × 16.7 / 28) = 3764`** — the vertex budget of the probe
+     (below): at the worst-case measured density (28 ms / 6312 verts) a probe frame is
+     **≤ 16.7 ms by construction**, on any machine.
+   - **`SLICE_COUNT = max(2, ceil(6312 / floor(6312 × 8 / 28))) = ceil(6312 / 1803) = 4`** —
+     each slice is ≤ 1803 verts ≈ **≤ ~7 ms** at the worst-case density (goal B's ~8 ms
+     per-slice target with headroom).
+   The test also **pins the number of band chunks whose mesh exceeds `PROBE_VERTS` (measured
+   20)** — the count the streaming reservation below is sized for; a worldgen change that
+   moves this count revisits the constant.
 
-**Gate condition.** The merge frame costs `28 × r_geom + upload_est(B) + 28 × r_mesh / N` —
-the geometry build and upload do **not** shrink with N. The last slice is ≤ 8 ms by
-construction, so the merge frame fits a 16.7 ms budget only if
-`28 × r_geom + upload_est(B) ≤ 8.7 ms`. If it exceeds that, the split cannot meet goal B:
-record the breakdown in an ADR note and re-scope this item to TODO 2/3 instead of shipping a
-no-op. `upload_est(B) = B / 1 MB` (ms per MB of attribute+index bytes — a conservative
-desktop-class upper bound for the single `gl.bufferData` at merge; if the gate is borderline,
-a manual browser micro-check settles it before N is chosen). Expected outcome: CPU-bound (the
-4096-cell face-emission loop with cross-chunk light lookups dominates), `N ∈ {2, 3}`. The
-mechanism is content-agnostic — if the true worst chunk is not the water/cave one the docs
-assume, the design is unchanged and only the pins differ.
+**Gate condition (measured — PASSED).** The merge frame costs
+`28 × r_geom + upload_est(B) + 28 × r_mesh / N`; the geometry build and upload do **not**
+shrink with N. The last slice is ≤ 8 ms by construction, so the merge frame fits a 16.7 ms
+budget only if `28 × r_geom + upload_est(B) ≤ 8.7 ms`. Measured: `28 × 0.018 + 0.316 =
+0.81 ms` ≪ 8.7 ms — the tail is CPU-mesh-bound, slicing works. (Had it failed, this item
+re-scopes to TODO 2/3 with the breakdown recorded in an ADR note.) `upload_est(B) = B / 1 MB`
+(ms per MB of attribute+index bytes — a conservative desktop-class upper bound for the single
+`gl.bufferData` at merge).
+
+**R1 — why not a static cell-count threshold.** The original design decided "heavy" from a
+pre-mesh non-air cell count. The scratch scan refuted it: the worst chunk (`2,1,0`) is ~20th
+in non-air count (3550; stone-heavy chunks at 4000+ cells mesh in < 3.6 ms), and no proxy
+(non-air / water / air-neighbor "emit" counts) separates the slow class from the fast class —
+there is no clean gap to threshold on. Vertex count DOES separate (clean gap 5220 vs 4844 at
+the tail), but it is only known while meshing — hence the probe: let the mesher itself stop
+at the budget, which is both the cost model and the decision.
 
 ## Slice mechanics
 
-### `meshChunk` gains an optional row range
+### The mesher gains a row range and a vertex budget
 
-`meshChunk(world, cx, cy, cz, lightAt, yRange?: [y0, y1))` — the outer loop becomes
-`for (let ly = y0; ly < y1; ly++)`. That is the entire mesher change. Default (omitted) is
-`[0, 16)` = today's behavior, so every existing caller and test is untouched. The parameter is
-deliberately worker-compatible: TODO item 2's worldgen/meshing worker can call the same
-partitioned API.
+`meshChunk`'s body moves to an internal
+`meshChunkImpl(world, cx, cy, cz, lightAt, ly0, ly1, maxVerts)` returning
+`{ mesh: ChunkMesh, complete: boolean }`: the outer loop runs `for (let ly = ly0; ly < ly1; ly++)`,
+and before each emitted face (4 verts) it checks
+`opaque.verts + trans.verts + 4 > maxVerts` → sets `complete = false` and stops (the partial
+buffers are left as-is; the caller decides). The **public `meshChunk(world, cx, cy, cz,
+lightAt)` keeps its exact signature and return type** — it calls the impl with
+`ly0 = 0, ly1 = 16, maxVerts = Infinity` and returns `.mesh` — so every existing caller and
+test is untouched. Two new exports:
+
+- `meshChunkRange(world, cx, cy, cz, lightAt, y0, y1): ChunkMesh` — row-band meshing (the
+  slice path, no vertex budget: bands are already bounded by the balanced row counts).
+- `probeMeshChunk(world, cx, cy, cz, lightAt, maxVerts): { mesh, complete }` — the decision:
+  mesh up to `maxVerts` verts. `complete === true` → the partial IS the full mesh (use it
+  directly; its cost is ≤ the budget by construction). `complete === false` → the chunk is
+  heavier than the budget; the partial buffer is discarded and the chunk goes to the slice
+  path. The budget check is per-face (a face's 4 verts are never split), so a truncated
+  buffer always holds whole faces — irrelevant to the result (discarded), but it keeps the
+  buffer well-formed.
+
+The row range + budget parameters are deliberately worker-compatible: TODO item 2's
+worldgen/meshing worker can call the same partitioned/budgeted API.
 
 ### New `src/mesh-slices.ts` (pure TS, no three — the `streaming.ts` pattern)
 
-- `decideSlices(chunk, threshold, n): [y0, y1][][] | null` — one 4096-read pass counts
-  non-air cells per row; total < threshold → `null` (chunk is not heavy); otherwise returns `n`
-  contiguous bands split at the row-count quantiles (balanced by cell count, which proxies
-  loop cost).
+- `decideBands(chunk, n): [y0, y1][]` — one 4096-read pass counts non-air cells per row;
+  returns `n` contiguous bands split at the row-count quantiles (balanced by cell count),
+  always covering `[0, 16)` (a band may be empty — an all-water top row culls most of its
+  faces, so the last band of the worst chunk is the lightest: measured 0.6 ms of 5.3 ms).
+  There is no threshold: the probe already decided the chunk is heavy.
 - `mergeSlices(meshes: ChunkMesh[]): ChunkMesh` — per pass (opaque, then trans): if any
   band's pass is non-null, concat the four attribute arrays (positions, colors, uvs, light)
   in band order and rebuild the index array with each band's indices rebased by the sum of
@@ -103,9 +134,12 @@ partitioned API.
   `start(key, bands)`, `advance(key) → { y0, y1 } | null` (null = no in-flight plan),
   `store(key, mesh: ChunkMesh)` (records the just-meshed band's buffers),
   `finish(key) → ChunkMesh | null` (`mergeSlices` over the collected bands, then removes the
-  plan), `cancel(key)`, `has(key)`. Pure state machine — vitest drives it directly.
-- `HEAVY_CELL_THRESHOLD` and `SLICE_COUNT` pinned as module constants with a comment pointing
-  at `remesh-perf.test.ts` (the `TERRAIN_SEED` / `LOAD_BUDGET` pattern).
+  plan), `cancel(key)`, `has(key)`, `inFlightKey(): string | null` (at most one plan at a
+  time — starts are serialized by the drain). Pure state machine — vitest drives it
+  directly.
+- `PROBE_VERTS = 3764` and `SLICE_COUNT = 4` pinned as module constants with comments
+  pointing at `remesh-perf.test.ts` and the derivations above (the `TERRAIN_SEED` /
+  `LOAD_BUDGET` pattern).
 
 Slices exist **only as CPU `VoxelBuffer`s** until merge: no scene objects, no GPU uploads,
 nothing to dispose mid-split. The single upload happens at merge, on the merge frame.
@@ -115,22 +149,33 @@ nothing to dispose mid-split. The single upload happens at merge, on the merge f
 The existing closest-first drain over `pendingRebuild` gets a **pre-check**, then the same
 per-candidate walk:
 
-- **Pre-check — any in-flight plan?** If `scheduler` has an in-flight chunk, **this frame is
-  reserved for it**: advance the *closest* in-flight chunk one slice (mesh that band,
-  `store`), and on the last slice `finish` → `toGeometry` → swap the scene entry. No other
-  rebuilds run this frame (a slice is ~8 ms; running the other budget slots alongside would
-  risk the 16.7 ms budget — closer normal chunks simply carry one more frame, the
-  already-accepted self-correcting staleness).
+- **Pre-check — a plan in flight?** If `scheduler.inFlightKey()` is non-null, **this frame
+  is reserved for it**: `advance` the in-flight chunk one slice (mesh that band via
+  `meshChunkRange`, `store`), and on the last slice `finish` → `toGeometry` → swap the
+  scene entry. No other rebuilds run this frame (a slice is ≤ ~7 ms; running the other
+  budget slots alongside would risk the 16.7 ms budget — closer normal chunks simply carry
+  one more frame, the already-accepted self-correcting staleness).
 - **Otherwise**, walk the sorted candidates:
-  1. **`decideSlices` says heavy** (and no plan exists yet — starts are serialized) →
-     `start`, mesh slice 0, `store`; the frame is reserved (no other rebuilds).
-  2. **Otherwise** → today's `rebuildChunkMesh`, up to `REBUILD_BUDGET = 3` per frame,
-     exactly as now.
+  1. **Probe** `probeMeshChunk(world, cx, cy, cz, lightAt, PROBE_VERTS)`:
+     - **complete** → the probe IS the full mesh (≤ 16.7 ms by construction): swap it into
+       the scene (the extracted `swapChunkMesh`, see below), clear dirty, consume one
+       `REBUILD_BUDGET` slot — exactly today's cost and behavior for ≤ 3764-vert chunks.
+     - **truncated** → the chunk is heavy: `decideBands(chunk, SLICE_COUNT)` →
+       `scheduler.start(key, bands)`, mesh band 0, `store`, **frame reserved** (break — the
+       probe already spent the frame's budget). The probe's partial buffer is discarded.
+  2. Starts are serialized by construction: the pre-check runs before any start, so a new
+     plan begins only on a frame with no plan in flight.
 
-- **Old mesh kept until merge completes.** An existing chunk shows at most `N − 1` frames of
-  the stale mesh — the same "briefly-stale self-correcting lower bound" the drain already
-  ships (ADR 0012 comment, `main.ts`). A fresh load's pop-in extends from ~2 to ~`N + 2`
-  frames, ring-edge chunks only.
+`rebuildChunkMesh` is refactored around a new `swapChunkMesh(key, mesh: ChunkMesh)`
+(dispose old scene entries, `toGeometry`, add meshes, update `chunkObjs`, clear `dirty`)
+used by all three paths: the sync edit path (whole `meshChunk` + swap), the probe-complete
+path (probe's mesh + swap), and the merge path (merged mesh + swap).
+
+- **Old mesh kept until merge completes.** An existing chunk shows at most `N` frames of the
+  stale mesh (probe/slice-0 frame + the remaining slice frames) — the same "briefly-stale
+  self-correcting lower bound" the drain already ships (ADR 0012 comment, `main.ts`). A fresh
+  load's pop-in extends from ~2 to ~`N` frames (the probe frame doubles as slice 0),
+  ring-edge chunks only.
 - **`streaming.ts` is untouched** — its 1 load + 1 remesh budget and `Coord[]` API stand;
   the split lives entirely in the mesher, the new module, and the drain. The ADR 0012 light
   worker contract is untouched.
@@ -145,10 +190,12 @@ per-candidate walk:
   entry in `pendingRebuild` guarantees a full re-mesh within a frame of the merge.
 - **All-air band** → null pass; `mergeSlices` handles it (final pass null iff all null —
   today's behavior).
-- **Two heavy chunks pending** → plans are serialized: the closest starts first, its N
-  reserved frames block all other rebuilds (they carry and self-correct), and the second
-  starts the frame after the first finishes. Phase 0 pins the heavy-chunk count in the band
-  (expected 1), so this is a corner case, not the common path.
+- **20 band chunks exceed `PROBE_VERTS` (pinned).** Plans are serialized (at most one
+  in flight), so a full ring refill pays up to 20 × (1 probe + `SLICE_COUNT` slice frames) ≈
+  100 reserved frames — measured and accepted: the reserved frames are ≤ 16.7 ms by
+  construction (the fix's purpose), the near chunks drain first (score order), and
+  `PROBE_VERTS` is a single tunable constant if the reservation ever reads as sluggish
+  streaming.
 - **Scheduler map** is bounded by the ring (≤ 125 keys); cancels cover every exit path
   (merge, unload, edit, walk-away).
 - **Documented residual (out of scope):** the synchronous edit-remesh path
@@ -160,18 +207,22 @@ per-candidate walk:
 **Unit (vitest, node):**
 
 1. **Exact split-union equality:** for the worst chunk plus all-water, all-air, and
-   special-block (torch/door) chunks, `mergeSlices(meshChunk(band_i))` deep-equals
-   `meshChunk(whole)` on all five attribute arrays — exact, same vertex order, settled-light
-   sampler shared across calls.
-2. **Threshold gap:** worst chunk ≥ `HEAVY_CELL_THRESHOLD` > every 2–5 ms-class chunk (both
-   sides asserted from the Phase 0 scan).
+   special-block (torch/door) chunks, `mergeSlices(meshChunkRange(band_i) over
+   decideBands(chunk, SLICE_COUNT))` deep-equals `meshChunk(whole)` on all five attribute
+   arrays — exact, same vertex order, settled-light sampler shared across calls.
+2. **Probe behavior:** a synthetic high-vertex chunk (all-water, full) →
+   `probeMeshChunk(..., PROBE_VERTS)` returns `complete: false`; a synthetic light chunk
+   (sparse) → `complete: true` and its mesh deep-equals the full `meshChunk` result; the
+   Phase 0 scan pins the 20-chunk over-budget count in the band.
 3. **`mergeSlices` rebase:** synthetic buffers, null passes, single-slice passthrough.
 4. **Scheduler transitions:** start → advance×N → finish; cancel mid-flight discards;
-   finish returns the merged mesh; advance on a missing key is a no-op.
-5. **Linearity:** per-slice wall-time ≈ whole/N (≤ 1.25×) — catches hidden per-slice fixed
-   cost.
-6. **Regression net:** all existing tests untouched (default `yRange` = today's behavior);
-   the water-load / light / streaming replays are the safety net.
+   finish returns the merged mesh; advance on a missing key is a no-op; at most one
+   in-flight plan.
+5. **Linearity:** per-band wall-time ≤ 1.25 × whole/N (N = `SLICE_COUNT`, measured max
+   ratio 1.107) — catches hidden per-slice fixed cost.
+6. **Regression net:** the public `meshChunk` is byte-identical to today's behavior
+   (default range, no budget), so every existing test is untouched; the water-load / light /
+   streaming replays are the safety net.
 
 **Acceptance (browser, recorded per the ADR 0012 precedent):** manual walk loading the pinned
 worst chunk — the frames that run its slices and merge stay inside the vsync budget: per-phase
