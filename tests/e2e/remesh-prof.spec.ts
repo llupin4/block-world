@@ -1,4 +1,4 @@
-// Deterministic profiling rig (spec: docs/superpowers/specs/2026-09-05-prof-rig-design.md).
+// Deterministic profiling rig e2e (design: ADR 0013).
 // Runs ?prof=remesh headless against the dev server (playwright.config.mjs webServer, port 4173),
 // waits for the rig's JSON report, ALWAYS prints it (pass or fail), records the artifact, and
 // asserts report.pass.

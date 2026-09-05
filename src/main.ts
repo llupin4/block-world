@@ -226,8 +226,7 @@ addLightShader(matTrans);
 // headless/visual verification reaches any time of day without a 120 s real-time wait.
 const phaseParam = new URLSearchParams(location.search).get('phase');
 const startPhase = phaseParam !== null && phaseParam !== '' && Number.isFinite(+phaseParam) ? +phaseParam : 0;
-// ?prof=remesh dev-only: the deterministic profiling rig (spec:
-// docs/superpowers/specs/2026-09-05-prof-rig-design.md). Pins the player, tags the worst
+// ?prof=remesh dev-only: the deterministic profiling rig (ADR 0013). Pins the player, tags the worst
 // chunk's remesh events, and emits a PROF-RESULT JSON report (window.__profResult) that the
 // Playwright harness (tests/e2e/remesh-prof.spec.ts) waits for. &norender skips
 // renderer.render (the SwiftShader fallback; the report records which mode ran).

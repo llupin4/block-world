@@ -1,4 +1,4 @@
-// Deterministic profiling rig state machine (spec: docs/superpowers/specs/2026-09-05-prof-rig-design.md).
+// Deterministic profiling rig state machine (design: ADR 0013; acceptance via the ?prof=remesh e2e).
 // Pure TS — no three, no DOM: main.ts drives it once per frame (beginFrame) and at the drain's
 // remesh events (noteRemesh), and reads the report when noteFrame returns one. Frame-indexed by
 // design: no wall clock and no rAF cadence anywhere in the logic — headless frame pacing cannot
