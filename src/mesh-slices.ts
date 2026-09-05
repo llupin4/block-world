@@ -93,3 +93,65 @@ export function mergeSlices(meshes: ChunkMesh[]): ChunkMesh {
     trans: mergePass(meshes.map((m) => m.trans)),
   };
 }
+
+interface Plan {
+  bands: [number, number][];
+  next: number;
+  partial: (ChunkMesh | null)[];
+}
+
+/**
+ * One in-flight slice plan at a time (the drain serializes starts; `start` enforces it).
+ * Lifecycle: start → (advance + store) × bands.length → finish (merges, removes the plan);
+ * cancel at any point (player edit / unload) discards the partial buffers — they are plain
+ * typed arrays, so GC takes them; no GPU resources exist before the merge.
+ */
+export class SliceScheduler {
+  private plans = new Map<string, Plan>();
+
+  /** Returns false when a plan is already in flight (one at a time). */
+  start(key: string, bands: [number, number][]): boolean {
+    if (this.plans.size > 0) return false;
+    this.plans.set(key, { bands, next: 0, partial: new Array(bands.length).fill(null) });
+    return true;
+  }
+
+  has(key: string): boolean {
+    return this.plans.has(key);
+  }
+
+  /** The single in-flight chunk key (or null). */
+  inFlightKey(): string | null {
+    const k = this.plans.keys().next();
+    return k.done ? null : k.value;
+  }
+
+  /** The band to mesh now for `key` (or null — no plan / plan complete). */
+  advance(key: string): [number, number] | null {
+    const p = this.plans.get(key);
+    if (!p || p.next >= p.bands.length) return null;
+    return p.bands[p.next];
+  }
+
+  /** Record the just-meshed band's buffers (must follow an advance). */
+  store(key: string, mesh: ChunkMesh): void {
+    const p = this.plans.get(key);
+    if (!p) return;
+    p.partial[p.next] = mesh;
+    p.next++;
+  }
+
+  /** When all bands are stored: merge them and remove the plan; otherwise null. */
+  finish(key: string): ChunkMesh | null {
+    const p = this.plans.get(key);
+    if (!p || p.next < p.bands.length) return null;
+    this.plans.delete(key);
+    // finish implies every band was stored, so the filter is a no-op — it only narrows the
+    // pre-store nulls for the type (an empty band is a zero-vertex ChunkMesh, never null).
+    return mergeSlices(p.partial.filter((m): m is ChunkMesh => m !== null));
+  }
+
+  cancel(key: string): void {
+    this.plans.delete(key);
+  }
+}

@@ -2,7 +2,7 @@ import { it, expect } from 'vitest';
 import { World, localIndex, type Chunk, type VoxelBuffer } from '../world';
 import { Block } from '../blocks';
 import type { ChunkMesh } from '../chunk-mesher';
-import { decideBands, mergeSlices, PROBE_VERTS, SLICE_COUNT } from '../mesh-slices';
+import { decideBands, mergeSlices, SliceScheduler, PROBE_VERTS, SLICE_COUNT } from '../mesh-slices';
 
 /** A chunk whose row ly holds the first `counts[ly]` cells (in localIndex order, lz 0..15 ×
  * lx 0..15) as stone — decideBands only counts per-row non-air cells, so the layout within
@@ -67,4 +67,42 @@ it('mergeSlices: null passes contribute nothing; all-null → null; single slice
   const solo = mergeSlices([a]);
   expect(solo.opaque!.positions).toEqual(a.opaque!.positions);
   expect(solo.opaque!.indices).toEqual(a.opaque!.indices);
+});
+
+it('SliceScheduler: start → advance/store ×N → finish returns the merged mesh; one plan at a time', () => {
+  const s = new SliceScheduler();
+  expect(s.inFlightKey()).toBeNull();
+  const bands: [number, number][] = [[0, 4], [4, 8], [8, 12], [12, 16]];
+  expect(s.start('0,0,0', bands)).toBe(true);
+  expect(s.start('1,0,0', bands)).toBe(false); // a second plan is refused while one is in flight
+  expect(s.inFlightKey()).toBe('0,0,0');
+  expect(s.advance('1,1,1')).toBeNull(); // no plan for that key
+  const one: ChunkMesh = { opaque: vbuf([0, 0, 0, 1, 0, 0], [0, 1]), trans: null };
+  const zero: ChunkMesh = { opaque: null, trans: null };
+  expect(s.advance('0,0,0')).toEqual([0, 4]);
+  s.store('0,0,0', one);
+  expect(s.finish('0,0,0')).toBeNull(); // not all bands stored yet
+  expect(s.advance('0,0,0')).toEqual([4, 8]);
+  s.store('0,0,0', zero);
+  expect(s.advance('0,0,0')).toEqual([8, 12]);
+  s.store('0,0,0', zero);
+  expect(s.advance('0,0,0')).toEqual([12, 16]);
+  s.store('0,0,0', zero);
+  const done = s.finish('0,0,0');
+  expect(s.inFlightKey()).toBeNull(); // the plan is removed on finish
+  expect(done).not.toBeNull();
+  expect(done!.opaque!.indices).toEqual(new Uint32Array([0, 1])); // only the first band had geometry
+  expect(done!.trans).toBeNull();
+});
+
+it('SliceScheduler: cancel discards the partial buffers', () => {
+  const s = new SliceScheduler();
+  expect(s.start('0,0,0', [[0, 8], [8, 16]])).toBe(true);
+  s.advance('0,0,0');
+  s.store('0,0,0', { opaque: null, trans: null });
+  s.cancel('0,0,0');
+  expect(s.has('0,0,0')).toBe(false);
+  expect(s.inFlightKey()).toBeNull();
+  expect(s.advance('0,0,0')).toBeNull();
+  expect(s.finish('0,0,0')).toBeNull();
 });
