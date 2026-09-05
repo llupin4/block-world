@@ -16,6 +16,8 @@ import { sampleSky, createSky } from './sky';
 import { createClouds } from './clouds';
 import { LIGHT_AMBIENT, LIGHT_TICK_BUDGET } from './light';
 import { LightClient } from './light-transport';
+import { Persistence, applyRecord, type WorldMeta } from './persistence';
+import { IndexedDBChunkStore } from './idb-store';
 
 // === boot ===
 
@@ -242,11 +244,8 @@ let clockLabel = '';
 
 const world = new World();
 
-// T10 streams the rest of the world on demand: only the spawn column is generated up front,
-// so the measured-spawn scan below reads real terrain before the first frame. Streaming uses
-// the same generator/seed, so this column is byte-identical to what it would generate later.
-const gen = new TerrainGen(TERRAIN_SEED);
-for (let cy = 0; cy <= 4; cy++) generateChunkTerrain(world, gen, 0, cy, 2); // chunk column (0,·,2) → world x 0..15, z 32..47 — contains the (T9) spawn (6,46)
+// T10 streams the rest of the world on demand; the spawn column itself is restored or
+// generated in startGame (the boot gate below), so the measured-spawn scan runs after it.
 
 // Water sim (PROJECT.md §9, src/water.ts): flow state streams with each chunk; it is
 // settled per chunk as streaming loads them (tickStreaming) and advanced on the tick
@@ -262,17 +261,92 @@ const sim = new WaterSim(world);
 const lightSim = new LightClient(world, worldTime);
 window.__lightDebug = lightSim; // debug surface: cumulative pops/seeds/fieldChanges, latest queue, lastTick
 
-// Spawn on MEASURED ground. Plan deviation (recorded): the plan's probe reported (33,41) as a
-// grass shelf at surface y=33, but under the T4-pinned generator that column is a sea-basin
-// cell (sand at y=30, water to y=32) in neither PRNG variant — the plan's T9 probe must have
-// used a different scratch setup. (6,46) is the nearest clean grass column to the intended
-// point in the rendered world: surface y=33, no tree in the column, and the sea starts 3 m
-// east (toward the spawn's +x facing). The scan still drops from the top of the band (79)
-// to the surface voxel; for an open-sea column the player would land on the sand floor and swim up.
-const sx = 6, sz = 46;
-let sy = 79;
-while (sy >= 0 && !isOpaque(world.getBlock(sx, sy, sz))) sy--;
-const SPAWN = new THREE.Vector3(sx + 0.5, sy + 1, sz + 0.5);
+// World persistence (ADR 0014): edited chunks snapshot to IndexedDB on unload; on boot
+// the key set + meta load, and previously edited chunks restore verbatim (warm: inline,
+// cold: async fetch) instead of being re-generated from terrain. Persistence swallows
+// store errors internally (D7: IDB failure → session-only persistence).
+let persist: Persistence;
+try {
+  persist = new Persistence(new IndexedDBChunkStore(), TERRAIN_SEED);
+} catch {
+  persist = new Persistence(null, TERRAIN_SEED); // no IndexedDB in this environment
+}
+window.__persistDebug = persist; // debug surface: key set, warm cache, store counters
+
+// SPAWN is computed in startGame, after the boot column exists (it may be RESTORED from
+// a persisted record — the scan must read the current world state, whatever that is).
+let SPAWN: THREE.Vector3;
+
+// === boot gate (ADR 0014) ===
+// The game starts only once persistence has booted (key set + meta) — capped at 1.5 s:
+// a stalled IDB must not hold the first frame hostage (the fallback starts a fresh
+// world; a late meta is dropped, documented edge). startGame restores-or-generates the
+// boot column, restores world state, and kicks the frame loop.
+let booted = false;
+async function startGame(meta: WorldMeta | null): Promise<void> {
+  if (booted) return;
+  booted = true;
+  // T10: only the spawn column is generated up front — here it is either RESTORED (a
+  // persisted, edited spawn column: arrays verbatim, settled = true, no settle) or
+  // generated exactly as before (settled by the first tickStreaming's remesh path).
+  for (let cy = 0; cy <= 4; cy++) {
+    let rec = persist.syncRecord(0, cy, 2);
+    if (!rec) rec = await persist.fetchRecord(0, cy, 2); // the record may exist but not be warm (first visit after a reload)
+    if (rec) {
+      applyRecord(world, rec);
+      streaming.markNeighborsDirty(world, 0, cy, 2, 0, 2);
+      sim.restore(world.getChunk(0, cy, 2)!);
+      lightSim.load(0, cy, 2); // light is never persisted: the worker re-settles
+      deferredFirstMesh.add(chunkKey(0, cy, 2));
+    } else {
+      const gen = new TerrainGen(TERRAIN_SEED);
+      generateChunkTerrain(world, gen, 0, cy, 2); // chunk column (0,·,2) → world x 0..15, z 32..47 — contains the (T9) spawn (6,46)
+      lightSim.load(0, cy, 2);
+      deferredFirstMesh.add(chunkKey(0, cy, 2));
+    }
+  }
+  // Spawn on MEASURED ground (the scan reads the boot column above — synchronous either way).
+  // Plan deviation (recorded): the plan's probe reported (33,41) as a grass shelf at
+  // surface y=33, but under the T4-pinned generator that column is a sea-basin cell (sand
+  // at y=30, water to y=32) in neither PRNG variant — the plan's T9 probe must have used a
+  // different scratch setup. (6,46) is the nearest clean grass column to the intended point
+  // in the rendered world: surface y=33, no tree in the column, and the sea starts 3 m east
+  // (toward the spawn's +x facing). The scan still drops from the top of the band (79) to
+  // the surface voxel; for an open-sea column the player would land on the sand floor and swim up.
+  const sx = 6, sz = 46;
+  let sy = 79;
+  while (sy >= 0 && !isOpaque(world.getBlock(sx, sy, sz))) sy--;
+  SPAWN = new THREE.Vector3(sx + 0.5, sy + 1, sz + 0.5);
+  if (meta) {
+    worldTime.restore(meta.time);
+    player.place({ x: meta.player.x, y: meta.player.y, z: meta.player.z });
+    player.yaw = meta.player.yaw;
+    player.pitch = meta.player.pitch;
+    if (meta.hotbar?.slots?.length === 9) {
+      for (let i = 0; i < 9; i++) hotbar.setSlot(i, meta.hotbar.slots[i]); // fires onSlotChange → icons refresh
+      hotbar.select(meta.hotbar.selected ?? 0);
+      // select() is a no-op when the selection is already at its default (0): refresh the
+      // .sel borders directly so a restored selection of 0 still lights the slot.
+      hotbarSlotEls.forEach((el, j) => el.classList.toggle('sel', j === hotbar.selected));
+      refreshPaletteSel(hotbar.block);
+    }
+  } else {
+    player.place(SPAWN);
+    player.yaw = -Math.PI / 2; // face +x (east), at the sea — the shoreline starts ~6 m from spawn
+    hotbar.select(PALETTE_BLOCKS.indexOf(Block.Planks)); // default: planks, as T8's selectedBlock was
+  }
+  if (profMode) player.noclip = true; // the rig owns the player: pinned each frame, no physics
+  profRig = profMode
+    ? new ProfRig({ seed: TERRAIN_SEED, phase: meta ? worldTime.dayPhase : startPhase, render: !profNoRender, anchor: { x: player.pos.x, y: player.pos.y, z: player.pos.z } })
+    : null;
+  syncCamera();
+  requestAnimationFrame(frame);
+}
+const bootGate = window.setTimeout(() => { void startGame(null); }, 1500); // fallback: a stalled boot still starts (fresh world)
+void persist.boot().then((meta) => {
+  window.clearTimeout(bootGate);
+  void startGame(meta);
+});
 
 // === chunks-meshing ===
 
@@ -356,20 +430,14 @@ const player = new Player(
   (x, y, z) => world.getBlock(x, y, z),
   (x, y, z) => world.isSolid(x, y, z),
 );
-player.place(SPAWN);
-if (profMode) player.noclip = true; // the rig owns the player: pinned each frame, no physics
-const profRig = profMode
-  ? new ProfRig({ seed: TERRAIN_SEED, phase: startPhase, render: !profNoRender, anchor: { x: player.pos.x, y: player.pos.y, z: player.pos.z } })
-  : null;
+let profRig: ProfRig | null = null; // owned by startGame (it needs the restored player position)
 let profDrainMs = 0;
-player.yaw = -Math.PI / 2; // face +x (east), at the sea — the shoreline starts ~6 m from spawn
 camera.rotation.order = 'YXZ';
 
 function syncCamera(): void {
   camera.position.set(player.pos.x, player.pos.y + EYE, player.pos.z);
   camera.rotation.set(player.pitch, player.yaw, 0);
 }
-syncCamera();
 
 // ?dbg dev-only: exposes the render triple for headless pixel verification (readPixels
 // after a forced render). Never used outside that rig.
@@ -779,8 +847,7 @@ function toggleHelp(): void {
 
 helpHintEl.addEventListener('click', () => { if (!helpOpen) openHelp(); });
 
-// Callbacks are wired above, so this initial select lights the .sel border.
-hotbar.select(PALETTE_BLOCKS.indexOf(Block.Planks)); // default: planks, as T8's selectedBlock was
+// The default hotbar select happens in startGame (a restored meta takes the slots instead).
 
 // Wheel cycles the hotbar (down = next slot); while an overlay is open the wheel is left alone.
 window.addEventListener(
@@ -803,19 +870,61 @@ window.addEventListener(
 // ADR 0012 defers it one frame so the mesh reads the worker's settled light; the light/water
 // touched carry the same way.
 function tickStreaming(): void {
-  const r = streaming.update(world, chunkOf(player.pos.x), chunkOf(player.pos.z), chunkOf(player.pos.y));
+  const r = streaming.update(world, chunkOf(player.pos.x), chunkOf(player.pos.z), chunkOf(player.pos.y), persist);
   for (const c of r.unloaded) {
     removeChunkMesh(c.cx, c.cy, c.cz);
     lightSim.unload(c.cx, c.cy, c.cz); // the worker re-seeds the surviving seams (the darkness wave)
     pendingRebuild.delete(chunkKey(c.cx, c.cy, c.cz)); // don't re-mesh a chunk we just unloaded
     deferredFirstMesh.delete(chunkKey(c.cx, c.cy, c.cz)); // it may still be waiting for its first mesh
   }
+  if (r.unloaded.length) persist.saveMeta(metaSnapshot()); // the world just changed durably (a chunk left): refresh the save point
   for (const c of r.rebuilt) {
     sim.settle(c.cx, c.cy, c.cz); // POC form of worldgen-fluid settling: settle BEFORE meshing so the new chunk's mesh already shows flooded caves. The settled flag makes re-settling a re-meshed chunk a no-op. settle() never clears sim.touched: cross-seam marks from any settle this frame survive here and to the end-of-frame drain below, which re-meshes them.
     lightSim.load(c.cx, c.cy, c.cz); // the worker settles it; the fields land with the tick reply
     deferredFirstMesh.add(chunkKey(c.cx, c.cy, c.cz)); // ADR 0012: the first/fresh mesh waits a guaranteed frame (replies are macrotasks — a load-frame drain would mesh from still-zero light); the frame end moves it into pendingRebuild after the first reply has landed
   }
+  for (const c of r.restored) {
+    const ch = world.getChunk(c.cx, c.cy, c.cz)!;
+    sim.restore(ch); // D1: water restored as-is (settled = true) — rebuild springs/waiting/queue, NO settle
+    lightSim.load(c.cx, c.cy, c.cz); // light is never persisted: the worker re-settles the chunk
+    deferredFirstMesh.add(chunkKey(c.cx, c.cy, c.cz)); // first mesh of the restored chunk, same pacing as a load
+  }
+  for (const c of r.pending) {
+    // Cold restore: the record is known (key set) but not warm. Fetch async; apply when it
+    // lands (deduped in Persistence, so per-frame re-pending is cheap). A failed/stale fetch
+    // drops the key → the next update() generates the chunk fresh (confirmed miss).
+    void persist.fetchRecord(c.cx, c.cy, c.cz).then((rec) => {
+      if (!rec) { persist.dropPersisted(c.cx, c.cy, c.cz); return; }
+      if (world.hasChunk(c.cx, c.cy, c.cz)) return; // a duplicate in-flight fetch applied it first
+      applyRecord(world, rec);
+      streaming.markNeighborsDirty(world, c.cx, c.cy, c.cz, chunkOf(player.pos.x), chunkOf(player.pos.z));
+      const ch = world.getChunk(c.cx, c.cy, c.cz)!;
+      sim.restore(ch);
+      lightSim.load(c.cx, c.cy, c.cz);
+      deferredFirstMesh.add(chunkKey(c.cx, c.cy, c.cz));
+    });
+  }
 }
+
+function metaSnapshot(): WorldMeta {
+  return {
+    v: 1,
+    seed: TERRAIN_SEED,
+    player: { x: player.pos.x, y: player.pos.y, z: player.pos.z, yaw: player.yaw, pitch: player.pitch },
+    time: worldTime.snapshot(),
+    hotbar: { slots: [...hotbar.slots], selected: hotbar.selected },
+  };
+}
+
+// D6 crash window: unload snapshots cover loaded-chunk edits only when a chunk unloads
+// (or on hide); a hard tab kill loses edits made since then. The meta is cheap — save on
+// hide and on pagehide, and flush the store's pending puts.
+const saveAndFlush = (): void => {
+  persist.saveMeta(metaSnapshot());
+  void persist.flush();
+};
+document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'hidden') saveAndFlush(); });
+window.addEventListener('pagehide', saveAndFlush);
 
 // === water-fx ===
 
@@ -977,4 +1086,4 @@ function frame(now: number): void {
   requestAnimationFrame(frame);
 }
 
-requestAnimationFrame(frame);
+// The frame loop is kicked in startGame, once the boot gate has run (ADR 0014).

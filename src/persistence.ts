@@ -1,5 +1,11 @@
 import { type Chunk, type World } from './world';
 
+declare global {
+  interface Window {
+    __persistDebug?: Persistence; // debug surface: key set, warm cache, store counters
+  }
+}
+
 // === record shapes (ADR 0014) ===
 
 /** One persisted chunk: the six arrays that define world state. Light fields are
