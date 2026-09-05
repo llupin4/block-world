@@ -29,6 +29,7 @@ export interface Chunk {
   dirty: boolean;
   settled: boolean;    // water sim has settled this chunk's worldgen water (makes settle idempotent)
   lightSettled: boolean; // light sim has settled this chunk's interior (fresh-load full settle done; remeshes only re-seed the seam) — the mirror's flag is live in production (ADR 0012)
+  edited: boolean;     // persistence gate (ADR 0014): set ONLY by player-origin work (World.setBlock default / edit-origin water flow), never by terrain generation or worldgen settle — the only chunks persisted on unload
   opaqueMesh: VoxelBuffer | null;
   transMesh: VoxelBuffer | null;
 }
@@ -78,6 +79,7 @@ export class World {
       dirty: true,
       settled: false,
       lightSettled: false,
+      edited: false,
       opaqueMesh: null,
       transMesh: null,
     };
@@ -132,8 +134,11 @@ export class World {
    * always pass meta explicitly when writing Block.Torch / a door id.
    * Marks the chunk and any existing 6 face-neighbors dirty: a door closing/opening
    * changes both what is solid and which neighbor faces its panel hides.
+   * markEdited (persistence gate, ADR 0014): the player path defaults to true; the
+   * water sim passes its per-cell work origin (false for settle/worldgen work, so
+   * deterministic cave-flooding never persists as "edited").
    */
-  setBlock(wx: number, wy: number, wz: number, b: number, meta = 0): boolean {
+  setBlock(wx: number, wy: number, wz: number, b: number, meta = 0, markEdited = true): boolean {
     const c = this.getChunk(chunkOf(wx), chunkOf(wy), chunkOf(wz));
     if (!c) return false;
     const i = localIndex(wx - c.cx * CHUNK_SIZE, wy - c.cy * CHUNK_SIZE, wz - c.cz * CHUNK_SIZE);
@@ -141,6 +146,7 @@ export class World {
     c.blocks[i] = b;
     c.meta[i] = meta;
     c.dirty = true;
+    if (markEdited) c.edited = true;
     const n = [
       [c.cx + 1, c.cy, c.cz], [c.cx - 1, c.cy, c.cz],
       [c.cx, c.cy + 1, c.cz], [c.cx, c.cy - 1, c.cz],

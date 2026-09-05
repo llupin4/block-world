@@ -1,6 +1,33 @@
 import { describe, it, expect } from 'vitest';
 import { World, CHUNK_SIZE, CHUNK_VOL, chunkKey, localIndex, chunkOf } from '../world';
 import { Block, torchMeta, doorMeta } from '../blocks';
+import { TERRAIN_SEED, TerrainGen, generateChunkTerrain } from '../terrain';
+
+describe('Chunk.edited — the persistence gate (ADR 0014)', () => {
+  it('is set by setBlock (default) and survives equal-value writes', () => {
+    const w = new World();
+    const c = w.ensureChunk(0, 0, 0);
+    expect(c.edited).toBe(false);
+    expect(w.setBlock(4, 4, 4, Block.Stone)).toBe(true);
+    expect(c.edited).toBe(true);
+    expect(w.setBlock(4, 4, 4, Block.Stone)).toBe(false); // no change
+    expect(c.edited).toBe(true);
+  });
+
+  it('is not set when markEdited is false (the water-sim path)', () => {
+    const w = new World();
+    const c = w.ensureChunk(0, 0, 0);
+    w.setBlock(4, 4, 4, Block.Stone, 0, false);
+    expect(c.edited).toBe(false);
+  });
+
+  it('is not set by terrain generation', () => {
+    const w = new World();
+    const gen = new TerrainGen(TERRAIN_SEED);
+    for (let cy = 0; cy <= 4; cy++) generateChunkTerrain(w, gen, 0, cy, 2);
+    for (const c of w.allChunks()) expect(c.edited, `chunk (${c.cx},${c.cy},${c.cz})`).toBe(false);
+  });
+});
 
 describe('world', () => {
   it('exposes chunk constants (cubic 16^3)', () => {
