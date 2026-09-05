@@ -8,6 +8,7 @@
     "build": "tsc --noEmit && vite build",
     "preview": "vite preview",
     "test": "vitest run",
+    "prof": "playwright test",
     "deploy:gh-pages": "node scripts/deploy-gh-pages.mjs"
   },
   "dependencies": {
@@ -15,6 +16,7 @@
     "three": "^0.166.1"
   },
   "devDependencies": {
+    "@playwright/test": "^1.63.0",
     "@types/three": "^0.166.0",
     "typescript": "^5.5.4",
     "vite": "^5.4.0",
