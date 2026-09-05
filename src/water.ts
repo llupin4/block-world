@@ -112,7 +112,8 @@ export class WaterSim {
   // re-marks self + 4 horizontal + above, the same closure writeCell re-marks).
   readonly stats = { seeds: 0, processes: 0, queueAdds: 0, equalizeFills: 0 };
   private settling: Chunk | null = null; // chunk whose settle is in flight (exempts its own water from the pristine-skip in process)
-  private waiting = new Set<string>(); // cells whose fall stopped at not-yet-generated space below: re-checked every pulse until the low band loads (their column then extends)
+  private editQueue = new Set<string>(); // keys in `queue` whose work originates from a player edit (invariant: editQueue ⊆ queue) — the persistence gate (D4): only this work marks chunks edited
+  private waiting = new Map<string, boolean>(); // cells whose fall stopped at not-yet-generated space below → value is the work origin carried into the per-pulse re-queue
   private springs = new Set<string>(); // live PLACED sources (springs), including regenerated ones: re-queued at every pulse's start so a source keeps re-emitting its side halo (a sky source drips off each side forever, a wall source keeps dripping through whatever gap is open beside it) — maintained by edit() and healSourceBody()
 
   constructor(world: World) {
@@ -138,7 +139,7 @@ export class WaterSim {
 
   // Write a cell's full state. Only records the chunk in `touched` when the *block*
   // actually changed (level/flag changes alone never re-mesh: they don't render).
-private setState(wx: number, wy: number, wz: number, l: number, s: number, b: number, p: number, st: number): void {
+private setState(wx: number, wy: number, wz: number, l: number, s: number, b: number, p: number, st: number, eo: boolean = false): void {
     if (!this.inBand(wy)) return;
     const c = this.world.getChunk(chunkOf(wx), chunkOf(wy), chunkOf(wz));
     if (!c) return;
@@ -148,7 +149,7 @@ private setState(wx: number, wy: number, wz: number, l: number, s: number, b: nu
     c.wplaced[i] = p;
     c.wstream[i] = st;
     if (c.blocks[i] !== b) {
-      if (this.world.setBlock(wx, wy, wz, b)) this.touched.add(chunkKey(c.cx, c.cy, c.cz));
+      if (this.world.setBlock(wx, wy, wz, b, 0, eo)) this.touched.add(chunkKey(c.cx, c.cy, c.cz));
     }
   }
 
@@ -158,14 +159,11 @@ private setState(wx: number, wy: number, wz: number, l: number, s: number, b: nu
   // above it; a rider below must re-evaluate when its support changes). The closure is what
   // lets a cut-off body drain end to end: every state change invalidates every cell whose
   // re-derivation could differ.
-  private writeCell(wx: number, wy: number, wz: number, l: number, s: number, b: number, p: number = 0, st: number = 0): void {
+private writeCell(wx: number, wy: number, wz: number, l: number, s: number, b: number, p: number = 0, st: number = 0, eo: boolean = false): void {
     const c = this.cellState(wx, wy, wz);
     if (c.b === b && c.l === l && c.s === s && c.p === p && c.st === st) return;
-    this.setState(wx, wy, wz, l, s, b, p, st);
-    this.queue.add(`${wx},${wy},${wz}`);
-    for (const [dx, dz] of HXZ) this.queue.add(`${wx + dx},${wy},${wz + dz}`);
-    this.queue.add(`${wx},${wy + 1},${wz}`);
-    this.queue.add(`${wx},${wy - 1},${wz}`); // resting levels re-derive from the flow above; riding cells below must re-evaluate
+    this.setState(wx, wy, wz, l, s, b, p, st, eo);
+    this.remark(wx, wy, wz, eo);
   }
 
   // Re-mark exactly the cells writeCell re-marks (self + 6 neighbours), without
@@ -177,6 +175,22 @@ private setState(wx: number, wy: number, wz: number, l: number, s: number, b: nu
     for (const [dx, dz] of HXZ) this.queue.add(`${wx + dx},${wy},${wz + dz}`);
     this.queue.add(`${wx},${wy + 1},${wz}`);
     this.queue.add(`${wx},${wy - 1},${wz}`);
+  }
+
+  /** Enqueue one key with an origin. The uncounted single-cell twin of enqueue (writeCell
+   *  re-marks were never counted in stats.queueAdds — the pin semantics are preserved). */
+  private push(key: string, eo: boolean): void {
+    this.queue.add(key);
+    if (eo) this.editQueue.add(key);
+  }
+
+  /** Re-mark exactly the cells writeCell re-marks (self + 6 neighbours), carrying the
+   *  origin to the edit gate. No stats.queueAdds (see push). */
+  private remark(wx: number, wy: number, wz: number, eo: boolean): void {
+    this.push(`${wx},${wy},${wz}`, eo);
+    for (const [dx, dz] of HXZ) this.push(`${wx + dx},${wy},${wz + dz}`, eo);
+    this.push(`${wx},${wy + 1},${wz}`, eo);
+    this.push(`${wx},${wy - 1},${wz}`, eo);
   }
 
   // Two-pass seed (the load-path fix): pass 1 bulk-writes every worldgen Water cell of the
@@ -234,7 +248,7 @@ private setState(wx: number, wy: number, wz: number, l: number, s: number, b: nu
   }
 
 // one update: process one water cell to its rule-driven action.
-  private process(wx: number, wy: number, wz: number): void {
+  private process(wx: number, wy: number, wz: number, eo: boolean = false): void {
     this.stats.processes++;
     const C = this.cellState(wx, wy, wz);
     if (C.b !== Block.Water) return; // dried / no longer water: neighbours+above already re-marked
@@ -259,8 +273,8 @@ private setState(wx: number, wy: number, wz: number, l: number, s: number, b: nu
       // (a block placed in its gap) pouring again once the gap reopens. Worldgen sources
       // (the sea: p=0) do NOT emit — they fall and pour through gaps in their support
       // like any water, and they never grow.
-      this.healSourceBody(wx, wy, wz); // heal BEFORE the halo spreads, or the halo would fill a gap as flow before it could heal to a source
-      this.spreadToAir(wx, wy, wz, C.l);
+      this.healSourceBody(wx, wy, wz, eo); // heal BEFORE the halo spreads, or the halo would fill a gap as flow before it could heal to a source
+      this.spreadToAir(wx, wy, wz, C.l, eo);
       return;
     }
     const below = this.cellState(wx, wy - 1, wz);
@@ -270,7 +284,7 @@ private setState(wx: number, wy: number, wz: number, l: number, s: number, b: nu
       // arbitrary order). Known space = the band below is loaded, or the fall exits the
       // generated world below its floor (the world-floor case rests instead — see below).
       const belowKnown = wy - 1 < MIN_CY * 16 || this.world.hasChunk(chunkOf(wx), chunkOf(wy - 1), chunkOf(wz));
-      if (!belowKnown) { this.waiting.add(`${wx},${wy},${wz}`); return; } // waiting on the low band: re-checked every pulse
+      if (!belowKnown) { this.waiting.set(`${wx},${wy},${wz}`, eo); return; } // waiting on the low band: re-checked every pulse (origin carried)
       // Water directly above (a column feeding down), or water in a horizontal neighbour
       // (a lake edge, a sea surface cell, or the flow from an emitter/sheet beside it)
       // makes this cell a WATERFALL HEAD: it stays put and pours down through the gap —
@@ -288,12 +302,12 @@ private setState(wx: number, wy: number, wz: number, l: number, s: number, b: nu
         }
       }
       if (fed) {
-        this.dropColumn(wx, wy - 1, wz, 0, 0);
-        this.queue.add(`${wx},${wy - 1},${wz}`);
+        this.dropColumn(wx, wy - 1, wz, 0, 0, eo);
+        this.push(`${wx},${wy - 1},${wz}`, eo);
         return;
       }
-      this.writeCell(wx, wy, wz, 0, 0, Block.Air); // dry origin, re-marked
-      this.dropColumn(wx, wy - 1, wz, C.s, 0); // instantaneous full-column drop
+      this.writeCell(wx, wy, wz, 0, 0, Block.Air, 0, 0, eo); // dry origin, re-marked
+      this.dropColumn(wx, wy - 1, wz, C.s, 0, eo); // instantaneous full-column drop
       return;
     }
 
@@ -324,7 +338,7 @@ private setState(wx: number, wy: number, wz: number, l: number, s: number, b: nu
       const bb = this.cellState(wx, wy - 2, wz);
       const rides = below.st === 1 || below.l === 7 || wy - 2 < MIN_CY * 16 || this.solid(bb.b);
       if (!rides) {
-        this.writeCell(wx, wy, wz, 0, 0, Block.Air); // disappears into the water body
+        this.writeCell(wx, wy, wz, 0, 0, Block.Air, 0, 0, eo); // disappears into the water body
         return;
       }
       // A rider stays a rider only while something ALIVE holds it: flow pouring into it
@@ -352,7 +366,7 @@ private setState(wx: number, wy: number, wz: number, l: number, s: number, b: nu
         return; // riding: no spread, ever
       }
       if (C.st === 1) {
-        this.writeCell(wx, wy, wz, C.l, C.s, Block.Water, C.p, 0);
+        this.writeCell(wx, wy, wz, C.l, C.s, Block.Water, C.p, 0, eo);
         return;
       }
       // already resting: fall through to the re-derivation below
@@ -373,15 +387,15 @@ private setState(wx: number, wy: number, wz: number, l: number, s: number, b: nu
     // a cut-off pool empties completely instead of freezing forever.
     let target = this.feedLevel(wx, wy, wz, C);
     if (target === 0) {
-      this.writeCell(wx, wy, wz, 0, 0, Block.Air); // re-derived dry: no source in reach
-      this.queue.add(`${wx},${wy - 1},${wz}`); // whatever rode on this cell must now be re-evaluated
+      this.writeCell(wx, wy, wz, 0, 0, Block.Air, 0, 0, eo); // re-derived dry: no source in reach
+      this.push(`${wx},${wy - 1},${wz}`, eo); // whatever rode on this cell must now be re-evaluated
       return;
     }
     if (target !== C.l || C.st !== 0) {
-      this.writeCell(wx, wy, wz, target, C.s, Block.Water, C.p, 0); // resting again: clear the riding flag, re-mark the closure
-      if (target > C.l) this.queue.add(`${wx},${wy - 1},${wz}`); // rose toward full level: what rides on it may now be fed
+      this.writeCell(wx, wy, wz, target, C.s, Block.Water, C.p, 0, eo); // resting again: clear the riding flag, re-mark the closure
+      if (target > C.l) this.push(`${wx},${wy - 1},${wz}`, eo); // rose toward full level: what rides on it may now be fed
     }
-    if (target >= 2) this.spreadToAir(wx, wy, wz, target);
+    if (target >= 2) this.spreadToAir(wx, wy, wz, target, eo);
   }
 
 // The re-derived level of a resting flow cell (see the rest branch for the rules):
@@ -438,7 +452,7 @@ private setState(wx: number, wy: number, wz: number, l: number, s: number, b: nu
   // around one source cell, and a LONE source in the sky has neither a flanking source
   // nor a source beside the Air below it — so it never accumulates into a vertical run
   // of sources; it stays one static block with a drip running off each exposed side.
-  private healSourceBody(wx: number, wy: number, wz: number): void {
+  private healSourceBody(wx: number, wy: number, wz: number, eo: boolean = false): void {
     // (a) source above + placed source alongside the Air below
     if (wy - 1 >= MIN_CY * 16) {
       const a = this.cellState(wx, wy - 1, wz);
@@ -446,7 +460,7 @@ private setState(wx: number, wy: number, wz: number, l: number, s: number, b: nu
         for (const [dx, dz] of HXZ) {
           const m = this.cellState(wx + dx, wy - 1, wz + dz);
           if (m.b === Block.Water && m.s === 1 && m.p === 1) {
-            this.spawnSource(wx, wy - 1, wz);
+            this.spawnSource(wx, wy - 1, wz, eo);
             return;
           }
         }
@@ -473,14 +487,14 @@ private setState(wx: number, wy: number, wz: number, l: number, s: number, b: nu
       const above = this.cellState(wx + dx, wy + 1, wz + dz);
       const inBody = (o1.b === Block.Water && o1.s === 1) || (o2.b === Block.Water && o2.s === 1) || (above.b === Block.Water && above.s === 1);
       if (!inBody) continue;
-      this.spawnSource(wx + dx, wy, wz + dz);
+      this.spawnSource(wx + dx, wy, wz + dz, eo);
     }
   }
 
   // A regenerated source cell: indistinguishable from one the player placed — breakable,
   // and re-checked every pulse (eternal emitter once it is left alone).
-  private spawnSource(x: number, y: number, z: number): void {
-    this.writeCell(x, y, z, 7, 1, Block.Water, 1, 0);
+  private spawnSource(x: number, y: number, z: number, eo: boolean = false): void {
+    this.writeCell(x, y, z, 7, 1, Block.Water, 1, 0, eo);
     this.springs.add(`${x},${y},${z}`);
   }
 
@@ -491,14 +505,14 @@ private setState(wx: number, wy: number, wz: number, l: number, s: number, b: nu
   // (2) spread targets AIR only: a loaded-unsettled neighbour's pristine worldgen water is
   // never touched — its own settle re-seeds it. A level-1 cell spreads nothing: the
   // flood's range is six blocks from full-level water (the user's 5–6 block fan).
-  private spreadToAir(wx: number, wy: number, wz: number, l: number): void {
+private spreadToAir(wx: number, wy: number, wz: number, l: number, eo: boolean = false): void {
     if (l < 2) return;
     for (const [dx, dz] of HXZ) {
       const tx = wx + dx, tz = wz + dz;
       if (this.cellState(tx, wy, tz).b === Block.Air) {
 if (this.world.hasChunk(chunkOf(tx), chunkOf(wy), chunkOf(tz))) {
-          this.writeCell(tx, wy, tz, l - 1, 0, Block.Water);
-        }
+           this.writeCell(tx, wy, tz, l - 1, 0, Block.Water, 0, 0, eo);
+         }
       }
     }
   }
@@ -524,7 +538,7 @@ if (this.world.hasChunk(chunkOf(tx), chunkOf(wy), chunkOf(tz))) {
   // `s`/`p` are the SOURCE flags of the falling parcel: a spring or waterfall head pours
   // plain flow (0,0); a lone falling parcel keeps its own flags (a worldgen source lake
   // that falls is still a source lake where it lands).
-  private dropColumn(x: number, y: number, z: number, s = 0, p = 0): void {
+  private dropColumn(x: number, y: number, z: number, s = 0, p = 0, eo: boolean = false): void {
     // pass 1: where does this column end?
     let kind: 'connects' | 'solid' | 'sheet' | 'deep' | 'worldfloor' | 'edge' = 'connects';
     let bottom = y; // lowest cell the pass-2 write may touch (inclusive)
@@ -551,11 +565,11 @@ if (this.world.hasChunk(chunkOf(tx), chunkOf(wy), chunkOf(tz))) {
     // then resets to resting water and re-derives). A 'connects' landing writes only the
     // cells ABOVE the meeting point — the water below is left exactly as it was.
     for (let cy = y; cy > bottom; cy--) {
-      this.writeCell(x, cy, z, 7, s, Block.Water, p, 1);
+      this.writeCell(x, cy, z, 7, s, Block.Water, p, 1, eo);
     }
     if (kind !== 'connects') {
       const st = kind === 'solid' || kind === 'worldfloor' ? 0 : 1; // a landing on ground rests (and re-derives from whatever feeds it); on a pool / the void it rides too
-      this.writeCell(x, bottom, z, 7, s, Block.Water, p, st);
+      this.writeCell(x, bottom, z, 7, s, Block.Water, p, st, eo);
     }
   }
 
@@ -564,18 +578,19 @@ if (this.world.hasChunk(chunkOf(tx), chunkOf(wy), chunkOf(tz))) {
   tick(budget: number): number {
     // Cells waiting on not-yet-generated space below them (the fall branch parked them
     // there): requeue them every pulse so an extending column resumes the moment the low
-    // band loads.
-    for (const key of this.waiting) this.queue.add(key);
+    // band loads. The stored origin rides with the cell (D4).
+    for (const [key, eo] of this.waiting) this.push(key, eo);
     this.waiting.clear();
     // Springs (placed / regenerated sources) are eternal emitters: requeue the live ones so
     // each pulse re-checks the Air beside it and re-emits its side halo (which keeps the
     // head columns poured through whatever gap is open). With that Air already filled, the
     // re-check writes nothing, which is what makes a settled source + its drips a true
     // fixpoint. A key whose cell is no longer a placed source (the player broke it, or its
-    // chunk was evicted and reloaded as worldgen water) is dropped from the set.
+    // chunk was evicted and reloaded as worldgen water) is dropped from the set. A live
+    // spring is eternal edit origin (D4).
     for (const key of this.springs) {
       const [sx, sy, sz] = key.split(',').map(Number);
-      if (this.cellState(sx, sy, sz).p === 1) this.queue.add(key);
+      if (this.cellState(sx, sy, sz).p === 1) this.push(key, true);
       else this.springs.delete(key);
     }
     let n = 0;
@@ -583,9 +598,11 @@ if (this.world.hasChunk(chunkOf(tx), chunkOf(wy), chunkOf(tz))) {
       const it = this.queue.values().next();
       if (it.done) break;
       const key = it.value as string;
+      const eo = this.editQueue.has(key);
       this.queue.delete(key);
+      this.editQueue.delete(key);
       const [wx, wy, wz] = key.split(',').map(Number);
-      this.process(wx, wy, wz);
+      this.process(wx, wy, wz, eo);
       n++;
     }
     return n;
@@ -616,9 +633,11 @@ if (this.world.hasChunk(chunkOf(tx), chunkOf(wy), chunkOf(tz))) {
       const it = this.queue.values().next();
       if (it.done) break;
       const key = it.value as string;
+      const eo = this.editQueue.has(key); // a settle drain that pops edit-origin work keeps the origin (D4)
       this.queue.delete(key);
+      this.editQueue.delete(key);
       const [wx, wy, wz] = key.split(',').map(Number);
-      this.process(wx, wy, wz);
+      this.process(wx, wy, wz, eo);
       guard++;
     }
     this.settling = null;
@@ -655,9 +674,6 @@ if (this.world.hasChunk(chunkOf(tx), chunkOf(wy), chunkOf(tz))) {
       this.springs.delete(`${wx},${wy},${wz}`);
     }
     c.wstream[i] = 0; // any riding cell here is overwritten/removed: it rests again (or is gone)
-    this.queue.add(`${wx},${wy},${wz}`);
-    for (const [dx, dz] of HXZ) this.queue.add(`${wx + dx},${wy},${wz + dz}`);
-    this.queue.add(`${wx},${wy + 1},${wz}`);
-    this.queue.add(`${wx},${wy - 1},${wz}`);
+    this.remark(wx, wy, wz, true); // every player edit is edit origin (D4)
   }
 }
