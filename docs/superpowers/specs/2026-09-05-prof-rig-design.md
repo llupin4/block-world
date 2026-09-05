@@ -5,6 +5,13 @@
   that branch has already merged — decided at execution).
 - **Status:** Design approved (2026-09-05). User decisions: **Playwright harness** (full
   `@playwright/test` dep, headless, CI-capable); coverage = **worst chunk + ocean**.
+- **Revision R1 (2026-09-05, plan self-review):** the worst chunk `(2,·,0)` is already in the
+  spawn ring (spawn column `(0,·,2)`, `VIEW_RADIUS = 2`), so segment A holds at the computed
+  spawn instead of teleporting to (40, 8, 8) — the window frames are the unmodified production
+  scenario (spawned player, ring filling, chunk loading → first mesh → light-settled remesh).
+  The `boot` report field = segment-A frames before the window opens. The report also records
+  `worstChunk.maxWindowMs` and `global.maxFrameIndex` (the ADR acceptance line reads them
+  directly). Everything else unchanged.
 - **Resolves:** the browser-acceptance gap of
   `docs/superpowers/specs/2026-08-29-slice-heavy-remesh-design.md` §Testing and acceptance
   ("manual walk loading the pinned worst chunk … per-phase CPU work ≤ 16.7 ms in DevTools") —
@@ -54,19 +61,20 @@ proves the cost model but never exercises the real frame loop, the frame-end dra
 - **Phase:** the app default (phase 0, no `?phase` param) — identical to the node baseline's
   light state (same seed 1234, same default world time, pin-identical light core). This is
   what makes the verts self-check below exact.
-- **Path** (teleports; a walk would add ~240 variable frames and nothing):
-  - **Boot (reference only, never asserted):** spawn (6, ·, 46), 60 frames — measures the
-    pre-existing boot cost for the record.
-  - **Segment A — worst chunk (asserted):** `player.place((40, 8, 8))` each frame — the player
-    sits inside chunk `(2,1,0)` so the ring loads the pinned worst chunk (nearest-first,
-    `LOAD_BUDGET = 1` → it loads in the first frames). Hold until **settled**:
+- **Path** (frame-indexed; the player is pinned by `player.place()` each frame — `noclip`,
+  zero input):
+  - **Segment A — worst chunk (asserted):** the player holds at the app's computed spawn
+    (spawn column `(0,·,2)`) — **no teleport**: the worst chunk `(2,·,0)` is already in the
+    spawn ring (chunk distance (2, −2), `VIEW_RADIUS = 2`), so it loads with the ordinary ring
+    refill (`LOAD_BUDGET = 1` → ~60 frames after boot). The window frames are the unmodified
+    production scenario. Hold until **settled**:
     `chunk.lightSettled && !pendingRebuild.has('2,1,0') && !scheduler.has('2,1,0')`, hard cap
-    **600 frames** (settling the worst chunk takes ~8+ light ticks at 512 pops/frame + ~6
-    reserved probe/slice/merge frames; 600 is a generous hang guard).
-  - **Segment B — ocean (asserted):** `player.place((8, 34, 200))` each frame — a scanned
-    99%-water 5×5-chunk ring under seed 1234 (maxH = 33, max depth 12; the ring streams
-    ~121 fresh water chunks at 1/frame), fixed **300-frame** budget (covers the full refill +
-    settle + remesh profile).
+    **600 frames** (loading ~frame 60 + ~8+ light ticks at 512 pops/frame + ~5 reserved
+    plan/slice/merge frames; 600 is a generous hang guard).
+  - **Segment B — ocean (asserted):** teleport `player.place((8, 34, 200))` each frame — a
+    scanned 99%-water 5×5-chunk ring under seed 1234 (maxH = 33, max depth 12; the ring
+    streams ~121 fresh water chunks at 1/frame), fixed **300-frame** budget (covers the full
+    refill + settle + remesh profile).
 - **`&norender` knob:** skips `renderer.render()` — the fallback if SwiftShader inflates
   main-thread GL cost. Default (rendering on) is the real code path; the report records
   which mode ran.
@@ -91,14 +99,15 @@ Emitted at the end of segment B: `console.log('PROF-RESULT ' + JSON.stringify(re
 ```
 {
   mode: 'remesh', seed: 1234, phase: 0, render: true,
-  boot:       { frames: 60, maxMs },
+  boot:       { frames, maxMs },          // A-frames before the window opens (reference only)
   worstChunk: {
     key: '2,1,0', settledVerts,           // the final cycle's vertex count
     window: [firstLoadFrame, settledMergeFrame],
+    maxWindowMs,                          // the worst frame inside the window (the ADR line)
     remeshCycles: [ { kind: 'probe-complete' | 'sliced', frames: [f0..fN], maxFrameMs, verts } ],
   },
   ocean:      { frames: 300, maxMs, avgMs },
-  global:     { maxFrameMs, framesOver16_7: [...], framesOver25: [...], framesOver33_4: [...] },
+  global:     { maxFrameMs, maxFrameIndex, drainMaxMs, framesOver16_7: [...], framesOver25: [...], framesOver33_4: [...] },
   pass: true|false,
   failReason: string|null                  // set when pass is false (or on a cap overrun)
 }
