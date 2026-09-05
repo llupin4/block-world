@@ -20,6 +20,7 @@ recoverable via git history at pre-restructure `main`, `0cf878c`).
 | [0011](0011-simulation-clocks.md) | Simulation clocks | `WorldTime.tick` heartbeat, water pulse on a 30-tick stride, frame-end crossing rule |
 | [0012](0012-light-worker.md) | Light simulation on a web worker | pin-identical engine over a chunk-field mirror, tick-numbered structured-clone protocol |
 | [0013](0013-heavy-remesh-slicing.md) | Heavy-chunk remesh | vertex-budget probe + 4 balanced row-band slices on reserved frames (exact partition, merge at end) |
+| [0014](0014-world-persistence.md) | World persistence | edited chunks snapshot to IndexedDB on unload and restore verbatim (water state included); light recomputes on load; 1.5 s boot gate |
 
 ## Conventions
 

@@ -16,6 +16,7 @@ Preview here [https://llupin4.github.io/block-world/](https://llupin4.github.io/
 - **Underwater mood** — submerging your head swaps background, fog, and FOV to sell the dive; its palette tracks time of day, so night underwater is darker.
 - **Day/night cycle** — a world-time clock (noon start, 4-minute cycle) drives a gradient sky, a sun and moon crossing the sky, stars after dusk, a world that darkens at night, and a slowly drifting cloud layer; a small HUD clock shows the time.
 - **Dynamic lighting** — torches emit 14-level light that propagates block-by-block through the grid, and sky light reaches every block open to the air, so caves and corners go dark; doors, glass, leaves, and water attenuate it. Sky light fades per block with the day/night cycle (torches stay constant), keeping deep night dark but readable.
+- **World persistence** — edited chunks snapshot to IndexedDB on unload and restore verbatim (water state included) across reloads; light recomputes on load (ADR 0014).
 
 ## Requirements
 

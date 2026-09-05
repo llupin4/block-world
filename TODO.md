@@ -42,7 +42,24 @@ restructure; their substance now lives in the relevant ADR under `docs/adr/`.
 Open follow-ups from the dynamic-lighting work (ADR 0007 — Dynamic lighting):
 
 - More light-emitting blocks (glowstone-class) — a one-line registry `light` value.
-- Light persistence once a world save system exists.
+- Light fields are intentionally NOT persisted (ADR 0014): the worker re-settles every restored chunk.
 - Flow-level-dependent water opacity (O by `wlevel`).
 - Cloud shadows (attenuation by the cloud layer — requires the layer to become world state).
 - Per-flow "which way" directional light / colored light.
+
+## Persistence (ADR 0014)
+
+- **Compress the ChunkRecords.** Six raw 4096-byte `Uint8Array`s (~24 KB/chunk); whole
+  columns of identical block ids are highly run-length-compressible — RLE first, brotli if
+  RLE leaves it fat.
+- **Full async load path.** Fetch-first streaming: the (future) worldgen worker fetches
+  the record and the chunk never synchronously touches the main thread — the current
+  warm-inline / pending-fetch / confirmed-miss path is the POC form, and the record is
+  already the sync payload. Reworks the streaming budget model the way the worldgen-worker
+  item (Streaming / rendering) does for generation.
+- **Close the crash window.** A hard tab kill loses edits since the last save point (unload
+  batch / hide / pagehide); interval snapshots (or per-edit meta saves) close it.
+- **Byte-budgeted LRU warm cache.** The 512-record cap is a record-count shortcut
+  (~15 MB); budget by bytes and evict to fit.
+- **Boot key-set growth.** `getAllKeys` + a `seed:` prefix filter is fine at POC sizes; an
+  IDB index on the seed prefix scales it.

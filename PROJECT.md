@@ -481,6 +481,13 @@ slices cost nothing visually; the old mesh is kept until the merge.
 
 ## 12. Persistence
 
+**[Superseded 2026-09-05 by [ADR 0014](docs/adr/0014-world-persistence.md).]** The build
+decided against the diff store below: the record is the chunk's six raw arrays (water sim
+state is not derivable from block diffs), and the quota concern applies to a whole-world
+store, not an edited-chunk store. Persistence is no longer skipped for v1 — edited chunks
+snapshot to IndexedDB on unload and restore verbatim across reloads; light recomputes on
+load. The original sketch is kept as the design context that ADR 0014 resolves.
+
 `localStorage` for the seed and player position. For block edits, IndexedDB storing **diffs only** — a per-chunk `Map<voxelIndex, blockId>` of player changes. On load, regenerate base terrain from the seed and replay the diff.
 
 Storing full chunk arrays will blow past quota within a few minutes of play. The diff for a normal session is a few kilobytes.
