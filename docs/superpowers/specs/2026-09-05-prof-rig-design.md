@@ -10,8 +10,23 @@
   spawn instead of teleporting to (40, 8, 8) — the window frames are the unmodified production
   scenario (spawned player, ring filling, chunk loading → first mesh → light-settled remesh).
   The `boot` report field = segment-A frames before the window opens. The report also records
-  `worstChunk.maxWindowMs` and `global.maxFrameIndex` (the ADR acceptance line reads them
-  directly). Everything else unchanged.
+`worstChunk.maxWindowMs` and `global.maxFrameIndex` (the ADR acceptance line reads them
+   directly). Everything else unchanged.
+- **Revision R2 (2026-09-05, live-run verification):** two corrections found by the first
+  green e2e run. (a) **Settle semantics:** `chunk.lightSettled` is live only in the worker's
+  mirror — the light reply (`applyLightResult`) applies blight/skylight + `touched` but does
+  not carry the flag to main-thread chunks, so the main-thread flag is never true. The rig
+  instead settles on the **settled-light signature + quiescence**: a completed `sliced` cycle
+  with `verts === 6312`, `PROF_QUIESCE` (10) remesh-free frames after the last worst-chunk
+  remesh, and no remesh of the chunk pending or in flight
+  (`!pendingRebuild.has('2,1,0') && !scheduler.has('2,1,0')`). A later touch restarts the
+  quiescence (the self-correcting contract). (b) **Cycle arithmetic:** a 4-band split is
+  **4 frames** — the plan frame meshes band 0; the merge frame meshes band 3 and then
+  `finish()` returns the merged geometry — not "1 plan + 3 slice + 1 merge" (5 frames).
+  Verified live: two 6312-vert 4-frame cycles at frames 193–196 and 205–208 (the second = a
+  touched-during-split re-mesh). First green run: `window [108, 208]`, `settledVerts 6312`,
+  `maxWindowMs 8.3`, ocean `max 7.8 / avg 2.2`, global max = frame 0 (one-time shader
+  compile, outside the window), `pass: true`.
 - **Resolves:** the browser-acceptance gap of
   `docs/superpowers/specs/2026-08-29-slice-heavy-remesh-design.md` §Testing and acceptance
   ("manual walk loading the pinned worst chunk … per-phase CPU work ≤ 16.7 ms in DevTools") —
@@ -67,10 +82,13 @@ proves the cost model but never exercises the real frame loop, the frame-end dra
     (spawn column `(0,·,2)`) — **no teleport**: the worst chunk `(2,·,0)` is already in the
     spawn ring (chunk distance (2, −2), `VIEW_RADIUS = 2`), so it loads with the ordinary ring
     refill (`LOAD_BUDGET = 1` → ~60 frames after boot). The window frames are the unmodified
-    production scenario. Hold until **settled**:
-    `chunk.lightSettled && !pendingRebuild.has('2,1,0') && !scheduler.has('2,1,0')`, hard cap
-    **600 frames** (loading ~frame 60 + ~8+ light ticks at 512 pops/frame + ~5 reserved
-    plan/slice/merge frames; 600 is a generous hang guard).
+    production scenario. Hold until **settled** — the settled-light signature (a completed
+    `sliced` cycle with `verts === 6312`) + `PROF_QUIESCE` (10) remesh-free frames after the
+    last worst-chunk remesh + no remesh of the chunk pending or in flight
+    (`!pendingRebuild.has('2,1,0') && !scheduler.has('2,1,0')`); *not* `chunk.lightSettled` —
+    that flag is live only in the worker's mirror (R2a). A later touch restarts the quiescence
+    (the self-correcting contract). Hard cap **600 frames** (the chunk loads ~frame 108, then
+    light settle + 4-frame remesh; 600 is a generous hang guard).
   - **Segment B — ocean (asserted):** teleport `player.place((8, 34, 200))` each frame — a
     scanned 99%-water 5×5-chunk ring under seed 1234 (maxH = 33, max depth 12; the ring
     streams ~121 fresh water chunks at 1/frame), fixed **300-frame** budget (covers the full
@@ -85,9 +103,9 @@ proves the cost model but never exercises the real frame loop, the frame-end dra
   **drain block** (drain ms — the section the fix controls).
 - **Tag every remesh of `2,1,0`**: per-frame kind (`probe-complete` | `plan` | `slice i of N`
   | `merge`), the frame's total ms, and the emitted vertex count. Frames group into
-  **cycles**: a `probe-complete` cycle is one frame; a `sliced` cycle is 1 `plan` frame
-  (meshing band 0) + 3 `slice` frames (bands 1–3) + 1 `merge` frame — `SLICE_COUNT` = 4
-  bands total.
+  **cycles**: a `probe-complete` cycle is one frame; a `sliced` cycle is **4 frames** over
+  `SLICE_COUNT` = 4 bands — 1 `plan` frame (meshes band 0) + 2 `slice` frames (bands 1–2) +
+  1 `merge` frame (meshes band 3, then `finish()` returns the merged geometry) (R2b).
 - Per-frame records `{ i, seg, total, drain }` + a per-remesh array (plain arrays; ≤ ~1000
   frames, no ring buffer needed).
 
@@ -121,8 +139,9 @@ The rig **always emits the report** — even on a segment cap overrun or an unex
 1. **Baseline:** `worstChunk.settledVerts === 6312` — the browser's settled light matches the
    node baseline the slice constants derive from; a mismatch = light-state drift (worldgen,
    phase, or worker change) that would silently invalidate `PROBE_VERTS`/`SLICE_COUNT`.
-2. **Slice path exercised:** the settled (last) remesh cycle is `sliced` — 1 plan + 3 slice
-   + 1 merge frame over the 4 bands — the rig really ran the new code, not the one-shot path.
+2. **Slice path exercised:** the settled (last) remesh cycle is `sliced` — plan + 2 slice
+   + merge (4 frames over the 4 bands, R2b) — the rig really ran the new code, not the
+   one-shot path.
 3. **Fix claim:** every worst-chunk remesh frame (plan / all slices / merge / any
    probe-complete) has total-frame ms ≤ 16.7.
 4. **Acceptance bar B:** no frame with total ms > 16.7 in the window
@@ -146,7 +165,10 @@ The rig **always emits the report** — even on a segment cap overrun or an unex
   the full JSON** (pass or fail, human-readable) + write the `test-results/prof-remesh.json`
   artifact → `expect(r.pass, 'see prof-remesh.json').toBe(true)`.
 - **`package.json`**: `"prof": "playwright test"` script. Not part of `npm test` (vitest) —
-  different runner, needs a browser + dev server. CI can run `npm run prof` after `npm test`.
+  different runner, needs a browser + dev server. `vitest.config.mts` scopes the unit suite to
+  `src/__tests__/**/*.test.ts` (the e2e spec matches vitest's default `*.spec.ts` include and
+  would otherwise be collected by the unit runner); `test-results/` is gitignored. CI can run
+  `npm run prof` after `npm test`.
 
 ### 6. Task 8 bridge (closes the open acceptance)
 
@@ -178,9 +200,10 @@ The rig **always emits the report** — even on a segment cap overrun or an unex
 ## Files
 
 - `src/main.ts` — the rig (~120 lines, all inside the `profMode` gate).
-- `playwright.config.mjs` (new), `tests/e2e/remesh-prof.spec.ts` (new).
+- `playwright.config.mjs` (new), `tests/e2e/remesh-prof.spec.ts` (new),
+  `vitest.config.mts` (new — unit-scope), `.gitignore` (+`test-results/`, `playwright-report/`).
 - `package.json` — +`@playwright/test` devDep, +`"prof"` script.
-- No changes to existing tests or src modules.
+- No changes to the mesher, existing tests, or other src modules.
 
 ## Non-goals
 
