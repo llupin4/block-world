@@ -12,6 +12,7 @@ export const PROF_VSYNC_MS = 16.7;     // acceptance bar B: the 60 Hz budget
 export const PROF_OCEAN_MS = 25;       // ADR 0002 ocean baseline
 export const PROF_A_CAP = 600;         // segment A hang guard
 export const PROF_B_FRAMES = 300;      // segment B budget
+export const PROF_QUIESCE = 10;        // quiescent frames after the last worst-chunk remesh before the window closes
 export const PROF_OCEAN = { x: 8, y: 34, z: 200 }; // scanned 99%-water 5x5-chunk ring (seed 1234)
 
 export type RemeshKind = 'probe-complete' | 'plan' | 'slice' | 'merge';
@@ -50,8 +51,10 @@ export interface ProfReport {
 }
 
 export interface FrameState {
-  worstLoaded: boolean;  // world.hasChunk(2, 1, 0)
-  worstSettled: boolean; // chunk.lightSettled && !pendingRebuild.has(key) && !scheduler.has(key)
+  worstLoaded: boolean;  // world.getChunk(2, 1, 0) !== undefined
+  worstSettled: boolean; // !pendingRebuild.has(key) && !scheduler.has(key) — the chunk's lightSettled
+  // flag is live ONLY in the worker mirror (the reply does not carry it), so the rig settles on
+  // quiescence + the 6312 baseline signature instead (see beginFrame)
 }
 
 export interface ProfRigOptions {
@@ -94,11 +97,20 @@ export class ProfRig {
   beginFrame(s: FrameState): { waypoint: { x: number; y: number; z: number } } {
     const f = this.frame;
     if (s.worstLoaded && this.windowStart === null) this.windowStart = f;
-    if (this.seg === 'A' && (s.worstSettled || f + 1 >= PROF_A_CAP)) {
-      if (s.worstSettled) this.windowEnd = this.lastRemeshFrame;
-      else this.reason = `segment A cap: worst chunk not settled by frame ${PROF_A_CAP - 1}`;
-      this.seg = 'B';
-      this.bLeft = PROF_B_FRAMES;
+    if (this.seg === 'A') {
+      // Settled = the settled-light signature (a 6312-vert sliced cycle) has completed, the
+      // chunk has been quiescent (no remesh) for PROF_QUIESCE frames, and no remesh of it is
+      // pending/in flight. A later touch restarts the quiescence (the self-correcting contract).
+      const settled = s.worstSettled
+        && this.lastRemeshFrame !== null
+        && f - this.lastRemeshFrame >= PROF_QUIESCE
+        && this.cycles.some((c) => c.kind === 'sliced' && c.verts === PROF_WORST_VERTS);
+      if (settled || f + 1 >= PROF_A_CAP) {
+        if (settled) this.windowEnd = this.lastRemeshFrame;
+        else this.reason = `segment A cap: worst chunk not settled by frame ${PROF_A_CAP - 1}`;
+        this.seg = 'B';
+        this.bLeft = PROF_B_FRAMES;
+      }
     }
     if (this.seg === 'B') this.bLeft--;
     return { waypoint: this.seg === 'B' ? { ...PROF_OCEAN } : { ...this.opts.anchor } };
@@ -154,9 +166,9 @@ export class ProfRig {
     else if (this.windowEnd === null) reasons.push('window never closed: no remesh observed before settle');
     const last = this.cycles[this.cycles.length - 1];
     if (this.windowStart !== null && this.windowEnd !== null) {
-      // the settled remesh took the slice path and matches the node baseline
+      // the settled remesh took the slice path and matches the node baseline (independent checks)
       if (!last || last.kind !== 'sliced') reasons.push('settled remesh did not take the slice path');
-      else if (last.verts !== PROF_WORST_VERTS)
+      if (last && last.verts !== PROF_WORST_VERTS)
         reasons.push(`settled verts ${last.verts} != node baseline ${PROF_WORST_VERTS} (light-state drift)`);
       // remesh frames and the whole window stay inside the vsync budget
       for (const c of this.cycles)

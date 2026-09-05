@@ -6,6 +6,7 @@ import * as streaming from './streaming';
 import { Hotbar } from './ui';
 import { meshChunk, meshChunkRange, probeMeshChunk, type ChunkMesh, type LightSampler } from './chunk-mesher';
 import { SliceScheduler, decideBands, PROBE_VERTS, SLICE_COUNT } from './mesh-slices';
+import { ProfRig, meshVerts, PROF_WORST_KEY } from './prof-rig';
 import { toGeometry } from './geometry';
 import { Player, EYE, type MoveInput } from './player';
 import { raycastVoxel, REACH, type RayHit } from './raycast';
@@ -225,6 +226,13 @@ addLightShader(matTrans);
 // headless/visual verification reaches any time of day without a 120 s real-time wait.
 const phaseParam = new URLSearchParams(location.search).get('phase');
 const startPhase = phaseParam !== null && phaseParam !== '' && Number.isFinite(+phaseParam) ? +phaseParam : 0;
+// ?prof=remesh dev-only: the deterministic profiling rig (spec:
+// docs/superpowers/specs/2026-09-05-prof-rig-design.md). Pins the player, tags the worst
+// chunk's remesh events, and emits a PROF-RESULT JSON report (window.__profResult) that the
+// Playwright harness (tests/e2e/remesh-prof.spec.ts) waits for. &norender skips
+// renderer.render (the SwiftShader fallback; the report records which mode ran).
+const profMode = new URLSearchParams(location.search).get('prof') === 'remesh';
+const profNoRender = profMode && new URLSearchParams(location.search).has('norender');
 const worldTime = new WorldTime(startPhase);
 const sky = createSky(scene, FOG_AIR, FOG_WATER, BG_WATER);
 const clouds = createClouds(scene);
@@ -350,6 +358,11 @@ const player = new Player(
   (x, y, z) => world.isSolid(x, y, z),
 );
 player.place(SPAWN);
+if (profMode) player.noclip = true; // the rig owns the player: pinned each frame, no physics
+const profRig = profMode
+  ? new ProfRig({ seed: TERRAIN_SEED, phase: startPhase, render: !profNoRender, anchor: { x: player.pos.x, y: player.pos.y, z: player.pos.z } })
+  : null;
+let profDrainMs = 0;
 player.yaw = -Math.PI / 2; // face +x (east), at the sea — the shoreline starts ~6 m from spawn
 camera.rotation.order = 'YXZ';
 
@@ -404,6 +417,7 @@ document.addEventListener('mousemove', (e) => {
 });
 
 function readMove(): MoveInput {
+  if (profMode) return { forward: 0, strafe: 0, up: false, down: false }; // the rig owns the player
   return {
     forward: (keys.has('KeyW') ? 1 : 0) - (keys.has('KeyS') ? 1 : 0),
     strafe: (keys.has('KeyD') ? 1 : 0) - (keys.has('KeyA') ? 1 : 0),
@@ -842,6 +856,7 @@ let last = performance.now();
 let acc = 0;
 
 function frame(now: number): void {
+  const profT0 = profMode ? performance.now() : 0; // the rig measures the whole frame's main-thread work
   let dt = (now - last) / 1000;
   last = now;
   if (dt > 0.1) dt = 0.1; // clamp after tab-switch/hitch
@@ -854,6 +869,19 @@ function frame(now: number): void {
     if (player.pos.y < WORLD_Y_MIN) player.place(SPAWN); // fell out of the world (open cave / dug-away floor)
   }
   tickStreaming(); // ONCE per frame (was inside the substep loop, where the frame-time clamp multiplied the streaming budget by the substep count, up to ~12 chunks/frame)
+  if (profRig) {
+    // The rig pins the player (segment A: the spawn anchor — the worst chunk (2,·,0) is already
+    // in the spawn ring; segment B: the open ocean). worstLoaded is read AFTER this frame's
+    // streaming so the window opens on the load frame itself. worstSettled does NOT use the
+    // chunk's lightSettled flag: in production that flag is live only in the worker mirror
+    // (the reply does not carry it) — the rig settles on quiescence + the 6312 baseline
+    // signature instead (ProfRig.beginFrame).
+    const wc = world.getChunk(2, 1, 0);
+    player.place(profRig.beginFrame({
+      worstLoaded: wc !== undefined,
+      worstSettled: wc !== undefined && !pendingRebuild.has(PROF_WORST_KEY) && !scheduler.has(PROF_WORST_KEY),
+    }).waypoint);
+  }
   lightSim.tick(LIGHT_TICK_BUDGET); // the worker drains once per frame (ADR 0012) — off the renderer's critical path; idle cost = one worker round-trip per frame (a small reply object)
   if (tickCrossed(tickBefore, worldTime.tick, WATER_STRIDE)) sim.tick(WATER_PULSE); // water on the tick heartbeat (ADR 0011): one pulse per 30 substeps = 0.5 sim s (was a wall-clock accumulator); settles are event-driven and stay snappy
   // Merge this frame's water + light touched chunks into the pending re-mesh set (both sims keep
@@ -873,20 +901,25 @@ function frame(now: number): void {
   // at the worst-case density, and the other budget slots would risk the 16.7 ms budget; the
   // skipped rebuilds carry one more frame. A probe-complete mesh is ≤ PROBE_VERTS verts =
   // ≤ 16.7 ms by construction, so it flows through the ordinary budget.
+  const profDrainT0 = profMode ? performance.now() : 0; // the rig attributes the drain's share of the frame
   const pcx = chunkOf(player.pos.x), pcy = chunkOf(player.pos.y), pcz = chunkOf(player.pos.z);
   const inFlight = scheduler.inFlightKey();
   if (inFlight) {
     const [cx, cy, cz] = inFlight.split(',').map(Number) as [number, number, number];
     if (world.hasChunk(cx, cy, cz)) {
       const band = scheduler.advance(inFlight)!;
-      scheduler.store(inFlight, meshChunkRange(world, cx, cy, cz, lightSampler, band[0], band[1]));
+      const sliceMesh = meshChunkRange(world, cx, cy, cz, lightSampler, band[0], band[1]);
+      scheduler.store(inFlight, sliceMesh);
       const merged = scheduler.finish(inFlight);
       if (merged) {
         swapChunkMesh(cx, cy, cz, merged); // the old mesh was kept the whole split — swap at merge only
+        if (inFlight === PROF_WORST_KEY) profRig?.noteRemesh('merge', meshVerts(merged));
         // The pending entry was deleted when the plan started; if it is back here, light/water
         // touched the chunk during the split (or streaming marked it dirty) — its slices saw
         // mixed per-frame light states, so the entry stays and the next frame re-meshes
         // (the self-correcting contract). No entry → the chunk is done.
+      } else if (inFlight === PROF_WORST_KEY) {
+        profRig?.noteRemesh('slice', meshVerts(sliceMesh));
       }
       // Non-final frames: nothing to delete — the entry was already gone at start, and the
       // pre-check finds the plan via the scheduler, not via pendingRebuild.
@@ -907,16 +940,20 @@ function frame(now: number): void {
       pendingRebuild.delete(key);
       if (probe.complete) {
         swapChunkMesh(cx, cy, cz, probe.mesh); // the probe IS the full mesh — today's behavior
+        if (key === PROF_WORST_KEY) profRig?.noteRemesh('probe-complete', meshVerts(probe.mesh));
       } else {
         // Heavy: the probe's partial buffer is discarded; start the slice plan and run band 0
         // this frame (the probe already spent the frame's budget — the frame is reserved).
         scheduler.start(key, decideBands(world.getChunk(cx, cy, cz)!, SLICE_COUNT));
         const [y0, y1] = scheduler.advance(key)!;
-        scheduler.store(key, meshChunkRange(world, cx, cy, cz, lightSampler, y0, y1));
+        const slice0 = meshChunkRange(world, cx, cy, cz, lightSampler, y0, y1);
+        scheduler.store(key, slice0);
+        if (key === PROF_WORST_KEY) profRig?.noteRemesh('plan', meshVerts(slice0));
         break;
       }
     }
   }
+  profDrainMs = profMode ? performance.now() - profDrainT0 : 0;
   syncCamera();
   updateHitbox();
   syncWaterFx();
@@ -930,7 +967,14 @@ function frame(now: number): void {
     clockLabel = label;
     clockEl.textContent = label;
   }
-  renderer.render(scene, camera);
+  if (!profNoRender) renderer.render(scene, camera);
+  if (profRig) {
+    const rep = profRig.noteFrame(performance.now() - profT0, profDrainMs);
+    if (rep) {
+      console.log('PROF-RESULT ' + JSON.stringify(rep));
+      (window as unknown as Record<string, unknown>).__profResult = rep;
+    }
+  }
   requestAnimationFrame(frame);
 }
 
