@@ -56,7 +56,7 @@ A **5×5×5 = 125-chunk ring** around the player: every chunk with `|cx−pcx| �
 ## Consequences
 
 - Known limits: a y 0..79 terrain slab; no persistence (cross-ref ADR 0001 — Project foundation & tooling); the streaming ring is fixed at radius 2 with the 1-per-frame budget.
-- Open follow-ups, tracked in TODO.md: an **adaptive frame budget** (a cheap frame-time governor that raises the load/remesh budget to 2–3 on a fast machine when the last frame was < 8 ms and drops it to 0–1 when a heavy water/cave band is streaming in), and **slicing the one-shot heavy remesh over 2 frames** (half the vertices per frame) to remove the last visible hitch.
+- Open follow-ups, tracked in TODO.md: an **adaptive frame budget** (a cheap frame-time governor that raises the load/remesh budget to 2–3 on a fast machine when the last frame was < 8 ms and drops it to 0–1 when a heavy water/cave band is streaming in). **Slicing the one-shot heavy remesh** is resolved by ADR 0013 (2026-08-29, branch `slice-heavy-remesh` — vertex-budget probe + 4 balanced row-band slices on reserved frames).
 - The dirty-flag + budget design is what lets edits (ADR 0004), the water sim (ADR 0005), and streaming share one invalidation path without synchronous remesh thrash.
 
 ## Deviations & execution notes

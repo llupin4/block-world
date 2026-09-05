@@ -468,6 +468,15 @@ if (chunk.opaqueMesh) {
 
 Three does not garbage-collect GPU buffers. Every geometry you replace must be explicitly disposed.
 
+**Heavy-chunk slicing (2026-08-29, ADR 0013).** The one-shot remesh of the largest water/cave
+chunk (15–28 ms on the single heaviest chunk) is now budgeted like the streaming: the
+frame-end drain probes each candidate with a vertex budget (`PROBE_VERTS = 3764` — a probe
+frame ≤ 1 vsync by construction); a truncated probe means the chunk is sliced into
+`SLICE_COUNT = 4` balanced row bands, one per reserved frame (each ≤ ~7 ms at worst-case
+density), merged into one geometry at the end. The row-band partition is exact (per-cell
+emission independence — the band meshes concatenated are byte-identical to the whole), so the
+slices cost nothing visually; the old mesh is kept until the merge.
+
 ---
 
 ## 12. Persistence

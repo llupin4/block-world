@@ -22,9 +22,6 @@ restructure; their substance now lives in the relevant ADR under `docs/adr/`.
   25–138 ms frames). A measured-but-blunt fix: a cheap frame-time governor could raise the
   budget to 2–3 on a fast machine when the last frame was < 8 ms and drop it to 0–1 when a
   heavy water/cave band is streaming in. (ADR 0002 — World model & terrain.)
-- One-shot heavy remesh still shows as a 15–28 ms hiccup on the single largest water/cave chunk
-  (accepted: zero >25 ms frames now except that tail; see §9 numbers). Slicing a huge remesh
-  over 2 frames (half the vertices per frame) would remove the last visible hitch. (ADR 0002.)
 
 ## Water sim (model)
 
