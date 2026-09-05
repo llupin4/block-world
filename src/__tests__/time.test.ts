@@ -86,6 +86,22 @@ describe('tick — the canonical heartbeat (ADR 0011)', () => {
   });
 });
 
+describe('WorldTime.snapshot/restore — the persistence round trip (ADR 0014)', () => {
+  it('round-trips time, tick and the private phaseTotal (dayPhase/day/hour included)', () => {
+    const t = new WorldTime(0.25); // start at sunset
+    t.advance(37.5);
+    t.advance(1.5);
+    const snap = t.snapshot();
+    const t2 = new WorldTime(0);
+    t2.restore(snap);
+    expect(t2.time).toBeCloseTo(t.time);
+    expect(t2.tick).toBe(t.tick);
+    expect(t2.dayPhase).toBeCloseTo(t.dayPhase);
+    expect(t2.day).toBe(t.day);
+    expect(t2.hour).toBeCloseTo(t.hour);
+  });
+});
+
 describe('tickCrossed — the frame-end water-pulse rule (ADR 0011)', () => {
   it('reports a multiple-of-stride crossing inside (prev, now]', () => {
     expect(tickCrossed(29, 29, 30)).toBe(false); // no ticks ran

@@ -45,6 +45,17 @@ export class WorldTime {
     this.phaseTotal += dt / DAY_LENGTH;
     this.tick++;
   }
+
+  /** Persistence snapshot (ADR 0014): the full clock state, `phaseTotal` included. `restore` is its inverse. */
+  snapshot(): { time: number; tick: number; phaseTotal: number } {
+    return { time: this.time, tick: this.tick, phaseTotal: this.phaseTotal };
+  }
+
+  restore(s: { time: number; tick: number; phaseTotal: number }): void {
+    this.time = s.time;
+    this.tick = s.tick;
+    this.phaseTotal = s.phaseTotal;
+  }
 }
 
 const pad2 = (n: number): string => String(n).padStart(2, '0');
