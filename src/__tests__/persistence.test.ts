@@ -1,8 +1,12 @@
 import { describe, it, expect } from 'vitest';
-import { World, localIndex } from '../world';
+import { World, localIndex, CHUNK_VOL, type Chunk } from '../world';
 import { Block } from '../blocks';
 import { WaterSim } from '../water';
 import { TERRAIN_SEED, TerrainGen, generateChunkTerrain } from '../terrain';
+import {
+  snapshotChunk, applyRecord, Persistence, InMemoryChunkStore,
+  chunkRecordKey, metaKey, type ChunkStore,
+} from '../persistence';
 
 describe('water origin tracking — the edit gate (D4)', () => {
   it('settle + pulses on generated chunks never mark a chunk edited', () => {
@@ -81,5 +85,106 @@ describe('WaterSim.restore — the persistence rebuild (D1/D2)', () => {
     const sim2 = new WaterSim(world2);
     sim2.restore(c2);
     expect(inner(sim2).waiting.has('8,16,8')).toBe(false);
+  });
+});
+describe('persistence — records and store', () => {
+  const mkChunk = (w: World, cx: number, cy: number, cz: number): Chunk => {
+    const c = w.ensureChunk(cx, cy, cz);
+    c.edited = true;
+    return c;
+  };
+
+  it('snapshotChunk/applyRecord round-trip the six arrays byte-for-byte', () => {
+    const world = new World();
+    const c = mkChunk(world, 1, 2, 3);
+    for (let i = 0; i < CHUNK_VOL; i++) {
+      c.blocks[i] = i % 13;
+      c.meta[i] = (i * 7) % 4;
+      c.wlevel[i] = (i * 3) % 8;
+      c.wsource[i] = i % 2;
+      c.wplaced[i] = (i >> 1) % 2;
+      c.wstream[i] = (i >> 2) % 2;
+    }
+    const rec = snapshotChunk(c);
+    expect(rec.v).toBe(1);
+    expect([rec.cx, rec.cy, rec.cz]).toEqual([1, 2, 3]);
+    world.removeChunk(1, 2, 3);
+    applyRecord(world, rec);
+    const c2 = world.getChunk(1, 2, 3)!;
+    expect(c2.settled).toBe(true); // D1: the saved state is the truth
+    expect(c2.edited).toBe(true);  // a persisted chunk is by definition edited
+    expect(c2.dirty).toBe(false);  // first mesh goes through deferredFirstMesh, not the remesh pass
+    const fields: [string, Uint8Array, Uint8Array][] = [
+      ['blocks', c.blocks, c2.blocks], ['meta', c.meta, c2.meta],
+      ['wlevel', c.wlevel, c2.wlevel], ['wsource', c.wsource, c2.wsource],
+      ['wplaced', c.wplaced, c2.wplaced], ['wstream', c.wstream, c2.wstream],
+    ];
+    for (const [name, a, b] of fields) expect(b, name).toEqual(new Uint8Array(a));
+  });
+
+  it('onUnload snapshots edited chunks only; the warm cache restores sync and evicts the oldest past the cap', async () => {
+    const store = new InMemoryChunkStore();
+    const persist = new Persistence(store, 1234);
+    await persist.boot();
+    const world = new World();
+    const edited = mkChunk(world, 0, 0, 0);
+    edited.blocks[0] = 5;
+    const pristine = world.ensureChunk(1, 0, 0); // edited = false
+    persist.onUnload(edited);
+    persist.onUnload(pristine);
+    expect(store.puts).toBe(1); // pristine terrain is never written (D4/D6)
+    expect(persist.syncRecord(0, 0, 0)).toBeDefined();
+    expect(persist.hasPersisted(0, 0, 0)).toBe(true);
+    expect(persist.hasPersisted(1, 0, 0)).toBe(false);
+
+    for (let i = 1; i <= 513; i++) { // WARM_CAP = 512 → two evictions
+      const c = world.ensureChunk(i, 0, 0);
+      c.edited = true;
+      persist.onUnload(c);
+    }
+    expect(persist.syncRecord(1, 0, 0)).toBeUndefined(); // evicted (oldest first)
+    expect(persist.syncRecord(513, 0, 0)).toBeDefined();
+    expect(persist.hasPersisted(1, 0, 0)).toBe(true); // eviction never drops the key set
+  });
+
+  it('fetchRecord dedups in-flight reads; the third read is a warm hit', async () => {
+    let gets = 0;
+    const backing = new InMemoryChunkStore();
+    const counting: ChunkStore = {
+      get: async (k) => { gets++; return backing.get(k); },
+      put: (k, r) => backing.put(k, r),
+      delete: (k) => backing.delete(k),
+      keys: () => backing.keys(),
+    };
+    await backing.put(chunkRecordKey(1234, 2, 0, 0), snapshotChunk(mkChunk(new World(), 2, 0, 0)));
+    const persist = new Persistence(counting, 1234);
+    await persist.boot(); // boot's own meta lookup counts as one get
+    const base = gets;
+    const [a, b] = await Promise.all([persist.fetchRecord(2, 0, 0), persist.fetchRecord(2, 0, 0)]);
+    expect(gets).toBe(base + 1); // one in-flight chunk read, shared
+    expect(a).toBeDefined();
+    expect(b).toBe(a);
+    await persist.fetchRecord(2, 0, 0);
+    expect(gets).toBe(base + 1); // warm after the first fetch
+  });
+
+  it('boot loads the key set (seed-prefix filtered) and the world meta', async () => {
+    const store = new InMemoryChunkStore();
+    await store.put(chunkRecordKey(1234, 0, 0, 0), snapshotChunk(mkChunk(new World(), 0, 0, 0)));
+    await store.put(chunkRecordKey(9999, 0, 0, 0), snapshotChunk(mkChunk(new World(), 0, 0, 0)));
+    await store.put(metaKey(1234), {
+      v: 1, seed: 1234,
+      player: { x: 1, y: 2, z: 3, yaw: 0.5, pitch: -0.25 },
+      time: { time: 100, tick: 6000, phaseTotal: 0.5 },
+      hotbar: { slots: [1, 2, 3, 4, 5, 6, 7, 8, 9], selected: 3 },
+    });
+    const persist = new Persistence(store, 1234);
+    const meta = await persist.boot();
+    expect(meta?.seed).toBe(1234);
+    expect(meta?.player.x).toBe(1);
+    expect(meta?.time.tick).toBe(6000);
+    expect(meta?.hotbar.selected).toBe(3);
+    expect(persist.hasPersisted(0, 0, 0)).toBe(true); // this seed's key
+    expect(persist.hasPersisted(5, 0, 0)).toBe(false); // never persisted
   });
 });
