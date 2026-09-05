@@ -4,7 +4,8 @@ import { World, chunkKey, chunkOf, CHUNK_SIZE, WORLD_Y_MAX, WORLD_Y_MIN } from '
 import { TERRAIN_SEED, TerrainGen, generateChunkTerrain } from './terrain';
 import * as streaming from './streaming';
 import { Hotbar } from './ui';
-import { meshChunk } from './chunk-mesher';
+import { meshChunk, meshChunkRange, probeMeshChunk, type ChunkMesh, type LightSampler } from './chunk-mesher';
+import { SliceScheduler, decideBands, PROBE_VERTS, SLICE_COUNT } from './mesh-slices';
 import { toGeometry } from './geometry';
 import { Player, EYE, type MoveInput } from './player';
 import { raycastVoxel, REACH, type RayHit } from './raycast';
@@ -283,13 +284,18 @@ const REBUILD_BUDGET = 3; // light/water-touched chunks re-meshed per frame
 const pendingRebuild = new Set<string>(); // chunk keys awaiting a rebuildChunkMesh (carries across frames)
 const deferredFirstMesh = new Set<string>(); // streamed-chunk keys whose FIRST/fresh mesh waits one frame for the worker's light fields (ADR 0012: replies are macrotasks — a load-frame drain would mesh from still-zero light) — moved into pendingRebuild at the frame end
 
+const scheduler = new SliceScheduler(); // heavy-chunk slice plans (ADR 0013): at most one in flight
+const lightSampler: LightSampler = (x, y, z) => world.getLight(x, y, z);
+
 /** (dx^2+dz^2) dominates x/z; |cy-pcy| breaks ties — mirrors streaming.score so the nearest chunk re-meshes first. */
 function rebuildScore(c: [number, number, number], pcx: number, pcy: number, pcz: number): number {
   const dx = c[0] - pcx, dz = c[2] - pcz;
   return (dx * dx + dz * dz) * 100 + Math.abs(c[1] - pcy);
 }
 
-function rebuildChunkMesh(cx: number, cy: number, cz: number): void {
+/** Scene side of a finished mesh: dispose the old entry, build geometries, swap, clear dirty.
+ * Shared by the sync edit path, the probe-complete drain path, and the slice-merge path. */
+function swapChunkMesh(cx: number, cy: number, cz: number, mesh: ChunkMesh): void {
   const key = chunkKey(cx, cy, cz);
   const old = chunkObjs.get(key);
   for (const m of [old?.opaque, old?.trans]) {
@@ -298,21 +304,28 @@ function rebuildChunkMesh(cx: number, cy: number, cz: number): void {
       m.geometry.dispose();
     }
   }
-  const { opaque, trans } = meshChunk(world, cx, cy, cz, (x, y, z) => world.getLight(x, y, z));
   const entry: { opaque: THREE.Mesh | null; trans: THREE.Mesh | null } = { opaque: null, trans: null };
-  if (opaque) entry.opaque = new THREE.Mesh(toGeometry(opaque), matOpaque);
-  if (trans) entry.trans = new THREE.Mesh(toGeometry(trans), matTrans);
+  if (mesh.opaque) entry.opaque = new THREE.Mesh(toGeometry(mesh.opaque), matOpaque);
+  if (mesh.trans) entry.trans = new THREE.Mesh(toGeometry(mesh.trans), matTrans);
   if (entry.opaque) scene.add(entry.opaque);
   if (entry.trans) scene.add(entry.trans);
   chunkObjs.set(key, entry);
   const ch = world.getChunk(cx, cy, cz);
-  if (ch) ch.dirty = false; // T10: a rebuilt mesh is up to date; streaming only reschedules stale chunks
+  if (ch) ch.dirty = false; // a rebuilt mesh is up to date; streaming only reschedules stale chunks
+}
+
+/** Synchronous edit-remesh (setBlock / door toggle path). Still one-shot for heavy chunks —
+ * documented residual, belongs to TODO items 2/3 (worker offload / adaptive budget). */
+function rebuildChunkMesh(cx: number, cy: number, cz: number): void {
+  scheduler.cancel(chunkKey(cx, cy, cz)); // a sync edit supersedes any in-flight split — a finished split must never clobber it
+  swapChunkMesh(cx, cy, cz, meshChunk(world, cx, cy, cz, lightSampler));
 }
 // (T8 remeshes around edits via remeshAround; T10's streaming drives loads/remeshes via
 //  rebuildChunkMesh and unloads via removeChunkMesh below.)
 
 /** T10: scene side of an unload — update() has already removed the chunk from the world. */
 function removeChunkMesh(cx: number, cy: number, cz: number): void {
+  scheduler.cancel(chunkKey(cx, cy, cz)); // an in-flight split of a vanished chunk is discarded (partial buffers are CPU-only)
   const key = chunkKey(cx, cy, cz);
   const old = chunkObjs.get(key);
   for (const m of [old?.opaque, old?.trans]) {
@@ -854,15 +867,54 @@ function frame(now: number): void {
   // chunk settled to all-zero light, which the move still meshes, correctly dark).
   deferredFirstMesh.forEach((key) => pendingRebuild.add(key));
   deferredFirstMesh.clear();
-  // Re-mesh up to REBUILD_BUDGET, closest to the player first; the rest carry to the next frame
-  // (their light/water is a self-correcting lower bound, so a briefly-stale mesh is fine).
-  if (pendingRebuild.size) {
-    const pcx = chunkOf(player.pos.x), pcy = chunkOf(player.pos.y), pcz = chunkOf(player.pos.z);
+  // Re-mesh closest to the player first (light/water is a self-correcting lower bound, so a
+  // briefly-stale mesh is fine — ADR 0012). A frame that runs a heavy-chunk slice — or starts
+  // one (the probe already spent the frame's budget) — is RESERVED for it: a slice is ≤ ~7 ms
+  // at the worst-case density, and the other budget slots would risk the 16.7 ms budget; the
+  // skipped rebuilds carry one more frame. A probe-complete mesh is ≤ PROBE_VERTS verts =
+  // ≤ 16.7 ms by construction, so it flows through the ordinary budget.
+  const pcx = chunkOf(player.pos.x), pcy = chunkOf(player.pos.y), pcz = chunkOf(player.pos.z);
+  const inFlight = scheduler.inFlightKey();
+  if (inFlight) {
+    const [cx, cy, cz] = inFlight.split(',').map(Number) as [number, number, number];
+    if (world.hasChunk(cx, cy, cz)) {
+      const band = scheduler.advance(inFlight)!;
+      scheduler.store(inFlight, meshChunkRange(world, cx, cy, cz, lightSampler, band[0], band[1]));
+      const merged = scheduler.finish(inFlight);
+      if (merged) {
+        swapChunkMesh(cx, cy, cz, merged); // the old mesh was kept the whole split — swap at merge only
+        // The pending entry was deleted when the plan started; if it is back here, light/water
+        // touched the chunk during the split (or streaming marked it dirty) — its slices saw
+        // mixed per-frame light states, so the entry stays and the next frame re-meshes
+        // (the self-correcting contract). No entry → the chunk is done.
+      }
+      // Non-final frames: nothing to delete — the entry was already gone at start, and the
+      // pre-check finds the plan via the scheduler, not via pendingRebuild.
+    } else {
+      scheduler.cancel(inFlight); // unloaded between frames
+      pendingRebuild.delete(inFlight);
+    }
+  } else if (pendingRebuild.size) {
     const list = [...pendingRebuild].map((k) => k.split(',').map(Number) as [number, number, number]);
     list.sort((a, b) => rebuildScore(a, pcx, pcy, pcz) - rebuildScore(b, pcx, pcy, pcz));
     for (const [cx, cy, cz] of list.slice(0, REBUILD_BUDGET)) {
-      pendingRebuild.delete(`${cx},${cy},${cz}`);
-      if (world.hasChunk(cx, cy, cz)) rebuildChunkMesh(cx, cy, cz);
+      const key = `${cx},${cy},${cz}`;
+      if (!world.hasChunk(cx, cy, cz)) {
+        pendingRebuild.delete(key);
+        continue;
+      }
+      const probe = probeMeshChunk(world, cx, cy, cz, lightSampler, PROBE_VERTS);
+      pendingRebuild.delete(key);
+      if (probe.complete) {
+        swapChunkMesh(cx, cy, cz, probe.mesh); // the probe IS the full mesh — today's behavior
+      } else {
+        // Heavy: the probe's partial buffer is discarded; start the slice plan and run band 0
+        // this frame (the probe already spent the frame's budget — the frame is reserved).
+        scheduler.start(key, decideBands(world.getChunk(cx, cy, cz)!, SLICE_COUNT));
+        const [y0, y1] = scheduler.advance(key)!;
+        scheduler.store(key, meshChunkRange(world, cx, cy, cz, lightSampler, y0, y1));
+        break;
+      }
     }
   }
   syncCamera();
