@@ -1,8 +1,10 @@
 import { describe, it, expect } from 'vitest';
 import { World, localIndex, CHUNK_VOL, type Chunk } from '../world';
-import { Block } from '../blocks';
+import { Block, torchMeta, doorMeta } from '../blocks';
 import { WaterSim } from '../water';
 import { TERRAIN_SEED, TerrainGen, generateChunkTerrain } from '../terrain';
+import { update } from '../streaming';
+import { tickCrossed } from '../time';
 import {
   snapshotChunk, applyRecord, Persistence, InMemoryChunkStore,
   chunkRecordKey, metaKey, type ChunkStore,
@@ -186,5 +188,66 @@ describe('persistence — records and store', () => {
     expect(meta?.hotbar.selected).toBe(3);
     expect(persist.hasPersisted(0, 0, 0)).toBe(true); // this seed's key
     expect(persist.hasPersisted(5, 0, 0)).toBe(false); // never persisted
+  });
+});
+
+describe('persistence — full path', () => {
+  it('H: torch + open door survive a full unload/restore round trip (meta included)', async () => {
+    const store = new InMemoryChunkStore();
+    const persist = new Persistence(store, TERRAIN_SEED);
+    await persist.boot();
+    const world = new World();
+    const gen = new TerrainGen(TERRAIN_SEED);
+    for (let cy = 0; cy <= 4; cy++) generateChunkTerrain(world, gen, 0, cy, 2); // the boot column (main.ts boot shape)
+
+    // All three cells sit in chunk (0,0,2) (x 0..15, y 0..15, z 32..47). The round trip
+    // asserts block AND meta; support presence is irrelevant to the arrays.
+    world.setBlock(8, 2, 40, Block.Torch, torchMeta(0));
+    world.setBlock(10, 3, 40, Block.DoorBottom, doorMeta(true, 0)); // open, X-thin
+    world.setBlock(10, 4, 40, Block.DoorTop, doorMeta(true, 0));
+
+    update(world, 40, 2, 2, persist); // walk away: the column unloads
+    expect(store.puts).toBe(1); // only chunk (0,0,2) was edited
+
+    const r = update(world, 2, 2, 2, persist); // walk back: warm cache restores (0,0,2) inline
+    expect(r.restored).toContainEqual({ cx: 0, cy: 0, cz: 2 });
+    expect(world.getBlock(8, 2, 40)).toBe(Block.Torch);
+    expect(world.getMeta(8, 2, 40)).toBe(torchMeta(0));
+    expect(world.getBlock(10, 3, 40)).toBe(Block.DoorBottom);
+    expect(world.getMeta(10, 3, 40)).toBe(doorMeta(true, 0));
+    expect(world.getBlock(10, 4, 40)).toBe(Block.DoorTop);
+    expect(world.getMeta(10, 4, 40)).toBe(doorMeta(true, 0));
+  });
+
+  it('I: a 600-frame no-edit walk (with water settling + pulses) persists ZERO chunks', async () => {
+    // D4 in action: worldgen settling and tick-heartbeat pulses queue cells, but none of
+    // that work carries an edit origin, so no chunk is ever marked edited and nothing is
+    // snapshotted. If a water write path leaks markEdited=true, this test fails.
+    const store = new InMemoryChunkStore();
+    const persist = new Persistence(store, TERRAIN_SEED);
+    await persist.boot();
+    const world = new World();
+    const gen = new TerrainGen(TERRAIN_SEED);
+    for (let cy = 0; cy <= 4; cy++) generateChunkTerrain(world, gen, 0, cy, 2); // main.ts boot column
+
+    const sim = new WaterSim(world);
+    const WATER_STRIDE = 30, WATER_PULSE = 1000; // main.ts tick-stride constants (ADR 0011)
+    let tick = 0;
+    for (let f = 0; f < 600; f++) { // 10 s at 60 fps; the player walks +x: one chunk per 60 frames
+      tick++;
+      const pcx = Math.floor(f / 60);
+      const r = update(world, pcx, 2, 2, persist);
+      for (const c of r.rebuilt) {
+        sim.settle(c.cx, c.cy, c.cz); // main.ts tickStreaming: settle per rebuilt chunk
+        world.getChunk(c.cx, c.cy, c.cz)!.dirty = false; // main.ts rebuildChunkMesh (mesh stubbed)
+      }
+      if (tickCrossed(tick - 1, tick, WATER_STRIDE)) sim.tick(WATER_PULSE); // the tick-heartbeat pulse
+      for (const key of sim.touched) { // main.ts frame-end drain (remesh stubbed)
+        const [cx, cy, cz] = key.split(',').map(Number);
+        if (world.hasChunk(cx, cy, cz)) world.getChunk(cx, cy, cz)!.dirty = false;
+      }
+      sim.touched.clear();
+    }
+    expect(store.puts).toBe(0);
   });
 });
