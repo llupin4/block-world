@@ -649,6 +649,42 @@ if (this.world.hasChunk(chunkOf(tx), chunkOf(wy), chunkOf(tz))) {
     return this.touched;
   }
 
+  /**
+   * Persistence restore (ADR 0014): the chunk's arrays are already in place
+   * (persistence.applyRecord) and settled = true — NO re-settle (D1: the saved state is
+   * the truth; re-settling would re-flood a drained cave or re-drain a flooded one).
+   * Rebuild only the sim's in-memory state from the arrays:
+   *   - springs: re-registered from wplaced (in-memory only; the per-pulse re-queue
+   *     resumes emission on its own);
+   *   - waiting: a water cell in the bottom row over a missing band below was a parked
+   *     fall (D2: rebuilt, not persisted);
+   *   - seams: the water cells on the six faces are re-marked (their 7-cell closure) so
+   *     cross-seam state re-derives — the chunk's water may have been mid-flow at its
+   *     boundary when it unloaded. The interior is NOT enqueued: it sits at its saved
+   *     fixpoint, so a restored chunk with nothing new adjacent does ~zero water work.
+   */
+  restore(c: Chunk): void {
+    const bx = c.cx * 16, by = c.cy * 16, bz = c.cz * 16;
+    for (let i = 0; i < c.blocks.length; i++) {
+      if (c.blocks[i] !== Block.Water || c.wplaced[i] !== 1) continue;
+      this.springs.add(`${bx + (i & 15)},${by + ((i >> 8) & 15)},${bz + ((i >> 4) & 15)}`);
+    }
+    if (c.cy > MIN_CY && !this.world.hasChunk(c.cx, c.cy - 1, c.cz)) {
+      for (let lx = 0; lx < 16; lx++)
+        for (let lz = 0; lz < 16; lz++)
+          if (c.blocks[localIndex(lx, 0, lz)] === Block.Water)
+            this.waiting.set(`${bx + lx},${by},${bz + lz}`, false);
+    }
+    for (let lx = 0; lx < 16; lx++)
+      for (let ly = 0; ly < 16; ly++)
+        for (let lz = 0; lz < 16; lz++) {
+          const onFace = lx === 0 || lx === 15 || ly === 0 || ly === 15 || lz === 0 || lz === 15;
+          if (!onFace) continue;
+          if (c.blocks[localIndex(lx, ly, lz)] !== Block.Water) continue;
+          this.remark(bx + lx, by + ly, bz + lz, false); // re-derivation is not an edit
+        }
+  }
+
   // A player edit (break = Air, place = new block). main.ts has already written the
   // block via world.setBlock (and re-meshed around it); this only syncs the sim's water
   // state — placing Water makes a level-7 SOURCE block (a spring), a non-water block

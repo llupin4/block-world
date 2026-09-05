@@ -31,3 +31,55 @@ describe('water origin tracking — the edit gate (D4)', () => {
     expect(world.getChunk(1, 0, 0)!.edited).toBe(true); // the fan crosses x=16 (edit-origin flow)
   });
 });
+describe('WaterSim.restore — the persistence rebuild (D1/D2)', () => {
+  type Inner = { queue: Set<string>; waiting: Map<string, boolean>; springs: Set<string> };
+  const inner = (sim: WaterSim) => sim as unknown as Inner;
+
+  it('rebuilds springs from wplaced', () => {
+    const world = new World();
+    const c = world.ensureChunk(0, 0, 0);
+    const i = localIndex(8, 1, 8);
+    c.blocks[i] = Block.Water; c.wlevel[i] = 7; c.wsource[i] = 1; c.wplaced[i] = 1;
+    c.settled = true;
+    const sim = new WaterSim(world);
+    expect(inner(sim).springs.size).toBe(0);
+    sim.restore(c);
+    expect(inner(sim).springs.has('8,1,8')).toBe(true);
+  });
+
+  it('enqueues face water cells (with their closure) — never the interior', () => {
+    const world = new World();
+    const c = world.ensureChunk(0, 0, 0);
+    const put = (x: number, y: number, z: number): void => {
+      const i = localIndex(x, y, z);
+      c.blocks[i] = Block.Water; c.wlevel[i] = 7; c.wsource[i] = 1;
+    };
+    put(0, 1, 8); // lx=0 face
+    put(8, 1, 8); // interior
+    c.settled = true;
+    const sim = new WaterSim(world);
+    sim.restore(c);
+    expect(inner(sim).queue.has('0,1,8')).toBe(true);
+    expect(inner(sim).queue.has('8,1,8')).toBe(false); // interior sits at its saved fixpoint
+  });
+
+  it('rebuilds waiting from the bottom face only when the band below is missing', () => {
+    const world = new World();
+    const c = world.ensureChunk(0, 1, 0);
+    const i = localIndex(8, 0, 8); // ly=0 → wy=16
+    c.blocks[i] = Block.Water; c.wlevel[i] = 7;
+    c.settled = true;
+    const sim = new WaterSim(world);
+    sim.restore(c); // the band below (0,0,0) is missing
+    expect(inner(sim).waiting.has('8,16,8')).toBe(true);
+
+    const world2 = new World();
+    world2.ensureChunk(0, 0, 0); // the band below EXISTS
+    const c2 = world2.ensureChunk(0, 1, 0);
+    c2.blocks[localIndex(8, 0, 8)] = Block.Water;
+    c2.settled = true;
+    const sim2 = new WaterSim(world2);
+    sim2.restore(c2);
+    expect(inner(sim2).waiting.has('8,16,8')).toBe(false);
+  });
+});
