@@ -1,4 +1,5 @@
-import { chunkKey, type World } from './world';
+import { chunkKey, type Chunk, type World } from './world';
+import { applyRecord, type PersistSource } from './persistence';
 import { TERRAIN_SEED, TerrainGen, generateChunkTerrain } from './terrain';
 
 // One shared generator: streaming must reproduce T4/T9's terrain exactly, so it uses the
@@ -22,6 +23,10 @@ export interface Coord { cx: number; cy: number; cz: number }
 export interface StreamingUpdate {
   rebuilt: Coord[];  // loaded (freshly generated) and dirty-remeshed chunks: main.ts calls
                      // rebuildChunkMesh on each, which clears the chunk's dirty flag
+  restored: Coord[]; // chunks restored from a WARM persistence record this call (applied inline):
+                     // main.ts runs sim.restore + lightSim.load + deferredFirstMesh (no settle — settled is already true)
+  pending: Coord[];  // in the persistence key set but not warm: main.ts fetches async (fetchRecord →
+                     // applyRecord → sim.restore + lightSim.load + deferredFirstMesh); not loaded or generated this call
   unloaded: Coord[]; // removed from the world inside update(): main.ts only disposes scene meshes
 }
 
@@ -39,8 +44,8 @@ function inRange(cx: number, cz: number, pcx: number, pcz: number): boolean {
   return Math.abs(cx - pcx) <= VIEW_RADIUS && Math.abs(cz - pcz) <= VIEW_RADIUS;
 }
 
-/** Mark existing in-range neighbors of (cx,cy,cz) dirty: their culling is stale after a load/unload. */
-function markNeighborsDirty(world: World, cx: number, cy: number, cz: number, pcx: number, pcz: number): void {
+/** Mark existing in-range neighbors of (cx,cy,cz) dirty: their culling is stale after a load/unload/restore. Exported: main.ts marks after an async (cold) apply. */
+export function markNeighborsDirty(world: World, cx: number, cy: number, cz: number, pcx: number, pcz: number): void {
   const n: [number, number, number][] = [
     [cx + 1, cy, cz], [cx - 1, cy, cz],
     [cx, cy + 1, cz], [cx, cy - 1, cz],
@@ -54,36 +59,59 @@ function markNeighborsDirty(world: World, cx: number, cy: number, cz: number, pc
 
 /**
  * One streaming step around (pcx, pcy, pcz):
- *   1. loads:  closest missing chunks in the ring (<=2), filled with terrain immediately;
- *      each load marks its existing in-range neighbors dirty (their culling is stale);
- *   2. remesh: closest dirty chunks (<=2, excluding loads of this call, which main.ts
- *      rebuilds immediately anyway);
+ *   1. loads:  for every missing chunk of the ring, in score order:
+ *      a. warm persistence record → applied inline (restored; neighbors marked dirty; does
+ *         not consume the generation budget — records are the load, terrain gen is the
+ *         fallback);
+ *      b. key-set hit without a warm record → pending: main.ts fetches async; the chunk is
+ *         NEVER generated while its key is known (D3) — generation happens only after a
+ *         dropped/stale record (dropPersisted) makes it a confirmed miss;
+ *      c. otherwise → terrain generation (≤ LOAD_BUDGET per call, as before);
+ *   2. remesh: closest dirty chunks (≤ REMESH_BUDGET, excluding loads of this call, which
+ *      main.ts rebuilds immediately anyway);
  *   3. unload: everything outside the ring (or outside the y band) leaves the world;
- *      their in-range neighbors are marked dirty first (newly exposed boundary faces).
+ *      persist.onUnload snapshots EDITED chunks only (D4/D6); their in-range neighbors
+ *      are marked dirty first (newly exposed boundary faces).
  * Pure TS (no three) so vitest can drive it; main.ts turns the result into scene work.
  */
-export function update(world: World, pcx: number, pcz: number, pcy = 2): StreamingUpdate {
+export function update(world: World, pcx: number, pcz: number, pcy = 2, persist?: PersistSource): StreamingUpdate {
   const rebuilt: Coord[] = [];
+  const restored: Coord[] = [];
+  const pending: Coord[] = [];
   const unloaded: Coord[] = [];
-  const done = new Set<string>(); // keys rebuilt by this call; the remesh pass skips them
+  const done = new Set<string>(); // keys handled by this call's load pass; the remesh pass skips them
 
-  const loads: Coord[] = [];
+  const missed: Coord[] = [];
   for (let dx = -VIEW_RADIUS; dx <= VIEW_RADIUS; dx++) {
     for (let dz = -VIEW_RADIUS; dz <= VIEW_RADIUS; dz++) {
       for (let cy = CY_MIN; cy <= CY_MAX; cy++) {
         const cx = pcx + dx, cz = pcz + dz;
-        if (!world.hasChunk(cx, cy, cz)) loads.push({ cx, cy, cz });
+        if (world.hasChunk(cx, cy, cz)) continue;
+        const rec = persist?.syncRecord(cx, cy, cz);
+        if (rec) {
+          applyRecord(world, rec); // edited chunk: arrays verbatim, settled = true (D1)
+          markNeighborsDirty(world, cx, cy, cz, pcx, pcz);
+          restored.push({ cx, cy, cz });
+          done.add(chunkKey(cx, cy, cz));
+          continue;
+        }
+        if (persist?.hasPersisted(cx, cy, cz)) {
+          pending.push({ cx, cy, cz }); // async fetch dedups in-flight; the first mesh is paced by main.ts
+          continue;
+        }
+        missed.push({ cx, cy, cz });
       }
     }
   }
-  loads.sort((a, b) => cmp(a, b, pcx, pcz, pcy));
-  for (const c of loads.slice(0, LOAD_BUDGET)) {
+  missed.sort((a, b) => cmp(a, b, pcx, pcz, pcy));
+  for (const c of missed.slice(0, LOAD_BUDGET)) {
     world.ensureChunk(c.cx, c.cy, c.cz);
     generateChunkTerrain(world, GEN, c.cx, c.cy, c.cz); // fills data, sets dirty
     markNeighborsDirty(world, c.cx, c.cy, c.cz, pcx, pcz);
     rebuilt.push(c);
     done.add(chunkKey(c.cx, c.cy, c.cz));
   }
+  pending.sort((a, b) => cmp(a, b, pcx, pcz, pcy)); // deterministic fetch order (closest first)
 
   const dirty: Coord[] = [];
   for (const c of world.allChunks()) {
@@ -97,15 +125,16 @@ export function update(world: World, pcx: number, pcz: number, pcy = 2): Streami
     done.add(chunkKey(c.cx, c.cy, c.cz));
   }
 
-  const doomed: Coord[] = [];
+  const doomed: Chunk[] = []; // Chunk (not Coord): onUnload needs the live arrays
   for (const c of world.allChunks()) {
     if (!inRange(c.cx, c.cz, pcx, pcz) || c.cy < CY_MIN || c.cy > CY_MAX) doomed.push(c);
   }
   for (const c of doomed) {
+    persist?.onUnload(c); // edited-only snapshot (D4/D6): a no-op for untouched terrain
     markNeighborsDirty(world, c.cx, c.cy, c.cz, pcx, pcz);
     world.removeChunk(c.cx, c.cy, c.cz);
     unloaded.push({ cx: c.cx, cy: c.cy, cz: c.cz });
   }
 
-  return { rebuilt, unloaded };
+  return { rebuilt, restored, pending, unloaded };
 }

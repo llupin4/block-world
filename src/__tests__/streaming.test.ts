@@ -3,6 +3,7 @@ import { Block } from '../blocks';
 import { World } from '../world';
 import { TERRAIN_SEED, TerrainGen } from '../terrain';
 import { update } from '../streaming';
+import { InMemoryChunkStore, Persistence, applyRecord } from '../persistence';
 
 // Tests stand in for main.ts: every chunk update() reports as rebuilt is treated as
 // (re)meshed, which clears its dirty flag (in the app the clear happens in
@@ -92,5 +93,73 @@ describe('streaming', () => {
     expect(world.hasChunk(10, 1, 10)).toBe(false); // streams in on a later call (budget 1)
     expect(world.hasChunk(2, 2, 2)).toBe(false);
     expect(world.hasChunk(4, 4, 4)).toBe(false);
+  });
+});
+
+describe('streaming + persistence', () => {
+  // Chunk (0,1,2) is in the ring around a (2,·,2) player and its terrain value at
+  // (8,20,40) is unknown — so flip that cell to whatever it is NOT (guaranteed change
+  // → chunk edited).
+  function editChunk(world: World): number {
+    const before = world.getBlock(8, 20, 40);
+    const b = before === Block.Dirt ? Block.Stone : Block.Dirt;
+    world.setBlock(8, 20, 40, b);
+    return b;
+  }
+
+  it('E: warm restore — an edited chunk snapshots on unload and restores inline on the walk back', async () => {
+    const store = new InMemoryChunkStore();
+    const persist = new Persistence(store, TERRAIN_SEED);
+    await persist.boot();
+    const world = new World();
+    converge(world); // 125 chunks around (2,2,2)
+    for (const c of world.allChunks()) c.dirty = false;
+    const b = editChunk(world); // marks chunk (0,1,2) edited
+
+    update(world, 40, 2, 2, persist); // teleport: the whole ring unloads
+    expect(store.puts).toBe(1); // D4/D6: only the edited chunk is snapshotted
+
+    const r = update(world, 2, 2, 2, persist); // walk back
+    expect(r.restored).toContainEqual({ cx: 0, cy: 1, cz: 2 });
+    expect(world.getChunk(0, 1, 2)!.settled).toBe(true); // D1: water state restored as-is
+    expect(world.getBlock(8, 20, 40)).toBe(b); // the edit survived the round trip
+    expect(store.puts).toBe(1); // restoring does not re-put
+  });
+
+  it('F: cold restore — a fresh Persistence (page reload) defers to an async fetch; the chunk is never generated', async () => {
+    const store = new InMemoryChunkStore();
+    const persist = new Persistence(store, TERRAIN_SEED);
+    await persist.boot();
+    const world = new World();
+    converge(world);
+    const b = editChunk(world);
+    update(world, 40, 2, 2, persist); // put → store.puts === 1
+
+    const world2 = new World(); // "page reload": fresh world + fresh persistence, same store
+    const persist2 = new Persistence(store, TERRAIN_SEED);
+    await persist2.boot(); // the key set now contains 1234:0,1,2
+
+    const r = update(world2, 2, 2, 2, persist2);
+    expect(world2.hasChunk(0, 1, 2)).toBe(false); // not yet — the fetch is async
+    expect(r.pending).toContainEqual({ cx: 0, cy: 1, cz: 2 });
+    expect(r.rebuilt.some((c) => c.cx === 0 && c.cy === 1 && c.cz === 2)).toBe(false); // D3: no generation over a known record
+
+    const rec = await persist2.fetchRecord(0, 1, 2); // main.ts's pending loop
+    expect(rec).toBeDefined();
+    applyRecord(world2, rec!);
+    expect(world2.getBlock(8, 20, 40)).toBe(b);
+    expect(world2.getChunk(0, 1, 2)!.settled).toBe(true);
+  });
+
+  it('G: confirmed miss — a chunk with no record still generates terrain, budgets intact', async () => {
+    const store = new InMemoryChunkStore();
+    const persist = new Persistence(store, TERRAIN_SEED);
+    await persist.boot(); // empty store → empty key set
+    const world = new World();
+    const r = update(world, 2, 2, 2, persist);
+    expect(r.rebuilt).toEqual([{ cx: 2, cy: 2, cz: 2 }]);
+    expect(r.restored).toEqual([]);
+    expect(r.pending).toEqual([]);
+    expect(world.count()).toBe(1);
   });
 });
