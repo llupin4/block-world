@@ -1,6 +1,13 @@
 import { chunkKey, type Chunk, type World } from './world';
 import { applyRecord, type PersistSource } from './persistence';
 import { TERRAIN_SEED, TerrainGen, generateChunkTerrain } from './terrain';
+import { type Entity, type EntityRecord } from './entity';
+
+/** The entity view streaming needs for the unload path (dependency inversion, as PersistSource). */
+export interface EntitySource {
+  entitiesInChunk(cx: number, cy: number, cz: number): Entity[];
+  toRecord(e: Entity): EntityRecord;
+}
 
 // One shared generator: streaming must reproduce T4/T9's terrain exactly, so it uses the
 // same seeded generator (height/cave/tree functions are pure in world coordinates — any
@@ -77,7 +84,7 @@ export function markNeighborsDirty(world: World, cx: number, cy: number, cz: num
  *      are marked dirty first (newly exposed boundary faces).
  * Pure TS (no three) so vitest can drive it; main.ts turns the result into scene work.
  */
-export function update(world: World, pcx: number, pcz: number, pcy = 2, persist?: PersistSource): StreamingUpdate {
+export function update(world: World, pcx: number, pcz: number, pcy = 2, persist?: PersistSource, sim?: EntitySource): StreamingUpdate {
   const rebuilt: Coord[] = [];
   const restored: Coord[] = [];
   const pending: Coord[] = [];
@@ -133,7 +140,8 @@ export function update(world: World, pcx: number, pcz: number, pcy = 2, persist?
     if (!inRange(c.cx, c.cz, pcx, pcz) || c.cy < CY_MIN || c.cy > CY_MAX) doomed.push(c);
   }
   for (const c of doomed) {
-    persist?.onUnload(c); // edited-only snapshot (D4/D6): a no-op for untouched terrain
+    const ents = sim ? sim.entitiesInChunk(c.cx, c.cy, c.cz).map((e) => sim.toRecord(e)) : undefined;
+    persist?.onUnload(c, ents); // edited-only snapshot (D4/D6); entities ride the chunk
     markNeighborsDirty(world, c.cx, c.cy, c.cz, pcx, pcz);
     world.removeChunk(c.cx, c.cy, c.cz);
     unloaded.push({ cx: c.cx, cy: c.cy, cz: c.cz });

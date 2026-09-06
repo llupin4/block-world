@@ -3,7 +3,8 @@ import { Block } from '../blocks';
 import { World } from '../world';
 import { TERRAIN_SEED, TerrainGen } from '../terrain';
 import { update } from '../streaming';
-import { InMemoryChunkStore, Persistence, applyRecord } from '../persistence';
+import { InMemoryChunkStore, Persistence, applyRecord, type PersistSource } from '../persistence';
+import { Sim, IdleController, type EntityRecord } from '../entity';
 
 // Tests stand in for main.ts: every chunk update() reports as rebuilt is treated as
 // (re)meshed, which clears its dirty flag (in the app the clear happens in
@@ -161,5 +162,40 @@ describe('streaming + persistence', () => {
     expect(r.restored).toEqual([]);
     expect(r.pending).toEqual([]);
     expect(world.count()).toBe(1);
+  });
+});
+
+describe('streaming — entities ride the unload', () => {
+  it('threads frozen entities into the onUnload record when the chunk unloads', () => {
+    const world = new World();
+    const sim = new Sim(world, {}, 1234);
+    const e = sim.spawn({ x: 4, y: 5, z: 4 }, new IdleController()); // chunk (0,0,0)
+    world.ensureChunk(0, 0, 0).edited = true; // so onUnload snapshots it
+    let captured: EntityRecord[] | undefined;
+    const persist: PersistSource = {
+      hasPersisted: () => false,
+      syncRecord: () => undefined,
+      fetchRecord: () => Promise.resolve(undefined),
+      onUnload: (_c, entities) => { captured = entities; },
+      dropPersisted: () => {},
+    };
+    update(world, 4, 4, 2, persist, sim); // anchor far -> (0,0,0) is outside the ring and unloads
+    expect(captured).toBeDefined();
+    expect(captured!.some((r) => r.id === e.id)).toBe(true);
+  });
+
+  it('passes no entities when the sim is absent (unchanged behavior)', () => {
+    const world = new World();
+    world.ensureChunk(0, 0, 0).edited = true;
+    let captured: EntityRecord[] | undefined = 'sentinel' as never;
+    const persist: PersistSource = {
+      hasPersisted: () => false,
+      syncRecord: () => undefined,
+      fetchRecord: () => Promise.resolve(undefined),
+      onUnload: (_c, entities) => { captured = entities; },
+      dropPersisted: () => {},
+    };
+    update(world, 4, 4, 2, persist);
+    expect(captured).toBeUndefined();
   });
 });
