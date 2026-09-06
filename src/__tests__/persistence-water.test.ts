@@ -69,6 +69,24 @@ async function walkBack(world: World, sim: WaterSim, persist: Persistence): Prom
   }
 }
 
+// The under-persist scenario (ADR 0014): A is the player's chunk (sea to the boundary;
+// the dug floor cell opens the path), B is the untouched neighbour (a worldgen-carved
+// boundary hole + a 1-deep sea cell). B's water is written by B's OWN settle (worldgen
+// origin, eo=false), fed across the seam by A's sea — so B is never marked edited.
+function seaChunkA(w: World): void {
+  const c = w.ensureChunk(0, 0, 0);
+  for (let lx = 0; lx < 16; lx++)
+    for (let lz = 0; lz < 16; lz++) c.blocks[localIndex(lx, 0, lz)] = Block.Stone;
+  for (let lx = 0; lx <= 15; lx++) c.blocks[localIndex(lx, 1, 8)] = Block.Water; // the sea, to the x=15 boundary
+}
+function seaChunkB(w: World): void {
+  const c = w.ensureChunk(1, 0, 0);
+  for (let lx = 0; lx < 16; lx++)
+    for (let lz = 0; lz < 16; lz++) c.blocks[localIndex(lx, 0, lz)] = Block.Stone;
+  c.blocks[localIndex(0, 0, 8)] = Block.Air; // the worldgen-carved hole at the boundary face
+  c.blocks[localIndex(0, 1, 8)] = Block.Water; // B's 1-deep sea cell (air above)
+}
+
 describe('persistence — water state', () => {
   it('A: spring flood round trip — the water state is identical after unload + restore', async () => {
     const store = new InMemoryChunkStore();
@@ -110,5 +128,49 @@ describe('persistence — water state', () => {
     await walkBack(world, sim, persist);
     drain(sim); // the drain continues after the restore (queue rebuilt from the saved arrays)
     expectSameFingerprint(fingerprint(world, [0, 0, 0], [1, 0, 0]), ctrlFp);
+  });
+
+  it('C: under-persist — the neighbour receives worldgen-origin water via its own settle (eo=false), is NOT persisted, and the re-flood reconstructs it after reload', async () => {
+    // A sea cell (15,1,8) sits adjacent to the dug opening (15,0,8) at the chunk boundary;
+    // the neighbour B has carved air (16,0,8) at its boundary face. B's own settle pours B's
+    // boundary sea cell (16,1,8) — fed across the seam by A's sea — into B's air. That write
+    // is settle work (eo=false), so B is never marked edited even though the player's edit
+    // opened the path the sea flows through. Pinned as intended (ADR 0014): rather than
+    // persist a pristine chunk, we accept the visible re-flood on reload — B regenerates dry
+    // and its (re)settle, fed across the seam by A's restored state, re-floods it.
+    const store = new InMemoryChunkStore();
+    const persist = new Persistence(store, TERRAIN_SEED);
+    await persist.boot();
+    const world = new World();
+    const sim = new WaterSim(world);
+    seaChunkA(world);
+    sim.settle(0, 0, 0);
+    drain(sim);
+    world.setBlock(15, 0, 8, Block.Air); // the player digs A's boundary floor
+    sim.edit(15, 0, 8, Block.Air);
+    drain(sim); // A's cascade: the sea pours its sheet into the hole (edit-origin → A edited)
+    expect(world.getChunk(0, 0, 0)!.edited).toBe(true);
+
+    seaChunkB(world); // B streams in (worldgen) and settles, fed across the seam by A's sea
+    sim.settle(1, 0, 0);
+    drain(sim, 10);
+    expect(world.getChunk(1, 0, 0)!.edited).toBe(false); // settle work is eo=false: B never edited
+    const before = fingerprint(world, [1, 0, 0]);
+    expect(before.size).toBe(2); // the poured sheet (16,0,8) + B's sea cell (16,1,8)
+
+    update(world, 10, 0, 0, persist); // walk away: A unloads (persisted), B unloads
+    expect(store.puts).toBe(1); // (a) the neighbour was NOT persisted
+    expect(persist.hasPersisted(1, 0, 0)).toBe(false);
+
+    // Reload: A restores from its record (B is gone); B regenerates fresh (dry) and settles.
+    const rec = persist.syncRecord(0, 0, 0) ?? await persist.fetchRecord(0, 0, 0);
+    expect(rec).toBeDefined();
+    applyRecord(world, rec!);
+    sim.restore(world.getChunk(0, 0, 0)!);
+    seaChunkB(world);
+    sim.settle(1, 0, 0); // the re-flood: fed across the seam by A's restored state
+    drain(sim);
+    for (let i = 0; i < 10; i++) sim.tick(1000); // ten more sim seconds: no slow drift
+    expectSameFingerprint(fingerprint(world, [1, 0, 0]), before); // (b) the neighbour matches the pre-unload state
   });
 });

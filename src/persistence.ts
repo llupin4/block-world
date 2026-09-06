@@ -40,8 +40,11 @@ export type StoreValue = ChunkRecord | WorldMeta;
 export interface ChunkStore {
   get(key: string): Promise<StoreValue | undefined>;
   put(key: string, rec: StoreValue): Promise<void>;
+  /** One transaction for every entry (all-or-nothing): the save-point batch. */
+  putMany(entries: [string, StoreValue][]): Promise<void>;
   delete(key: string): Promise<void>;
-  keys(): Promise<string[]>;
+  /** All keys, or — with a prefix — only the keys under it (the per-seed boot scan). */
+  keys(prefix?: string): Promise<string[]>;
 }
 
 const META_SUFFIX = '__meta__';
@@ -71,8 +74,9 @@ export function snapshotChunk(c: Chunk): ChunkRecord {
 
 /** Apply a record to the world. settled = true (D1: the saved state is the truth — no
  *  re-settle); edited = true (a persisted chunk is by definition edited, so a later
- *  unload re-snapshots it); dirty = false (its first mesh goes through main.ts's
- *  deferredFirstMesh, not the remesh pass). */
+ *  unload re-snapshots it); editGen = savedGen = 1 (restored AND in sync — nothing to
+ *  write until the next edit bumps editGen); dirty = false (its first mesh goes through
+ *  main.ts's deferredFirstMesh, not the remesh pass). */
 export function applyRecord(world: World, r: ChunkRecord): void {
   const c = world.ensureChunk(r.cx, r.cy, r.cz);
   c.blocks.set(r.blocks);
@@ -83,6 +87,8 @@ export function applyRecord(world: World, r: ChunkRecord): void {
   c.wstream.set(r.wstream);
   c.settled = true;
   c.edited = true;
+  c.editGen = 1;
+  c.savedGen = 1;
   c.dirty = false;
 }
 
@@ -99,12 +105,20 @@ export class InMemoryChunkStore implements ChunkStore {
     this.puts++;
     this.data.set(key, rec);
   }
+  /** In-memory "transaction": a plain loop (atomicity is free — no I/O to fail). */
+  async putMany(entries: [string, StoreValue][]): Promise<void> {
+    for (const [key, rec] of entries) {
+      this.puts++;
+      this.data.set(key, rec);
+    }
+  }
   async delete(key: string): Promise<void> {
     this.deletes++;
     this.data.delete(key);
   }
-  async keys(): Promise<string[]> {
-    return [...this.data.keys()];
+  async keys(prefix?: string): Promise<string[]> {
+    const all = [...this.data.keys()];
+    return prefix ? all.filter((k) => k.startsWith(prefix)) : all;
   }
 }
 
@@ -119,16 +133,29 @@ export interface PersistSource {
   dropPersisted(cx: number, cy: number, cz: number): void;
 }
 
-const WARM_CAP = 512; // [POC shortcut] ~512 × 24 KB ≈ 15 MB; evict the oldest
+// Warm cache cap (D5). [POC shortcut] ~512 × 24 KB ≈ 15 MB; evict the oldest first.
+// The cache spans BOTH unloaded records (onUnload) and cold-fetched records (fetchRecord,
+// which are then loaded). The save path (saveLoaded) deliberately does NOT pre-cache
+// still-loaded chunks — they are pure waste while loaded (the arrays are in the world) and
+// onUnload re-caches the record when the chunk actually leaves. Evicting ANY record (loaded
+// or unloaded) is safe: a loaded chunk re-snapshots on unload, and any record re-fetches on
+// demand. (Byte-budgeted LRU is the follow-up — TODO.md → Persistence.)
+const WARM_CAP = 512;
 
 /**
  * The persistence facade (ADR 0014):
- *  - key set preloaded at boot (D3): boot() loads every key of this seed (getAllKeys +
- *    prefix filter — no IDB index) so "is this chunk persisted?" is a sync check;
+ *  - key set preloaded at boot (D3): boot() scans ONLY this seed's keys (store.keys("seed:") —
+ *    an IDBKeyRange.bound prefix scan on the IDB backend, a startsWith filter in memory) so
+ *    "is this chunk persisted?" is a sync check and a multi-seed store never reads the other
+ *    seeds' key space;
  *  - warm cache (D5): recently touched records, evicted oldest-first past the cap —
  *    same-frame sync restores;
  *  - fetch dedup: concurrent fetchRecord for one key shares one in-flight promise;
  *  - edited-only writes (D4/D6): onUnload snapshots a chunk only when c.edited;
+ *  - save-generation gate: a chunk is written only when out of sync (savedGen !== editGen),
+ *    so a periodic save re-writes only what changed since the last save — not the whole world;
+ *  - batched save points: saveLoaded writes every DUE chunk + the meta in ONE putMany (one
+ *    store transaction) instead of one put per chunk;
  *  - error-tolerant (D7): a null or rejecting store degrades to session-only
  *    persistence (failed fetch → undefined → the caller drops the key → confirmed miss).
  */
@@ -150,14 +177,13 @@ export class Persistence implements PersistSource {
     return chunkRecordKey(this.seed, cx, cy, cz);
   }
 
-  /** Load the key set + the world meta; resolves with the meta (null when absent).
+/** Load the key set + the world meta; resolves with the meta (null when absent).
    *  Never rejects: a store failure leaves an empty key set (D7). */
   async boot(): Promise<WorldMeta | null> {
     if (!this.store) return null;
     try {
-      const keys = await this.store.keys();
-      const prefix = `${this.seed}:`;
-      for (const k of keys) if (k.startsWith(prefix)) this.persistedKeys.add(k);
+      const keys = await this.store.keys(`${this.seed}:`); // per-seed scan (IDBKeyRange bound; no full-keyset read)
+      for (const k of keys) if (k.startsWith(`${this.seed}:`)) this.persistedKeys.add(k);
       const m = await this.store.get(metaKey(this.seed));
       if (m && 'player' in m) this.meta = m;
     } catch {
@@ -196,16 +222,48 @@ export class Persistence implements PersistSource {
     return p;
   }
 
-  /** Unload hook (D4/D6): an edited chunk is snapshotted into the warm cache AND written
-   *  through to the store in the background; an unedited chunk (pristine terrain) is a no-op. */
+  /** The write gate (single source of truth): a chunk is DUE when it is edited (the D4/D6
+   *  boolean gate) AND out of sync with the store (savedGen !== editGen). The `editGen > 0`
+   *  guard keeps chunks that set `edited` directly (editGen = savedGen = 0) DUE. */
+  private isDue(c: Chunk): boolean {
+    return c.edited && !(c.editGen > 0 && c.savedGen === c.editGen);
+  }
+
+  /** Unload hook (D4/D6): every edited chunk is snapshotted into the warm cache (fast inline
+   *  reload on walk-back) and marked persisted; an OUT-OF-SYNC chunk is additionally written
+   *  through to the store in the background (one put — unload frequency). An unedited chunk
+   *  is a no-op. */
   onUnload(c: Chunk): void {
     if (!c.edited) return;
     const k = this.key(c.cx, c.cy, c.cz);
     const rec = snapshotChunk(c);
     this.cache(k, rec);
     this.persistedKeys.add(k);
+    if (!this.isDue(c)) return; // in sync: the store already holds it
+    c.savedGen = c.editGen;
     if (!this.store) return;
     const p = this.store.put(k, rec).catch(() => undefined);
+    this.pendingPuts.add(p);
+    void p.then(() => this.pendingPuts.delete(p));
+  }
+
+  /** Save-point batch (5 s periodic / hide / pagehide): snapshot every DUE loaded chunk plus
+   *  the meta record and write them ALL in one putMany (one store transaction). Still-loaded
+   *  chunks are deliberately NOT cached warm here — onUnload re-caches them when they leave. */
+  saveLoaded(chunks: Iterable<Chunk>, meta: WorldMeta): void {
+    this.meta = meta;
+    if (!this.store) return;
+    const entries: [string, StoreValue][] = [];
+    for (const c of chunks) {
+      if (!this.isDue(c)) continue;
+      const k = this.key(c.cx, c.cy, c.cz);
+      const rec = snapshotChunk(c);
+      c.savedGen = c.editGen;
+      this.persistedKeys.add(k);
+      entries.push([k, rec]);
+    }
+    entries.push([metaKey(this.seed), meta]);
+    const p = this.store.putMany(entries).catch(() => undefined);
     this.pendingPuts.add(p);
     void p.then(() => this.pendingPuts.delete(p));
   }

@@ -57,11 +57,19 @@ Open follow-ups from the dynamic-lighting work (ADR 0007 — Dynamic lighting):
   warm-inline / pending-fetch / confirmed-miss path is the POC form, and the record is
   already the sync payload. Reworks the streaming budget model the way the worldgen-worker
   item (Streaming / rendering) does for generation.
-- **Shrink/gate the periodic save.** The 5 s interval re-saves every edited chunk
-  unconditionally (a built house re-writes its chunks forever); gate it on a dirty flag
-  (a new edit, or the water sim's `touched` set non-empty this frame) and/or drop the
-  window below 5 s.
+- **Shrink the periodic-save window (optional).** The save-generation gate (ADR 0014,
+  2026-09-06) removed the old "re-save every edited chunk unconditionally every 5 s" cost —
+  a steady-state walk now writes only the ~200 B meta, and the batched `putMany` makes the
+  changed-set write one store transaction. Shrinking the ~5 s crash window itself (a shorter
+  interval, or a trigger on the water sim's `touched` set) remains an option.
 - **Byte-budgeted LRU warm cache.** The 512-record cap is a record-count shortcut
-  (~15 MB); budget by bytes and evict to fit.
-- **Boot key-set growth.** `getAllKeys` + a `seed:` prefix filter is fine at POC sizes; an
-  IDB index on the seed prefix scales it.
+  (~15 MB); it spans both unloaded and cold-fetched (then-loaded) records. Budget by bytes
+  and evict to fit.
+- **Boot key-set growth.** The prefix-bounded scan (`IDBKeyRange.bound("seed:", …)`, an
+  in-memory `startsWith` otherwise) is fine at POC sizes; an IDB index on the seed prefix
+  scales it further.
+- **Persist cross-seam settled water.** When a player edit in chunk A lets water settle
+  across a seam into an unedited chunk B, B is NOT persisted (the write is settle-origin,
+  not edit-origin) — B regenerates and re-settles to the identical water on reload
+  (self-correcting; pinned by a round-trip test). Propagate the edit-origin flag across
+  seams so B is persisted and skips the regenerate + re-settle.

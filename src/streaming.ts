@@ -40,7 +40,10 @@ function cmp(a: Coord, b: Coord, pcx: number, pcz: number, pcy: number): number 
   return score(a, pcx, pcz, pcy) - score(b, pcx, pcz, pcy) || a.cx - b.cx || a.cy - b.cy || a.cz - b.cz;
 }
 
-function inRange(cx: number, cz: number, pcx: number, pcz: number): boolean {
+/** In-range: within VIEW_RADIUS of the player chunk in both x and z. Exported: main.ts
+ *  range-checks a cold-restore callback against the CURRENT player position (stale fetches
+ *  must not resurrect chunks the player has walked past). */
+export function inRange(cx: number, cz: number, pcx: number, pcz: number): boolean {
   return Math.abs(cx - pcx) <= VIEW_RADIUS && Math.abs(cz - pcz) <= VIEW_RADIUS;
 }
 

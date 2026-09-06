@@ -272,13 +272,18 @@ try {
   persist = new Persistence(null, TERRAIN_SEED); // no IndexedDB in this environment
 }
 window.__persistDebug = persist; // debug surface: key set, warm cache, store counters
+// Cold-restore in-flight keys (ADR 0014): one fetchRecord per key at a time. streaming
+// re-pends a key every frame until its record lands, so without this we would re-attach a
+// new .then continuation (re-running the whole apply) every frame. The key is added when
+// the fetch starts and removed when it settles (apply or drop).
+const restoring = new Set<string>();
 
 // SPAWN is computed in startGame, after the boot column exists (it may be RESTORED from
 // a persisted record — the scan must read the current world state, whatever that is).
 let SPAWN: THREE.Vector3;
 
 // === boot gate (ADR 0014) ===
-// The game starts only once persistence has booted (key set + meta) — capped at 1.5 s:
+// The game starts only once persistence has booted (key set + meta) — capped at 5 s:
 // a stalled IDB must not hold the first frame hostage (the fallback starts a fresh
 // world; a late meta is dropped, documented edge). startGame restores-or-generates the
 // boot column, restores world state, and kicks the frame loop.
@@ -342,7 +347,7 @@ async function startGame(meta: WorldMeta | null): Promise<void> {
   syncCamera();
   requestAnimationFrame(frame);
 }
-const bootGate = window.setTimeout(() => { void startGame(null); }, 1500); // fallback: a stalled boot still starts (fresh world)
+const bootGate = window.setTimeout(() => { console.log('[persistence] boot gate: IDB stalled past 5 s — starting a fresh world (any late meta is dropped)'); void startGame(null); }, 5000); // fallback: a stalled boot still starts (fresh world)
 void persist.boot().then((meta) => {
   window.clearTimeout(bootGate);
   void startGame(meta);
@@ -891,17 +896,27 @@ function tickStreaming(): void {
   }
   for (const c of r.pending) {
     // Cold restore: the record is known (key set) but not warm. Fetch async; apply when it
-    // lands (deduped in Persistence, so per-frame re-pending is cheap). A failed/stale fetch
-    // drops the key → the next update() generates the chunk fresh (confirmed miss).
+    // lands. One in-flight fetch per key (restoring): streaming re-pends a key every frame
+    // until the record lands, so re-attaching a .then each frame would re-run the whole apply.
+    // A failed/stale fetch drops the key → the next update() generates the chunk fresh (confirmed
+    // miss); a stale (out-of-range) record is NOT dropped — fetchRecord already cached it warm,
+    // so the next walk-back restores it inline.
+    const key = chunkKey(c.cx, c.cy, c.cz);
+    if (restoring.has(key)) continue; // a fetch for this key is already in flight
+    restoring.add(key);
     void persist.fetchRecord(c.cx, c.cy, c.cz).then((rec) => {
+      restoring.delete(key); // free the slot whether we apply or drop
       if (!rec) { persist.dropPersisted(c.cx, c.cy, c.cz); return; }
+      // Stale guard: the player may have moved on since the fetch started — apply only if the
+      // chunk is still in range of the CURRENT player position (the record stays warm either way).
+      if (!streaming.inRange(c.cx, c.cz, chunkOf(player.pos.x), chunkOf(player.pos.z))) return;
       if (world.hasChunk(c.cx, c.cy, c.cz)) return; // a duplicate in-flight fetch applied it first
       applyRecord(world, rec);
       streaming.markNeighborsDirty(world, c.cx, c.cy, c.cz, chunkOf(player.pos.x), chunkOf(player.pos.z));
       const ch = world.getChunk(c.cx, c.cy, c.cz)!;
       sim.restore(ch);
       lightSim.load(c.cx, c.cy, c.cz);
-      deferredFirstMesh.add(chunkKey(c.cx, c.cy, c.cz));
+      deferredFirstMesh.add(key);
     });
   }
 }
@@ -917,16 +932,15 @@ function metaSnapshot(): WorldMeta {
 }
 
 // Save points (ADR 0014). Chunk records are written (a) when a chunk UNLOADS (the streaming
-// path) and (b) at every save point below — all currently-loaded EDITED chunks are
-// snapshotted (onUnload is a no-op for unedited terrain, so the walk costs nothing for a
-// world the player hasn't touched). The meta + pending puts save at the same moments.
-// The 5 s interval is what makes a hard reload safe: the pagehide put is best-effort (the
+// path) and (b) at every save point below — every currently-loaded EDITED + OUT-OF-SYNC chunk
+// is snapshotted in ONE putMany (one store transaction) along with the meta (saveLoaded). The
+// gate is inside saveLoaded (isDue), so an untouched or already-saved world writes only the
+// meta. The 5 s interval is what makes a hard reload safe: the pagehide put is best-effort (the
 // page can be torn down mid-transaction, so it may not commit), and edits in still-loaded
 // chunks are otherwise only saved when those chunks unload. Worst case, a hard kill loses
 // ~5 s of edits **[POC shortcut]**.
 const saveAndFlush = (): void => {
-  for (const c of world.allChunks()) persist.onUnload(c); // edited-only snapshot (the gate is inside onUnload)
-  persist.saveMeta(metaSnapshot());
+  persist.saveLoaded(world.allChunks(), metaSnapshot()); // one batched putMany: the DUE chunks + the meta
   void persist.flush();
 };
 document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'hidden') saveAndFlush(); });

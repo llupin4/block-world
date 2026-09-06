@@ -30,6 +30,8 @@ export interface Chunk {
   settled: boolean;    // water sim has settled this chunk's worldgen water (makes settle idempotent)
   lightSettled: boolean; // light sim has settled this chunk's interior (fresh-load full settle done; remeshes only re-seed the seam) — the mirror's flag is live in production (ADR 0012)
   edited: boolean;     // persistence gate (ADR 0014): set ONLY by player-origin work (World.setBlock default / edit-origin water flow), never by terrain generation or worldgen settle — the only chunks persisted on unload
+  editGen: number;     // persistence gate (ADR 0014): bumped on every edit (setBlock with markEdited, incl. edit-origin water writes); the save-generation the persistence layer diffs against (write only when savedGen !== editGen)
+  savedGen: number;    // the editGen last snapshotted to the store: savedGen === editGen → in sync, nothing to write (pristine chunks sit at 0 === 0)
   opaqueMesh: VoxelBuffer | null;
   transMesh: VoxelBuffer | null;
 }
@@ -80,6 +82,8 @@ export class World {
       settled: false,
       lightSettled: false,
       edited: false,
+      editGen: 0,
+      savedGen: 0,
       opaqueMesh: null,
       transMesh: null,
     };
@@ -146,7 +150,7 @@ export class World {
     c.blocks[i] = b;
     c.meta[i] = meta;
     c.dirty = true;
-    if (markEdited) c.edited = true;
+    if (markEdited) { c.editGen += 1; c.edited = true; } // editGen: the save-generation the persistence layer diffs against (ADR 0014)
     const n = [
       [c.cx + 1, c.cy, c.cz], [c.cx - 1, c.cy, c.cz],
       [c.cx, c.cy + 1, c.cz], [c.cx, c.cy - 1, c.cz],

@@ -7,7 +7,7 @@ import { update } from '../streaming';
 import { tickCrossed } from '../time';
 import {
   snapshotChunk, applyRecord, Persistence, InMemoryChunkStore,
-  chunkRecordKey, metaKey, type ChunkStore,
+  chunkRecordKey, metaKey, type ChunkStore, type WorldMeta,
 } from '../persistence';
 
 describe('water origin tracking — the edit gate (D4)', () => {
@@ -155,6 +155,7 @@ describe('persistence — records and store', () => {
     const counting: ChunkStore = {
       get: async (k) => { gets++; return backing.get(k); },
       put: (k, r) => backing.put(k, r),
+      putMany: (es) => backing.putMany(es),
       delete: (k) => backing.delete(k),
       keys: () => backing.keys(),
     };
@@ -188,6 +189,52 @@ describe('persistence — records and store', () => {
     expect(meta?.hotbar.selected).toBe(3);
     expect(persist.hasPersisted(0, 0, 0)).toBe(true); // this seed's key
     expect(persist.hasPersisted(5, 0, 0)).toBe(false); // never persisted
+  });
+
+  it('periodic save: a chunk is written once per edit generation, not once per save', async () => {
+    const backing = new InMemoryChunkStore();
+    const writes: string[] = []; // every key written (per entry), in order
+    const store: ChunkStore = {
+      get: (k) => backing.get(k),
+      put: async (k, r) => { writes.push(k); return backing.put(k, r); },
+      putMany: async (es) => { for (const [k] of es) writes.push(k); return backing.putMany(es); },
+      delete: (k) => backing.delete(k),
+      keys: (p) => backing.keys(p),
+    };
+    const persist = new Persistence(store, 1234);
+    await persist.boot();
+    const world = new World();
+    world.ensureChunk(0, 0, 0);
+    const ck = chunkRecordKey(1234, 0, 0, 0);
+    const meta: WorldMeta = {
+      v: 1, seed: 1234,
+      player: { x: 1, y: 2, z: 3, yaw: 0.5, pitch: -0.25 },
+      time: { time: 100, tick: 6000, phaseTotal: 0.5 },
+      hotbar: { slots: [1, 2, 3, 4, 5, 6, 7, 8, 9], selected: 3 },
+    };
+    const chunkWrites = (): number => writes.filter((k) => k === ck).length;
+
+    world.setBlock(4, 1, 4, Block.Stone); // the edit (editGen 1)
+    persist.saveLoaded(world.allChunks(), meta); // periodic save 1
+    persist.saveLoaded(world.allChunks(), meta); // periodic save 2 — no edit in between
+    expect(chunkWrites()).toBe(1); // exactly one chunk put across both saves
+    expect(writes.filter((k) => k === metaKey(1234)).length).toBe(2); // the meta still saves every time
+    expect(world.getChunk(0, 0, 0)!.savedGen).toBe(1);
+
+    world.setBlock(4, 1, 4, Block.Dirt); // a second edit (editGen 2)
+    persist.saveLoaded(world.allChunks(), meta);
+    expect(chunkWrites()).toBe(2);
+  });
+
+  it('applyRecord leaves the chunk restored and in sync (nothing to write until the next edit)', () => {
+    const world = new World();
+    const c = mkChunk(world, 0, 0, 0);
+    const rec = snapshotChunk(c);
+    world.removeChunk(0, 0, 0);
+    applyRecord(world, rec);
+    const c2 = world.getChunk(0, 0, 0)!;
+    expect(c2.editGen).toBe(1);
+    expect(c2.savedGen).toBe(1); // in sync: an immediate unload/save re-writes nothing
   });
 });
 
