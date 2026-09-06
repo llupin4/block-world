@@ -1,6 +1,7 @@
-import { Block } from './blocks';
-import { type World } from './world';
+import { Block, isOpaque, torchMeta, doorMeta, doorOpen, doorAxis, doorSide, isDoor, doorPlacementFromView } from './blocks';
+import { type World, WORLD_Y_MIN, WORLD_Y_MAX } from './world';
 import { WALK_SPEED, SWIM_SPEED, FLY_SPEED, FLY_V_SPEED, GRAVITY, JUMP_VEL, HALF, HEIGHT, EYE } from './player';
+import { raycastVoxel, REACH } from './raycast';
 
 export interface Vec3 { x: number; y: number; z: number }
 
@@ -215,5 +216,151 @@ export function stepEntity(world: World, e: Entity, it: Intent, dt: number): voi
     // Non-colliding kinds (spectator) integrate freely and never land.
     p.x += v.x * dt; p.y += v.y * dt; p.z += v.z * dt;
     e.onGround = false;
+  }
+}
+
+// The sim-owned edit origin: main.ts wires onEdit (remesh + light), waterEdit (the water
+// sim's edit-origin), and springTarget (the only targetable water). entity.ts never
+// imports the water/light sims — the callbacks keep it dependency-light.
+export interface ApplyHooks {
+  onEdit?: (x: number, y: number, z: number) => void;
+  waterEdit?: (x: number, y: number, z: number, block: number) => void;
+  springTarget?: (x: number, y: number, z: number) => boolean;
+}
+
+// The break ray's target: any solid/torch/door, plus a placed spring (the only water you
+// can break). Returns undefined when there is no spring callback (plain non-air/non-water).
+export function breakRayTarget(world: World, hooks: ApplyHooks): ((x: number, y: number, z: number) => boolean) | undefined {
+  const st = hooks.springTarget;
+  if (!st) return undefined;
+  return (x, y, z) => {
+    const b = world.getBlock(x, y, z);
+    if (b !== Block.Air && b !== Block.Water) return true;
+    return b === Block.Water && st(x, y, z);
+  };
+}
+
+// --- pure ports of the door/torch helpers (no camera, no three) ---
+
+function torchFaceFromNormal(nx: number, ny: number, nz: number): number {
+  if (ny > 0) return 0;   // +Y floor post
+  if (nx > 0) return 1;   // +X
+  if (nx < 0) return 2;   // -X
+  if (nz > 0) return 3;   // +Z
+  return 4;               // -Z
+}
+
+/** The other half of the door at (x,y,z), or null (an orphaned half). */
+function doorPartner(world: World, x: number, y: number, z: number): [number, number, number] | null {
+  const b = world.getBlock(x, y, z);
+  if (b === Block.DoorBottom && world.getBlock(x, y + 1, z) === Block.DoorTop) return [x, y + 1, z];
+  if (b === Block.DoorTop && world.getBlock(x, y - 1, z) === Block.DoorBottom) return [x, y - 1, z];
+  return null;
+}
+
+/** Remove ONLY the partner half of the door at (x,y,z); the caller handles that cell. */
+function clearDoorPartner(world: World, x: number, y: number, z: number, hooks: ApplyHooks): void {
+  const p = doorPartner(world, x, y, z);
+  if (!p) return;
+  world.setBlock(p[0], p[1], p[2], Block.Air);
+  hooks.waterEdit?.(p[0], p[1], p[2], Block.Air);
+  hooks.onEdit?.(p[0], p[1], p[2]);
+}
+
+/** Right-click on a door: flip open/closed on BOTH halves, keeping axis and side. */
+function toggleDoorPair(world: World, x: number, y: number, z: number, hooks: ApplyHooks): void {
+  const b = world.getBlock(x, y, z);
+  const m = world.getMeta(x, y, z);
+  const meta = doorMeta(!doorOpen(m), doorAxis(m), doorSide(m));
+  world.setBlock(x, y, z, b, meta);
+  hooks.onEdit?.(x, y, z);
+  const p = doorPartner(world, x, y, z);
+  if (p) {
+    world.setBlock(p[0], p[1], p[2], world.getBlock(p[0], p[1], p[2]), meta);
+    hooks.onEdit?.(p[0], p[1], p[2]);
+  }
+}
+
+/**
+ * The sim-owned action path (the old main.ts onMouseDown, minus the camera). Casts from
+ * the entity's eye along its absolute yaw/pitch; capability-gated; break on `primary`,
+ * place-or-use on `secondary` (door-toggle > torch > door-place > plain block). Every
+ * write fires waterEdit + onEdit. `select` is intentionally NOT acted on in phase 1.
+ */
+export function applyIntent(world: World, e: Entity, it: Intent, hooks: ApplyHooks): void {
+  // Capability-gated toggles apply even for a non-editing kind.
+  if (it.toggleFly && e.kind.canFly) e.fly = !e.fly;
+  if (it.toggleNoclip && e.kind.canNoclip) e.noclip = !e.noclip;
+  if (!e.kind.canEdit) return;
+
+  const origin = eyeOf(e);
+  const dir = lookDir(e.yaw, e.pitch);
+
+  if (it.primary) {
+    const hit = raycastVoxel(world, origin, dir, REACH, breakRayTarget(world, hooks));
+    if (!hit) return;
+    const hb = world.getBlock(hit.x, hit.y, hit.z);
+    if (isDoor(hb)) clearDoorPartner(world, hit.x, hit.y, hit.z, hooks);
+    world.setBlock(hit.x, hit.y, hit.z, Block.Air);
+    hooks.waterEdit?.(hit.x, hit.y, hit.z, Block.Air);
+    hooks.onEdit?.(hit.x, hit.y, hit.z);
+    return;
+  }
+
+  if (it.secondary) {
+    const hit = raycastVoxel(world, origin, dir, REACH); // plain target: water stays pass-through
+    if (!hit) return;
+    const hb = world.getBlock(hit.x, hit.y, hit.z);
+    const tx = hit.x + hit.nx, ty = hit.y + hit.ny, tz = hit.z + hit.nz;
+    if (ty < WORLD_Y_MIN || ty >= WORLD_Y_MAX) return;
+    const target = world.getBlock(tx, ty, tz);
+    const held = it.block ?? Block.Stone;
+
+    // 1) A door under the crosshair TOGGLES — always wins over placement.
+    if (isDoor(hb)) { toggleDoorPair(world, hit.x, hit.y, hit.z, hooks); return; }
+
+    // 2) Torch: AIR target + a solid opaque face behind it (no water/ceilings/door faces).
+    if (held === Block.Torch) {
+      if (target !== Block.Air) return;
+      if (hit.ny < 0) return;
+      if (!isOpaque(hb)) return;
+      if (!e.noclip && entityIntersectsVoxel(e, tx, ty, tz)) return;
+      world.setBlock(tx, ty, tz, Block.Torch, torchMeta(torchFaceFromNormal(hit.nx, hit.ny, hit.nz)));
+      hooks.waterEdit?.(tx, ty, tz, Block.Torch);
+      hooks.onEdit?.(tx, ty, tz);
+      return;
+    }
+
+    // 3) Door: both cells clearable (Air/Water), within height, no entity overlap.
+    if (held === Block.DoorBottom) {
+      if (ty + 1 >= WORLD_Y_MAX) return;
+      const above = world.getBlock(tx, ty + 1, tz);
+      if (target !== Block.Air && target !== Block.Water) return;
+      if (above !== Block.Air && above !== Block.Water) return;
+      if (!e.noclip && (entityIntersectsVoxel(e, tx, ty, tz) || entityIntersectsVoxel(e, tx, ty + 1, tz))) return;
+      // Axis from the entity's LEVEL FACING: the XZ-projected look direction, normalized —
+      // identical to the camera projection today (the pitch clamp keeps it non-degenerate).
+      const ldir = lookDir(e.yaw, e.pitch);
+      const horiz = Math.hypot(ldir.x, ldir.z);
+      const { axis, side } = doorPlacementFromView(
+        horiz >= 1e-3 ? ldir.x / horiz : 0,
+        horiz >= 1e-3 ? ldir.z / horiz : 0,
+        hit.nx, hit.nz,
+      );
+      const meta = doorMeta(false, axis, side);
+      world.setBlock(tx, ty, tz, Block.DoorBottom, meta);
+      world.setBlock(tx, ty + 1, tz, Block.DoorTop, meta);
+      hooks.waterEdit?.(tx, ty, tz, Block.DoorBottom); hooks.onEdit?.(tx, ty, tz);
+      hooks.waterEdit?.(tx, ty + 1, tz, Block.DoorTop); hooks.onEdit?.(tx, ty + 1, tz);
+      return;
+    }
+
+    // 4) A plain block may replace Air/Water/Torch/a door (pair cleared first).
+    if (target !== Block.Air && target !== Block.Water && target !== Block.Torch && !isDoor(target)) return;
+    if (!e.noclip && entityIntersectsVoxel(e, tx, ty, tz)) return;
+    if (isDoor(target)) clearDoorPartner(world, tx, ty, tz, hooks);
+    world.setBlock(tx, ty, tz, held);
+    hooks.waterEdit?.(tx, ty, tz, held);
+    hooks.onEdit?.(tx, ty, tz);
   }
 }

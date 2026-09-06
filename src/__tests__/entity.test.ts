@@ -1,8 +1,8 @@
 import { describe, it, expect } from 'vitest';
-import { Block } from '../blocks';
+import { Block, isDoor, doorOpen } from '../blocks';
 import { World, localIndex } from '../world';
 import { Player, WALK_SPEED, SWIM_SPEED, FLY_SPEED, FLY_V_SPEED, JUMP_VEL, HALF, HEIGHT, EYE } from '../player';
-import { KINDS, NULL_INTENT, stepEntity, lookDir, type Entity, type Intent } from '../entity';
+import { KINDS, NULL_INTENT, stepEntity, lookDir, eyeOf, applyIntent, type Entity, type Intent, type ApplyHooks } from '../entity';
 
 const STEP = 1 / 60;
 
@@ -104,5 +104,87 @@ describe('entity — the player kind', () => {
       expect(B.yaw).toBe(A.yaw);
       expect(B.pitch).toBe(A.pitch);
     }
+  });
+});
+
+function editHooks(world: World): { hooks: ApplyHooks; edits: [number, number, number][]; water: [number, number, number, number][] } {
+  const edits: [number, number, number][] = [];
+  const water: [number, number, number, number][] = [];
+  const hooks: ApplyHooks = {
+    onEdit: (x, y, z) => edits.push([x, y, z]),
+    waterEdit: (x, y, z, b) => water.push([x, y, z, b]),
+    springTarget: (x, y, z) => world.getBlock(x, y, z) === Block.Water, // stand-in: all water is a spring here
+  };
+  return { hooks, edits, water };
+}
+
+// Entity at (0,5,0) facing -Z (yaw 0), pitch 0 -> eye (0, ~6.62, 0), ray along -Z. A
+// full-height stone column stands at world z=-4 (chunk cz=-1, local z=12) so the eye ray
+// (y~6.62) meets it at (0,6,-4); the cells z=0..-3 are air between the eye and the wall.
+function wallWorld(): { world: World; e: Entity } {
+  const world = new World();
+  const c = world.ensureChunk(0, 0, -1); // chunk cz=-1: world z = -16..-1
+  for (let y = 0; y < 8; y++) c.blocks[localIndex(0, y, 12)] = Block.Stone; // world z=-4
+  const e: Entity = {
+    id: 1, kind: KINDS.player,
+    pos: { x: 0, y: 5, z: 0 }, vel: { x: 0, y: 0, z: 0 },
+    yaw: 0, pitch: 0, onGround: true, inWater: false, headInWater: false,
+    fly: false, noclip: false,
+    controller: { intent: () => NULL_INTENT }, baseController: { intent: () => NULL_INTENT },
+  };
+  return { world, e };
+}
+
+describe('entity — applyIntent (sim-owned actions)', () => {
+  it('eyeOf is feet + kind eye', () => {
+    const { e } = wallWorld();
+    expect(eyeOf(e)).toEqual({ x: 0, y: 5 + EYE, z: 0 });
+  });
+
+  it('primary breaks the block the eye ray hits (and reports the edit + water)', () => {
+    const { world, e } = wallWorld();
+    const { hooks, edits, water } = editHooks(world);
+    applyIntent(world, e, { ...NULL_INTENT, primary: true }, hooks);
+    // The ray from the eye goes -Z and meets the z=-4 column at y=6.
+    expect(world.getBlock(0, 6, -4)).toBe(Block.Air);
+    expect(edits).toContainEqual([0, 6, -4]);
+    expect(water).toContainEqual([0, 6, -4, Block.Air]);
+  });
+
+  it('secondary places `block` on the face behind the hit', () => {
+    const { world, e } = wallWorld();
+    const { hooks } = editHooks(world);
+    applyIntent(world, e, { ...NULL_INTENT, secondary: true, block: Block.Planks }, hooks);
+    // Hit at (0,6,-4), entered from +Z (nz=+1) -> target (0,6,-3).
+    expect(world.getBlock(0, 6, -3)).toBe(Block.Planks);
+  });
+
+  it('secondary on a door toggles the pair (always wins over placement)', () => {
+    const world = new World();
+    const c = world.ensureChunk(0, 0, -1);
+    c.blocks[localIndex(0, 5, 13)] = Block.DoorBottom; // world (0,5,-3)
+    c.blocks[localIndex(0, 6, 13)] = Block.DoorTop;    // world (0,6,-3)
+    const e: Entity = {
+      id: 1, kind: KINDS.player,
+      pos: { x: 0, y: 5, z: 0 }, vel: { x: 0, y: 0, z: 0 },
+      yaw: 0, pitch: 0, onGround: true, inWater: false, headInWater: false,
+      fly: false, noclip: false,
+      controller: { intent: () => NULL_INTENT }, baseController: { intent: () => NULL_INTENT },
+    };
+    const { hooks } = editHooks(world);
+    applyIntent(world, e, { ...NULL_INTENT, secondary: true }, hooks);
+    expect(isDoor(world.getBlock(0, 5, -3))).toBe(true);
+    expect(doorOpen(world.getMeta(0, 5, -3))).toBe(true);
+    expect(doorOpen(world.getMeta(0, 6, -3))).toBe(true);
+  });
+
+  it('a kind with canEdit=false performs no edit (only the toggles would apply)', () => {
+    const { world, e } = wallWorld();
+    e.kind = { ...KINDS.player, canEdit: false };
+    const { hooks, edits, water } = editHooks(world);
+    applyIntent(world, e, { ...NULL_INTENT, primary: true, secondary: true, block: Block.Planks }, hooks);
+    expect(world.getBlock(0, 6, -4)).toBe(Block.Stone); // nothing broken
+    expect(edits).toEqual([]);
+    expect(water).toEqual([]);
   });
 });
