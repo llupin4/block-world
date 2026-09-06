@@ -21,6 +21,7 @@ recoverable via git history at pre-restructure `main`, `0cf878c`).
 | [0012](0012-light-worker.md) | Light simulation on a web worker | pin-identical engine over a chunk-field mirror, tick-numbered structured-clone protocol |
 | [0013](0013-heavy-remesh-slicing.md) | Heavy-chunk remesh | vertex-budget probe + 4 balanced row-band slices on reserved frames (exact partition, merge at end) |
 | [0014](0014-world-persistence.md) | World persistence | edited chunks snapshot to IndexedDB on unload and restore verbatim (water state included); light recomputes on load; 1.5 s boot gate |
+| [0015](0015-entities-controllers.md) | Entities & controllers | the player is an entity driven by a controller; edits flow through the sim (`applyIntent`), not the camera; persistence `v: 2` |
 
 ## Conventions
 

@@ -361,6 +361,13 @@ Highlight box: a `THREE.LineSegments` wireframe cube, repositioned to `hit + 0.5
 
 ## 8. Player controller
 
+> **Ownership (2026-09-06, [ADR 0015](docs/adr/0015-entities-controllers.md)).** The
+> interactive player is now a kind-parameterized **entity** driven by a **controller**
+> (`src/entity.ts`); world edits flow through the sim (`applyIntent`, cast from the entity's
+> eye), not the camera. The `Player` class and its pinned physics/`player.test.ts` stay as the
+> single source of the numbers and the equivalence oracle — the section below describes the
+> physics the player entity reuses verbatim (`stepEntity(playerKind)` ≡ `Player.update`).
+
 **Camera & input.** Pointer Lock API. `mousemove` deltas accumulate into yaw/pitch; clamp pitch to ±(π/2 − 0.01) so you never gimbal at straight up/down.
 
 **Collision.** Player is an AABB roughly `0.6 × 1.8 × 0.6`, eye height ~1.62. Resolve each axis independently, in order:
@@ -487,6 +494,11 @@ state is not derivable from block diffs), and the quota concern applies to a who
 store, not an edited-chunk store. Persistence is no longer skipped for v1 — edited chunks
 snapshot to IndexedDB on unload and restore verbatim across reloads; light recomputes on
 load. The original sketch is kept as the design context that ADR 0014 resolves.
+
+> **`v: 2` (2026-09-06, [ADR 0015](docs/adr/0015-entities-controllers.md)).** The record and
+> meta bumped to `v: 2`: the meta now stores `entities`/`viewedEntityId`/`simPrng` (the player
+> is an entity, not a bare pose), and a chunk record can carry its frozen entities. A `v: 1`
+> save still loads (the old player pose migrates to a single viewed entity).
 
 `localStorage` for the seed and player position. For block edits, IndexedDB storing **diffs only** — a per-chunk `Map<voxelIndex, blockId>` of player changes. On load, regenerate base terrain from the seed and replay the diff.
 
