@@ -1,7 +1,9 @@
 import { Block, isOpaque, torchMeta, doorMeta, doorOpen, doorAxis, doorSide, isDoor, doorPlacementFromView } from './blocks';
-import { type World, WORLD_Y_MIN, WORLD_Y_MAX } from './world';
+import { type World, WORLD_Y_MIN, WORLD_Y_MAX, chunkOf } from './world';
 import { WALK_SPEED, SWIM_SPEED, FLY_SPEED, FLY_V_SPEED, GRAVITY, JUMP_VEL, HALF, HEIGHT, EYE } from './player';
 import { raycastVoxel, REACH } from './raycast';
+
+export const MAX_PITCH = Math.PI / 2 - 0.01; // never go over the top
 
 export interface Vec3 { x: number; y: number; z: number }
 
@@ -362,5 +364,303 @@ export function applyIntent(world: World, e: Entity, it: Intent, hooks: ApplyHoo
     world.setBlock(tx, ty, tz, held);
     hooks.waterEdit?.(tx, ty, tz, held);
     hooks.onEdit?.(tx, ty, tz);
+  }
+}
+
+// The sim's seeded PRNG: the pinned mulberry32 variant from terrain.ts (same twist), so
+// sim randomness is reproducible and snapshot/restore-able. Phase 1 draws nothing from it.
+export class SimRng {
+  private a: number;
+  constructor(seed: number) { this.a = seed >>> 0; }
+  next(): number {
+    this.a |= 0;
+    this.a = (this.a + 0x6d2b79f5) | 0;
+    let t = Math.imul(this.a ^ (this.a >>> 15), 1 | this.a);
+    t = (t + Math.imul(t ^ (this.a >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  }
+  state(): number { return this.a >>> 0; }
+  restore(state: number): void { this.a = state >>> 0; }
+}
+
+/** Derive the sim PRNG seed from the world seed (pinned). */
+export function deriveSimSeed(seed: number): number {
+  return (seed ^ 0x5eed1234) >>> 0;
+}
+
+export function controllerKindOf(c: Controller): string {
+  if (c instanceof HumanController) return 'human';
+  if (c instanceof ScriptController) return 'script';
+  if (c instanceof IdleController) return 'idle';
+  return 'unknown';
+}
+
+/**
+ * The entity registry + heartbeat. Owns id-ordered `all()`, the viewed id, the respawn,
+ * the edit hooks, and the sim PRNG. `tick` runs one substep: for each loaded entity, ask
+ * its controller for an intent, fire the recorder (phase 3), applyIntent, stepEntity; then
+ * the fall-out-of-world pass (player -> respawn, other -> despawn).
+ */
+export class Sim {
+  readonly entities = new Map<number, Entity>();
+  viewedId = 0;
+  respawn: Vec3 = { x: 0, y: 0, z: 0 };
+  readonly rng: SimRng;
+  // Phase 3: the intent recorder. Phase 1 leaves it unset.
+  onIntent?: (tick: number, e: Entity, it: Intent) => void;
+
+  private readonly world: World;
+  private readonly hooks: ApplyHooks;
+  private nextId = 1;
+
+  constructor(world: World, hooks: ApplyHooks, seed: number) {
+    this.world = world;
+    this.hooks = hooks;
+    this.rng = new SimRng(deriveSimSeed(seed));
+  }
+
+  all(): Entity[] {
+    const out: Entity[] = [];
+    for (const id of [...this.entities.keys()].sort((x, y) => x - y)) out.push(this.entities.get(id)!);
+    return out;
+  }
+
+  viewed(): Entity | undefined { return this.entities.get(this.viewedId); }
+
+  setViewed(id: number): void { if (this.entities.has(id)) this.viewedId = id; }
+
+  spawn(pos: Vec3, controller: Controller, opts: { yaw?: number; pitch?: number; kindId?: string } = {}): Entity {
+    const kind = KINDS[opts.kindId ?? 'player'] ?? KINDS.player;
+    const e: Entity = {
+      id: this.nextId++,
+      kind,
+      pos: { ...pos }, vel: { x: 0, y: 0, z: 0 },
+      yaw: opts.yaw ?? 0, pitch: opts.pitch ?? 0,
+      onGround: false, inWater: false, headInWater: false,
+      fly: false, noclip: false,
+      controller, baseController: controller,
+    };
+    this.entities.set(e.id, e);
+    if (this.viewedId === 0) this.viewedId = e.id;
+    return e;
+  }
+
+  despawn(id: number): void {
+    this.entities.delete(id);
+    if (this.viewedId === id) {
+      this.viewedId = 0;
+      const first = this.entities.keys().next().value;
+      if (first !== undefined) this.viewedId = first;
+    }
+  }
+
+  /** An entity steps only while its own chunk is loaded; otherwise it is frozen. */
+  chunkLoaded(e: Entity): boolean {
+    return this.world.hasChunk(chunkOf(e.pos.x), chunkOf(e.pos.y), chunkOf(e.pos.z));
+  }
+
+  tick(dt: number, tick: number): void {
+    for (const e of this.all()) {
+      if (!this.chunkLoaded(e)) continue;
+      const it = e.controller.intent(e, tick);
+      this.onIntent?.(tick, e, it);
+      applyIntent(this.world, e, it, this.hooks);
+      stepEntity(this.world, e, it, dt);
+    }
+    for (const e of this.all()) {
+      if (e.pos.y < WORLD_Y_MIN) {
+        if (e.kind.id === 'player') {
+          e.pos = { ...this.respawn }; e.vel = { x: 0, y: 0, z: 0 };
+        } else {
+          this.despawn(e.id);
+        }
+      }
+    }
+  }
+
+  // --- persistence (Task 6 uses these) ---
+
+  toRecord(e: Entity): EntityRecord {
+    return {
+      id: e.id, kindId: e.kind.id,
+      x: e.pos.x, y: e.pos.y, z: e.pos.z,
+      vx: e.vel.x, vy: e.vel.y, vz: e.vel.z,
+      yaw: e.yaw, pitch: e.pitch,
+      fly: e.fly, noclip: e.noclip,
+      controllerKind: controllerKindOf(e.controller),
+    };
+  }
+
+  entitiesInChunk(cx: number, cy: number, cz: number): Entity[] {
+    return this.all().filter((e) =>
+      chunkOf(e.pos.x) === cx && chunkOf(e.pos.y) === cy && chunkOf(e.pos.z) === cz);
+  }
+
+  /** Restore a persisted entity. No-op when the id already exists (a newer record wins:
+   *  boot-column records restore before the meta). */
+  restoreEntity(rec: EntityRecord, controller: Controller): Entity | null {
+    if (this.entities.has(rec.id)) return null;
+    const kind = KINDS[rec.kindId] ?? KINDS.player;
+    const e: Entity = {
+      id: rec.id, kind,
+      pos: { x: rec.x, y: rec.y, z: rec.z },
+      vel: { x: rec.vx, y: rec.vy, z: rec.vz },
+      yaw: rec.yaw, pitch: rec.pitch,
+      onGround: false, inWater: false, headInWater: false,
+      fly: rec.fly, noclip: rec.noclip,
+      controller, baseController: controller,
+    };
+    this.entities.set(e.id, e);
+    this.nextId = Math.max(this.nextId, e.id + 1); // keep ids monotonic across restores
+    return e;
+  }
+
+  restoreEntities(records: EntityRecord[], controllerFor: (r: EntityRecord) => Controller): void {
+    for (const r of records) this.restoreEntity(r, controllerFor(r));
+  }
+}
+
+/**
+ * HumanController: main.ts pushes hardware state into it (the shared keys Set, heldBlock,
+ * mouse deltas, and one-tick edges). intent() reports each edge for EXACTLY one substep
+ * (the first after the event), then clears it — a frame that runs up to 6 substeps
+ * consumes the edge once. Sensitive to `frozen` (the prof rig): zero movement, no edges,
+ * but it still reports the entity's current look (sticky).
+ */
+export class HumanController implements Controller {
+  readonly keys: Set<string>;
+  heldBlock = Block.Stone;
+  frozen = false;
+  private yaw: number; private pitch: number;
+  private primaryEdge = false; private secondaryEdge = false;
+  private toggleFlyEdge = false; private toggleNoclipEdge = false;
+  private selectSlot: number | undefined;
+
+  constructor(keys: Set<string>, yaw = 0, pitch = 0) {
+    this.keys = keys; this.yaw = yaw; this.pitch = pitch;
+  }
+
+  mouse(dx: number, dy: number): void {
+    this.yaw -= dx * 0.0025; // sensitivity (rad/px) moved from main.ts
+    this.pitch = Math.max(-MAX_PITCH, Math.min(MAX_PITCH, this.pitch - dy * 0.0025));
+  }
+  primary(): void { this.primaryEdge = true; }
+  secondary(): void { this.secondaryEdge = true; }
+  toggleFly(): void { this.toggleFlyEdge = true; }
+  toggleNoclip(): void { this.toggleNoclipEdge = true; }
+  select(slot: number): void { this.selectSlot = slot; } // reported for replay; unwired in phase 1
+
+  intent(e: Entity, _tick: number): Intent {
+    if (this.frozen) {
+      return { forward: 0, strafe: 0, up: false, down: false, yaw: e.yaw, pitch: e.pitch, primary: false, secondary: false };
+    }
+    const it: Intent = {
+      forward: (this.keys.has('KeyW') ? 1 : 0) - (this.keys.has('KeyS') ? 1 : 0),
+      strafe: (this.keys.has('KeyD') ? 1 : 0) - (this.keys.has('KeyA') ? 1 : 0),
+      up: this.keys.has('Space'),
+      down: this.keys.has('ShiftLeft') || this.keys.has('ShiftRight'),
+      yaw: this.yaw,
+      pitch: this.pitch,
+      primary: this.primaryEdge,
+      secondary: this.secondaryEdge,
+      block: this.heldBlock,
+    };
+    if (this.toggleFlyEdge) it.toggleFly = true;
+    if (this.toggleNoclipEdge) it.toggleNoclip = true;
+    if (this.selectSlot !== undefined) it.select = this.selectSlot;
+    // consume the one-tick edges
+    this.primaryEdge = false; this.secondaryEdge = false;
+    this.toggleFlyEdge = false; this.toggleNoclipEdge = false;
+    this.selectSlot = undefined;
+    return it;
+  }
+}
+
+/** IdleController: the null movement intent, holding the entity's current look (sticky). */
+export class IdleController implements Controller {
+  intent(e: Entity, _tick: number): Intent {
+    return { ...NULL_INTENT, yaw: e.yaw, pitch: e.pitch };
+  }
+}
+
+/**
+ * ScriptController: a deterministic behavior list for tests/bots. State (step index, ticks
+ * left) lives in the instance — one per entity. `repeat` wraps the list. `walkTo` faces
+ * the target and walks until within 0.4 m or the timeout; `lookAt` is a one-tick aim from
+ * the eye; `dig`/`place` hold the edge for N ticks; `wait` idles.
+ */
+export type ScriptStep =
+  | { op: 'walkTo'; x: number; z: number; timeout: number }
+  | { op: 'lookAt'; x: number; y: number; z: number }
+  | { op: 'dig'; ticks: number }
+  | { op: 'place'; block: number; ticks: number }
+  | { op: 'wait'; ticks: number };
+
+const clamp1 = (v: number): number => Math.max(-1, Math.min(1, v));
+
+export class ScriptController implements Controller {
+  private readonly steps: ScriptStep[];
+  private readonly repeat: boolean;
+  private si = 0;
+  private ticksLeft = 0;
+
+  constructor(steps: ScriptStep[], repeat = false) {
+    this.steps = steps; this.repeat = repeat;
+    this.beginStep();
+  }
+
+  private ticksFor(s: ScriptStep): number {
+    switch (s.op) {
+      case 'walkTo': return s.timeout;
+      case 'dig': return s.ticks;
+      case 'place': return s.ticks;
+      case 'wait': return s.ticks;
+      case 'lookAt': return 1;
+    }
+  }
+
+  private beginStep(): void {
+    const s = this.steps[this.si];
+    this.ticksLeft = s ? this.ticksFor(s) : 0;
+  }
+
+  private nextStep(): void {
+    this.si++;
+    if (this.si >= this.steps.length) {
+      if (this.repeat) this.si = 0;
+      else return; // exhausted: idle() holds still
+    }
+    this.beginStep();
+  }
+
+  intent(e: Entity, _tick: number): Intent {
+    const s = this.steps[this.si];
+    if (!s) return { ...NULL_INTENT, yaw: e.yaw, pitch: e.pitch }; // done (no repeat)
+    const it: Intent = { ...NULL_INTENT, yaw: e.yaw, pitch: e.pitch };
+    switch (s.op) {
+      case 'walkTo': {
+        const dx = s.x - e.pos.x, dz = s.z - e.pos.z;
+        if (Math.hypot(dx, dz) > 0.4) {
+          it.yaw = Math.atan2(-dx, -dz); // forward=(-sin,-cos) aimed at (dx,dz)
+          it.forward = 1;
+        }
+        break;
+      }
+      case 'lookAt': {
+        const o = eyeOf(e);
+        const dx = s.x - o.x, dy = s.y - o.y, dz = s.z - o.z;
+        const l = Math.hypot(dx, dy, dz) || 1;
+        const dirx = dx / l, diry = dy / l, dirz = dz / l;
+        it.yaw = Math.atan2(-dirx, -dirz);
+        it.pitch = Math.asin(clamp1(diry));
+        break;
+      }
+      case 'dig': it.primary = true; break;
+      case 'place': it.secondary = true; it.block = s.block; break;
+      case 'wait': break;
+    }
+    this.ticksLeft--;
+    if (this.ticksLeft <= 0) this.nextStep();
+    return it;
   }
 }

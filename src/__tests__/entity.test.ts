@@ -2,7 +2,8 @@ import { describe, it, expect } from 'vitest';
 import { Block, isDoor, doorOpen } from '../blocks';
 import { World, localIndex } from '../world';
 import { Player, WALK_SPEED, SWIM_SPEED, FLY_SPEED, FLY_V_SPEED, JUMP_VEL, HALF, HEIGHT, EYE } from '../player';
-import { KINDS, NULL_INTENT, stepEntity, lookDir, eyeOf, applyIntent, type Entity, type Intent, type ApplyHooks } from '../entity';
+import { KINDS, NULL_INTENT, stepEntity, lookDir, eyeOf, applyIntent, Sim, SimRng, deriveSimSeed, controllerKindOf, IdleController, HumanController, ScriptController, type Entity, type Intent, type ApplyHooks, type ScriptStep } from '../entity';
+import { TERRAIN_SEED } from '../terrain';
 
 const STEP = 1 / 60;
 
@@ -186,5 +187,156 @@ describe('entity — applyIntent (sim-owned actions)', () => {
     expect(world.getBlock(0, 6, -4)).toBe(Block.Stone); // nothing broken
     expect(edits).toEqual([]);
     expect(water).toEqual([]);
+  });
+});
+
+describe('entity — SimRng', () => {
+  it('is deterministic and snapshot/restore round-trips', () => {
+    const a = new SimRng(deriveSimSeed(TERRAIN_SEED));
+    const b = new SimRng(deriveSimSeed(TERRAIN_SEED));
+    const xs = [a.next(), a.next(), a.next()];
+    expect([b.next(), b.next(), b.next()]).toEqual(xs);
+    a.restore(a.state());
+    expect([a.next(), a.next()]).toEqual([b.next(), b.next()]);
+    expect(deriveSimSeed(1234)).toBe((1234 ^ 0x5eed1234) >>> 0);
+  });
+});
+
+describe('entity — Sim (registry + tick)', () => {
+  function flat(world: World): number[] {
+    return [...world.allChunks()].flatMap((c) => Array.from(c.blocks));
+  }
+
+  function runTwoBots(seed: number): { initial: number[]; final: number[] } {
+    const world = new World();
+    for (let cx = 0; cx <= 1; cx++)
+      for (let cz = 0; cz <= 1; cz++) {
+        const c = world.ensureChunk(cx, 0, cz);
+        for (let lx = 0; lx < 16; lx++) for (let lz = 0; lz < 16; lz++) c.blocks[localIndex(lx, 4, lz)] = Block.Stone;
+      }
+    // A full-height stone wall at world z=12 (chunk cz=0, local z=12), ~4-5 m ahead of the
+    // bots (z~16.5/17.5) so their REACH-6 dig ray actually meets it.
+    for (let cx = 0; cx <= 1; cx++)
+      for (let y = 0; y < 8; y++) world.ensureChunk(cx, 0, 0).blocks[localIndex(0, y, 12)] = Block.Stone;
+    const sim = new Sim(world, {}, seed);
+    const script = (): import('../entity').ScriptStep[] => [
+      { op: 'lookAt', x: 0, y: 6, z: -16 }, // face -Z (toward the z=12 wall)
+      { op: 'dig', ticks: 12 },
+      { op: 'place', block: Block.Planks, ticks: 12 },
+      { op: 'wait', ticks: 564 },
+    ];
+    sim.spawn({ x: 0.5, y: 5, z: 16.5 }, new ScriptController(script()));
+    sim.spawn({ x: 0.5, y: 5, z: 17.5 }, new ScriptController(script()));
+    const initial = flat(world);
+    for (let i = 0; i < 600; i++) sim.tick(STEP, i);
+    return { initial, final: flat(world) };
+  }
+
+  it('assigns monotonic ids and exposes the viewed entity', () => {
+    const world = new World();
+    const sim = new Sim(world, {}, 1);
+    const a = sim.spawn({ x: 0, y: 0, z: 0 }, new IdleController());
+    const b = sim.spawn({ x: 1, y: 0, z: 0 }, new IdleController());
+    expect(a.id).toBeLessThan(b.id);
+    expect(sim.viewed()?.id).toBe(a.id);
+    expect(controllerKindOf(a.controller)).toBe('idle');
+  });
+
+  it('falls out of the world: a player kind respawns, a non-player kind despawns', () => {
+    const world = new World();
+    const sim = new Sim(world, {}, 1);
+    sim.respawn = { x: 0, y: 5, z: 0 };
+    const p = sim.spawn({ x: 0, y: -40, z: 0 }, new IdleController()); // below WORLD_Y_MIN
+    const mob = sim.spawn({ x: 5, y: -40, z: 0 }, new IdleController());
+    mob.kind = { ...mob.kind, id: 'dolt' }; // a non-player kind
+    sim.tick(STEP, 0);
+    expect(sim.viewed()?.id).toBe(p.id);
+    expect(p.pos).toEqual({ x: 0, y: 5, z: 0 }); // respawned
+    expect(sim.entities.has(mob.id)).toBe(false); // despawned
+  });
+
+  it('two bots with identical scripts produce an identical world across two runs (determinism)', () => {
+    const a = runTwoBots(1234);
+    const b = runTwoBots(1234);
+    expect(a.final).toEqual(b.final);   // deterministic
+    expect(a.final).not.toEqual(a.initial); // and the bots actually edited the world
+  });
+});
+
+describe('entity — controllers', () => {
+  it('HumanController: edges fire exactly one tick then clear; mouse accumulates absolute look', () => {
+    const keys = new Set<string>();
+    const h = new HumanController(keys, 0, 0);
+    h.primary();
+    const dummy: Entity = {
+      id: 1, kind: KINDS.player,
+      pos: { x: 0, y: 0, z: 0 }, vel: { x: 0, y: 0, z: 0 },
+      yaw: 0.3, pitch: -0.1, onGround: true, inWater: false, headInWater: false,
+      fly: false, noclip: false, controller: h, baseController: h,
+    };
+    const it1 = h.intent(dummy, 0);
+    expect(it1.primary).toBe(true);
+    expect(it1.yaw).toBe(0); // absolute look held at the controller's accumulated yaw
+    const it2 = h.intent(dummy, 1);
+    expect(it2.primary).toBe(false); // the edge was consumed on the first substep
+    h.mouse(100, 0);
+    const it3 = h.intent(dummy, 2);
+    expect(it3.yaw).toBeCloseTo(-0.25, 9); // 100px * 0.0025 rad/px
+    expect(it3.block).toBe(Block.Stone);   // heldBlock default
+    keys.add('KeyW');
+    expect(h.intent(dummy, 3).forward).toBe(1);
+  });
+
+  it('HumanController: frozen (prof rig) emits zero movement but holds current look', () => {
+    const h = new HumanController(new Set<string>(), 0.9, 0.2);
+    h.frozen = true;
+    const dummy: Entity = {
+      id: 1, kind: KINDS.player,
+      pos: { x: 0, y: 0, z: 0 }, vel: { x: 0, y: 0, z: 0 },
+      yaw: 0.9, pitch: 0.2, onGround: true, inWater: false, headInWater: false,
+      fly: false, noclip: false, controller: h, baseController: h,
+    };
+    const it = h.intent(dummy, 0);
+    expect(it.forward).toBe(0); expect(it.up).toBe(false);
+    expect(it.primary).toBe(false);
+    expect(it.yaw).toBe(0.9); expect(it.pitch).toBe(0.2); // sticky, from the entity
+  });
+
+  it('IdleController holds the entity\'s current yaw/pitch (sticky look)', () => {
+    const c = new IdleController();
+    const dummy: Entity = {
+      id: 1, kind: KINDS.player,
+      pos: { x: 0, y: 0, z: 0 }, vel: { x: 0, y: 0, z: 0 },
+      yaw: 0.5, pitch: -0.2, onGround: true, inWater: false, headInWater: false,
+      fly: false, noclip: false, controller: c, baseController: c,
+    };
+    const it = c.intent(dummy, 0);
+    expect(it.yaw).toBe(0.5); expect(it.pitch).toBe(-0.2);
+    expect(it.forward).toBe(0); expect(it.primary).toBe(false);
+  });
+
+  it('ScriptController: lookAt aims the entity, dig fires primary, place fires secondary+block', () => {
+    const e: Entity = {
+      id: 1, kind: KINDS.player,
+      pos: { x: 0, y: 5, z: 0 }, vel: { x: 0, y: 0, z: 0 },
+      yaw: 0, pitch: 0, onGround: true, inWater: false, headInWater: false,
+      fly: false, noclip: false, controller: null as never, baseController: null as never,
+    };
+    const steps: ScriptStep[] = [
+      { op: 'lookAt', x: 0, y: 5, z: -3 }, // face -Z (one tick)
+      { op: 'dig', ticks: 2 },
+      { op: 'place', block: Block.Planks, ticks: 2 },
+      { op: 'wait', ticks: 1 },
+    ];
+    const c = new ScriptController(steps);
+    e.controller = c;
+    const it0 = c.intent(e, 0);   // lookAt
+    expect(it0.yaw).toBeCloseTo(0, 9);          // facing -Z (yaw 0)
+    const itDig = c.intent(e, 1);               // dig #1
+    expect(itDig.primary).toBe(true);
+    c.intent(e, 2);                             // dig #2 (advances to place)
+    const itPlace = c.intent(e, 3);             // place #1
+    expect(itPlace.secondary).toBe(true);
+    expect(itPlace.block).toBe(Block.Planks);
   });
 });
