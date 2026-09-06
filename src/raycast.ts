@@ -75,3 +75,38 @@ export function raycastVoxel(
     }
   }
 }
+
+/** Slab/AABB intersection of the ray against each entity's box (kind half/height, feet at
+ *  pos). Returns the NEAREST entity hit within `reach` in front of the origin, or null.
+ *  Entities pass through each other — this is the nearest AABB, not a solid. The caller
+ *  excludes the viewed entity so you never pick yourself. */
+export function pickEntity(
+  origin: { x: number; y: number; z: number },
+  dir: { x: number; y: number; z: number },
+  entities: { pos: { x: number; y: number; z: number }; kind: { half: number; height: number } }[],
+  reach: number,
+): { index: number; t: number } | null {
+  let best: { index: number; t: number } | null = null;
+  for (let i = 0; i < entities.length; i++) {
+    const e = entities[i];
+    const axes: [number, number, number, number][] = [
+      [origin.x, dir.x, e.pos.x - e.kind.half, e.pos.x + e.kind.half],
+      [origin.y, dir.y, e.pos.y, e.pos.y + e.kind.height],
+      [origin.z, dir.z, e.pos.z - e.kind.half, e.pos.z + e.kind.half],
+    ];
+    let tmin = 0, tmax = reach, hit = true;
+    for (const [o, d, mn, mx] of axes) {
+      if (Math.abs(d) < 1e-8) {
+        if (o < mn || o > mx) { hit = false; break; }
+      } else {
+        let t1 = (mn - o) / d, t2 = (mx - o) / d;
+        if (t1 > t2) [t1, t2] = [t2, t1];
+        if (t1 > tmin) tmin = t1;
+        if (t2 < tmax) tmax = t2;
+        if (tmin > tmax) { hit = false; break; }
+      }
+    }
+    if (hit && tmin <= reach && (best === null || tmin < best.t)) best = { index: i, t: tmin };
+  }
+  return best;
+}
