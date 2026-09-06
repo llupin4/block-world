@@ -1,4 +1,5 @@
 import { type Chunk, type World } from './world';
+import { type EntityRecord, type Controller } from './entity';
 
 declare global {
   interface Window {
@@ -12,7 +13,7 @@ declare global {
  *  intentionally absent (recomputed by the light worker on load — ADR 0012). Plain data
  *  only (no class instances, no closures) — this is the future sync payload. */
 export interface ChunkRecord {
-  v: 1;
+  v: 2;
   cx: number;
   cy: number;
   cz: number;
@@ -22,13 +23,16 @@ export interface ChunkRecord {
   wsource: Uint8Array;
   wplaced: Uint8Array;
   wstream: Uint8Array;
+  entities?: EntityRecord[]; // entities frozen in this chunk when it unloads (phase 2+)
 }
 
-/** World meta: everything that is not chunk arrays. */
+/** World meta: everything that is not chunk arrays (v2: the loaded entities ride the meta). */
 export interface WorldMeta {
-  v: 1;
+  v: 2;
   seed: number;
-  player: { x: number; y: number; z: number; yaw: number; pitch: number };
+  entities: EntityRecord[];      // entities whose chunk is loaded at save time
+  viewedEntityId: number;
+  simPrng?: number;              // the sim PRNG state (phase 2 draws from it; phase 3 restores it)
   time: { time: number; tick: number; phaseTotal: number }; // WorldTime.snapshot()
   hotbar: { slots: number[]; selected: number };
 }
@@ -59,9 +63,9 @@ export function metaKey(seed: number): string {
 
 /** Snapshot a chunk's arrays into a record. Arrays are COPIED (slice): the chunk is
  *  removed from the world right after onUnload returns. */
-export function snapshotChunk(c: Chunk): ChunkRecord {
-  return {
-    v: 1,
+export function snapshotChunk(c: Chunk, entities?: EntityRecord[]): ChunkRecord {
+  const rec: ChunkRecord = {
+    v: 2,
     cx: c.cx, cy: c.cy, cz: c.cz,
     blocks: c.blocks.slice(),
     meta: c.meta.slice(),
@@ -70,6 +74,8 @@ export function snapshotChunk(c: Chunk): ChunkRecord {
     wplaced: c.wplaced.slice(),
     wstream: c.wstream.slice(),
   };
+  if (entities && entities.length) rec.entities = entities;
+  return rec;
 }
 
 /** Apply a record to the world. settled = true (D1: the saved state is the truth — no
@@ -77,7 +83,11 @@ export function snapshotChunk(c: Chunk): ChunkRecord {
  *  unload re-snapshots it); editGen = savedGen = 1 (restored AND in sync — nothing to
  *  write until the next edit bumps editGen); dirty = false (its first mesh goes through
  *  main.ts's deferredFirstMesh, not the remesh pass). */
-export function applyRecord(world: World, r: ChunkRecord): void {
+export function applyRecord(
+  world: World, r: ChunkRecord,
+  sim?: { restoreEntities(records: EntityRecord[], f: (r: EntityRecord) => Controller): void },
+  controllerFor?: (r: EntityRecord) => Controller,
+): void {
   const c = world.ensureChunk(r.cx, r.cy, r.cz);
   c.blocks.set(r.blocks);
   c.meta.set(r.meta);
@@ -90,6 +100,29 @@ export function applyRecord(world: World, r: ChunkRecord): void {
   c.editGen = 1;
   c.savedGen = 1;
   c.dirty = false;
+  if (r.entities && sim && controllerFor) sim.restoreEntities(r.entities, controllerFor);
+}
+
+/** Migrate a stored meta to v2. A v1 meta (a single `player` pose) becomes one viewed
+ *  player entity (id 1). A v2 meta is returned as-is. A v1 chunk record (no `entities`)
+ *  reads with `entities` absent — nothing to restore. */
+function migrateMeta(m: StoreValue): WorldMeta | null {
+  if (!m || !('v' in m)) return null;
+  if (m.v === 2 && 'entities' in m) return m as WorldMeta;
+  const v1 = m as unknown as { seed: number; player: { x: number; y: number; z: number; yaw: number; pitch: number }; time: WorldMeta['time']; hotbar: WorldMeta['hotbar'] };
+  if (!('player' in m)) return null; // not a v1 meta we can migrate
+  return {
+    v: 2, seed: v1.seed,
+    entities: [{
+      id: 1, kindId: 'player',
+      x: v1.player.x, y: v1.player.y, z: v1.player.z,
+      vx: 0, vy: 0, vz: 0,
+      yaw: v1.player.yaw, pitch: v1.player.pitch,
+      fly: false, noclip: false, controllerKind: 'human',
+    }],
+    viewedEntityId: 1,
+    time: v1.time, hotbar: v1.hotbar,
+  };
 }
 
 /** Node-testable backend; the `puts` counter is what the zero-persist guard asserts. */
@@ -129,7 +162,7 @@ export interface PersistSource {
   hasPersisted(cx: number, cy: number, cz: number): boolean;
   syncRecord(cx: number, cy: number, cz: number): ChunkRecord | undefined;
   fetchRecord(cx: number, cy: number, cz: number): Promise<ChunkRecord | undefined>;
-  onUnload(c: Chunk): void;
+  onUnload(c: Chunk, entities?: EntityRecord[]): void;
   dropPersisted(cx: number, cy: number, cz: number): void;
 }
 
@@ -185,7 +218,7 @@ export class Persistence implements PersistSource {
       const keys = await this.store.keys(`${this.seed}:`); // per-seed scan (IDBKeyRange bound; no full-keyset read)
       for (const k of keys) if (k.startsWith(`${this.seed}:`)) this.persistedKeys.add(k);
       const m = await this.store.get(metaKey(this.seed));
-      if (m && 'player' in m) this.meta = m;
+      if (m) this.meta = migrateMeta(m);
     } catch {
       // D7: the store is unavailable (private mode, quota) — session-only persistence
     }
@@ -233,10 +266,10 @@ export class Persistence implements PersistSource {
    *  reload on walk-back) and marked persisted; an OUT-OF-SYNC chunk is additionally written
    *  through to the store in the background (one put — unload frequency). An unedited chunk
    *  is a no-op. */
-  onUnload(c: Chunk): void {
+  onUnload(c: Chunk, entities?: EntityRecord[]): void {
     if (!c.edited) return;
     const k = this.key(c.cx, c.cy, c.cz);
-    const rec = snapshotChunk(c);
+    const rec = snapshotChunk(c, entities);
     this.cache(k, rec);
     this.persistedKeys.add(k);
     if (!this.isDue(c)) return; // in sync: the store already holds it

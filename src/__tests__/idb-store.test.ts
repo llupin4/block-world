@@ -14,7 +14,7 @@ const setIndexedDB = (): void => {
 };
 
 const rec = (cx: number, cy: number, cz: number): ChunkRecord => ({
-  v: 1, cx, cy, cz,
+  v: 2, cx, cy, cz,
   blocks: new Uint8Array([1, 2, 3, 4]),
   meta: new Uint8Array([0, 0, 0, 0]),
   wlevel: new Uint8Array([7, 0, 0, 0]),
@@ -60,8 +60,8 @@ describe('IndexedDBChunkStore (fake-indexeddb)', () => {
       ['1234:0,0,0', rec(0, 0, 0)],
       ['1234:1,0,0', rec(1, 0, 0)],
       ['1234:__meta__', {
-        v: 1, seed: 1234,
-        player: { x: 1, y: 2, z: 3, yaw: 0, pitch: 0 },
+        v: 2, seed: 1234,
+        entities: [], viewedEntityId: 1,
         time: { time: 0, tick: 0, phaseTotal: 0 },
         hotbar: { slots: [1, 1, 1, 1, 1, 1, 1, 1, 1], selected: 0 },
       }],

@@ -7,8 +7,9 @@ import { update } from '../streaming';
 import { tickCrossed } from '../time';
 import {
   snapshotChunk, applyRecord, Persistence, InMemoryChunkStore,
-  chunkRecordKey, metaKey, type ChunkStore, type WorldMeta,
+  chunkRecordKey, metaKey, type ChunkStore, type WorldMeta, type StoreValue,
 } from '../persistence';
+import { type EntityRecord, IdleController, Sim } from '../entity';
 
 describe('water origin tracking — the edit gate (D4)', () => {
   it('settle + pulses on generated chunks never mark a chunk edited', () => {
@@ -108,7 +109,7 @@ describe('persistence — records and store', () => {
       c.wstream[i] = (i >> 2) % 2;
     }
     const rec = snapshotChunk(c);
-    expect(rec.v).toBe(1);
+    expect(rec.v).toBe(2);
     expect([rec.cx, rec.cy, rec.cz]).toEqual([1, 2, 3]);
     world.removeChunk(1, 2, 3);
     applyRecord(world, rec);
@@ -180,11 +181,13 @@ describe('persistence — records and store', () => {
       player: { x: 1, y: 2, z: 3, yaw: 0.5, pitch: -0.25 },
       time: { time: 100, tick: 6000, phaseTotal: 0.5 },
       hotbar: { slots: [1, 2, 3, 4, 5, 6, 7, 8, 9], selected: 3 },
-    });
+    } as unknown as StoreValue); // a legacy v1 meta, migrated to v2 on boot
     const persist = new Persistence(store, 1234);
     const meta = await persist.boot();
+    expect(meta?.v).toBe(2);
     expect(meta?.seed).toBe(1234);
-    expect(meta?.player.x).toBe(1);
+    expect(meta?.viewedEntityId).toBe(1);
+    expect(meta?.entities[0]?.x).toBe(1); // the v1 player pose -> viewed entity id 1
     expect(meta?.time.tick).toBe(6000);
     expect(meta?.hotbar.selected).toBe(3);
     expect(persist.hasPersisted(0, 0, 0)).toBe(true); // this seed's key
@@ -207,8 +210,9 @@ describe('persistence — records and store', () => {
     world.ensureChunk(0, 0, 0);
     const ck = chunkRecordKey(1234, 0, 0, 0);
     const meta: WorldMeta = {
-      v: 1, seed: 1234,
-      player: { x: 1, y: 2, z: 3, yaw: 0.5, pitch: -0.25 },
+      v: 2, seed: 1234,
+      entities: [{ id: 1, kindId: 'player', x: 1, y: 2, z: 3, vx: 0, vy: 0, vz: 0, yaw: 0.5, pitch: -0.25, fly: false, noclip: false, controllerKind: 'human' }],
+      viewedEntityId: 1,
       time: { time: 100, tick: 6000, phaseTotal: 0.5 },
       hotbar: { slots: [1, 2, 3, 4, 5, 6, 7, 8, 9], selected: 3 },
     };
@@ -296,5 +300,66 @@ describe('persistence — full path', () => {
       sim.touched.clear();
     }
     expect(store.puts).toBe(0);
+  });
+});
+
+describe('persistence v2 — entities', () => {
+  it('reads a v1 meta (player pose) as a v2 meta (entities + viewedEntityId)', async () => {
+    const store = new InMemoryChunkStore();
+    const v1 = {
+      v: 1, seed: 1234,
+      player: { x: 6.5, y: 33, z: 46.5, yaw: -Math.PI / 2, pitch: 0 },
+      time: { time: 1, tick: 2, phaseTotal: 0.1 },
+      hotbar: { slots: [1, 2, 3, 4, 5, 6, 7, 8, 9], selected: 0 },
+    };
+    await store.put(metaKey(1234), v1 as unknown as StoreValue);
+    const p = new Persistence(store, 1234);
+    const meta = await p.boot();
+    expect(meta!.v).toBe(2);
+    expect(meta!.viewedEntityId).toBe(1);
+    expect(meta!.entities).toHaveLength(1);
+    expect(meta!.entities[0]).toMatchObject({
+      id: 1, kindId: 'player', x: 6.5, y: 33, z: 46.5, yaw: -Math.PI / 2, controllerKind: 'human',
+    });
+  });
+
+  it('round-trips a v2 meta with entities + simPrng', async () => {
+    const store = new InMemoryChunkStore();
+    const p = new Persistence(store, 1234);
+    const rec: EntityRecord = {
+      id: 1, kindId: 'player', x: 1, y: 2, z: 3, vx: 0, vy: 0, vz: 0,
+      yaw: 0.1, pitch: 0.2, fly: false, noclip: false, controllerKind: 'human',
+    };
+    const meta: WorldMeta = {
+      v: 2, seed: 1234, entities: [rec], viewedEntityId: 1, simPrng: 0xabcdef,
+      time: { time: 5, tick: 300, phaseTotal: 0.2 }, hotbar: { slots: [1, 2, 3, 4, 5, 6, 7, 8, 9], selected: 0 },
+    };
+    p.saveMeta(meta);
+    const m = await new Persistence(store, 1234).boot();
+    expect(m!.entities).toEqual([rec]);
+    expect(m!.viewedEntityId).toBe(1);
+    expect(m!.simPrng).toBe(0xabcdef);
+  });
+
+  it('a chunk record carries frozen entities and applyRecord restores them into the sim', () => {
+    const world = new World();
+    const c = world.ensureChunk(0, 0, 0); c.edited = true;
+    const rec: EntityRecord = {
+      id: 7, kindId: 'dolt', x: 2, y: 5, z: 9, vx: 0, vy: 0, vz: 0,
+      yaw: 0.3, pitch: 0, fly: false, noclip: false, controllerKind: 'idle',
+    };
+    const chunkRec = snapshotChunk(c, [rec]);
+    expect(chunkRec.entities).toEqual([rec]);
+    const sim = new Sim(world, {}, 1234);
+    applyRecord(world, chunkRec, sim, () => new IdleController());
+    expect(sim.all()).toHaveLength(1);
+    expect(sim.all()[0].id).toBe(7);
+    expect(sim.all()[0].pos.x).toBe(2);
+    // A v1 chunk record (no entities) restores with no entities.
+    const v1 = snapshotChunk(c);
+    delete (v1 as { entities?: unknown }).entities;
+    const sim2 = new Sim(world, {}, 1234);
+    applyRecord(world, v1, sim2, () => new IdleController());
+    expect(sim2.all()).toHaveLength(0);
   });
 });
