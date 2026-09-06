@@ -916,15 +916,22 @@ function metaSnapshot(): WorldMeta {
   };
 }
 
-// D6 crash window: unload snapshots cover loaded-chunk edits only when a chunk unloads
-// (or on hide); a hard tab kill loses edits made since then. The meta is cheap — save on
-// hide and on pagehide, and flush the store's pending puts.
+// Save points (ADR 0014). Chunk records are written (a) when a chunk UNLOADS (the streaming
+// path) and (b) at every save point below — all currently-loaded EDITED chunks are
+// snapshotted (onUnload is a no-op for unedited terrain, so the walk costs nothing for a
+// world the player hasn't touched). The meta + pending puts save at the same moments.
+// The 5 s interval is what makes a hard reload safe: the pagehide put is best-effort (the
+// page can be torn down mid-transaction, so it may not commit), and edits in still-loaded
+// chunks are otherwise only saved when those chunks unload. Worst case, a hard kill loses
+// ~5 s of edits **[POC shortcut]**.
 const saveAndFlush = (): void => {
+  for (const c of world.allChunks()) persist.onUnload(c); // edited-only snapshot (the gate is inside onUnload)
   persist.saveMeta(metaSnapshot());
   void persist.flush();
 };
 document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'hidden') saveAndFlush(); });
-window.addEventListener('pagehide', saveAndFlush);
+window.addEventListener('pagehide', () => saveAndFlush());
+setInterval(() => saveAndFlush(), 5000); // best-effort periodic save: the crash window is ~5 s
 
 // === water-fx ===
 

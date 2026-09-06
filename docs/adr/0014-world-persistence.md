@@ -90,12 +90,17 @@ behaves exactly as at save time). The `water-load` PIN (1,231,601 / 10,690 proce
 untouched: a no-edit replay has an empty `editQueue`, so queue membership, order, and the
 process counts are unchanged.
 
-**Save points.** A chunk snapshots when it UNLOADS (the streaming path calls
-`onUnload` → edited-only snapshot → warm + background IDB put). The meta saves when the
-page hides (`visibilitychange` → hidden) and on `pagehide`, and after any unload batch
-(the world just changed durably). `flush()` awaits the background puts at those moments.
-The window between an edit and the next save point is lost on a hard tab kill **[POC
-shortcut]** — interval snapshots (or per-edit meta saves) are the follow-up.
+**Save points.** A chunk snapshots (a) when it UNLOADS (the streaming path calls
+`onUnload`) and (b) at every save point below — all currently-loaded EDITED chunks are
+snapshotted (the edit gate makes the walk a no-op for a world the player hasn't touched).
+Save points: page hide (`visibilitychange` → hidden), `pagehide`, and a **5 s periodic
+save** **[POC shortcut]**. The meta (player/time/hotbar) saves at the same moments, and
+`flush()` awaits the background puts at each. The periodic save is the one that makes a
+hard reload safe: the `pagehide` put is best-effort (the page can be torn down
+mid-transaction, so it may not commit — a 200 B meta or a 24 KB chunk record alike), and
+edits in still-loaded chunks are otherwise only captured when those chunks unload. The
+remaining loss window is a hard process kill (no JS runs at all): at most ~5 s of edits
+**[POC shortcut]**.
 
 **The boot gate.** `main.ts` starts the game only once `persist.boot()` resolves (key set
 + meta loaded) — capped at 1.5 s: a stalled IDB must not hold the first frame hostage.
@@ -124,10 +129,10 @@ a fresh world; that edge is documented, not handled.
   cave could reflood one cell, and the flood field would no longer be byte-identical to
   the saved world. `settled = true` + verbatim arrays is exact by construction; the
   pinned water-load numbers prove no-edit behavior is untouched.
-- **Periodic whole-world snapshot.** Rejected: the loaded ring is at most ~125 chunks
-  (~3 MB per snapshot at 24 KB) on a timer, versus the current "pay only for edits, at
-  unload" model; the crash-window cost (edits since the last save point) is the accepted
-  POC trade.
+- **Periodic whole-world snapshot.** Rejected: snapshotting the whole loaded ring
+  (~125 chunks, ~3 MB) on a timer costs for terrain the player never touched. The
+  periodic save instead re-saves only the EDITED set (a walk filtered by the edit gate)
+  — zero cost for an untouched world, bounded by the player's build area otherwise.
 - **Full async load path (fetch-first streaming: the worldgen worker fetches the record
   and the chunk never touches the main thread synchronously).** Not built: the record
   shape is that payload, and the current sync-apply path (warm inline / pending fetch /
@@ -144,8 +149,12 @@ a fresh world; that edge is documented, not handled.
 - **Boot cost is one `getAllKeys` + one meta get** before the first frame (capped at
   1.5 s). At POC key-set sizes this is sub-millisecond; the key-set growth follow-up is
   an IDB index on the seed prefix. (TODO.md → Persistence.)
-- **Crash window.** A hard tab kill loses edits made since the last save point (unload
-  batch / hide / pagehide). Interval snapshots close it. (TODO.md → Persistence.)
+- **Crash window.** A hard process kill loses at most ~5 s of edits (the 5 s periodic
+  save; the pagehide put is best-effort and can be torn down mid-transaction). A normal
+  reload/tab switch is safe: the periodic + hide snapshots cover edits in still-loaded
+  chunks, which the unload-only path used to lose. Triggering the periodic save only when
+  something actually changed (a dirty flag) is the follow-up — today it re-saves the
+  edited set every 5 s unconditionally. (TODO.md → Persistence.)
 - **The record is frozen at `v: 1`.** Bumping `v` is the only sanctioned migration path;
   older records are dropped on read (the chunk regenerates).
 - **The pins hold.** The `water-load` PIN (1,231,601 / 10,690 processes) and the

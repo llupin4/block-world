@@ -57,8 +57,10 @@ Open follow-ups from the dynamic-lighting work (ADR 0007 — Dynamic lighting):
   warm-inline / pending-fetch / confirmed-miss path is the POC form, and the record is
   already the sync payload. Reworks the streaming budget model the way the worldgen-worker
   item (Streaming / rendering) does for generation.
-- **Close the crash window.** A hard tab kill loses edits since the last save point (unload
-  batch / hide / pagehide); interval snapshots (or per-edit meta saves) close it.
+- **Shrink/gate the periodic save.** The 5 s interval re-saves every edited chunk
+  unconditionally (a built house re-writes its chunks forever); gate it on a dirty flag
+  (a new edit, or the water sim's `touched` set non-empty this frame) and/or drop the
+  window below 5 s.
 - **Byte-budgeted LRU warm cache.** The 512-record cap is a record-count shortcut
   (~15 MB); budget by bytes and evict to fit.
 - **Boot key-set growth.** `getAllKeys` + a `seed:` prefix filter is fine at POC sizes; an
