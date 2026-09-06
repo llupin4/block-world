@@ -401,8 +401,8 @@ void persist.boot().then((meta) => {
 
 // One material per kind (a deterministic speckled part-atlas, block-atlas style). The rig
 // renders every non-spectator entity; the viewed entity's rig is hidden (first person).
-const rigOf: Record<string, THREE.Material> = {};
-for (const [id, color] of Object.entries(RIG_COLORS)) rigOf[id] = new THREE.MeshLambertMaterial({ map: buildPartAtlas(color, 0x5eed) });
+const rigOf: Record<string, THREE.MeshBasicMaterial> = {};
+for (const [id, color] of Object.entries(RIG_COLORS)) rigOf[id] = new THREE.MeshBasicMaterial({ map: buildPartAtlas(color, 0x5eed) });
 const rigs = new Map<number, { rig: Rig; anim: RigAnim }>();
 const kindEl = document.getElementById('kind')!;
 
@@ -413,7 +413,7 @@ function syncEntityRigs(dt: number): void {
     if (e.kind.collides === false) continue; // spectator: no rig
     let entry = rigs.get(e.id);
     if (!entry) {
-      const mat = rigOf[e.kind.id] ?? (rigOf[e.kind.id] = new THREE.MeshLambertMaterial({ map: buildPartAtlas(0x888888, 0x5eed) }));
+      const mat = rigOf[e.kind.id] ?? (rigOf[e.kind.id] = new THREE.MeshBasicMaterial({ map: buildPartAtlas(0x888888, 0x5eed) }));
       const rig = buildEntityRig(e.kind, mat);
       if (!rig) continue;
       entry = { rig, anim: newRigAnim() };
@@ -1053,6 +1053,7 @@ function frame(now: number): void {
   const skySample = sampleSky(worldTime.dayPhase);
   sky.apply(skySample, waterFx, camera);
   for (const u of daynessUniforms) u.value = skySample.dayness;
+  for (const mat of Object.values(rigOf)) mat.color.setScalar(LIGHT_AMBIENT + (1 - LIGHT_AMBIENT) * skySample.dayness); // dim the rigs at night, matching the chunks' uDayness floor
   clouds.update(camera.position.x, camera.position.z, camera.position.y, worldTime.time, skySample.worldDim);
   const label = formatClock(worldTime.day, worldTime.hour);
   if (label !== clockLabel) {
