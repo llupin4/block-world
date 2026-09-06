@@ -2,7 +2,7 @@ import { describe, it, expect } from 'vitest';
 import { Block, isDoor, doorOpen } from '../blocks';
 import { World, localIndex } from '../world';
 import { Player, WALK_SPEED, SWIM_SPEED, FLY_SPEED, FLY_V_SPEED, JUMP_VEL, HALF, HEIGHT, EYE } from '../player';
-import { KINDS, NULL_INTENT, stepEntity, lookDir, eyeOf, applyIntent, Sim, SimRng, deriveSimSeed, controllerKindOf, IdleController, HumanController, ScriptController, type Entity, type Intent, type ApplyHooks, type ScriptStep } from '../entity';
+import { KINDS, NULL_INTENT, stepEntity, lookDir, eyeOf, applyIntent, Sim, SimRng, deriveSimSeed, controllerKindOf, IdleController, HumanController, ScriptController, MobController, mobRefuseStep, possess, returnHome, spectate, type Entity, type Intent, type ApplyHooks, type ScriptStep } from '../entity';
 import { TERRAIN_SEED } from '../terrain';
 
 const STEP = 1 / 60;
@@ -338,5 +338,127 @@ describe('entity — controllers', () => {
     const itPlace = c.intent(e, 3);             // place #1
     expect(itPlace.secondary).toBe(true);
     expect(itPlace.block).toBe(Block.Planks);
+  });
+});
+
+describe('entity — dolt + spectator kinds', () => {
+  it('KINDS.dolt is the grazing quadruped (all pinned numbers)', () => {
+    const k = KINDS.dolt;
+    expect(k.half).toBeCloseTo(0.45, 9);
+    expect(k.height).toBeCloseTo(0.9, 9);
+    expect(k.eye).toBeCloseTo(0.7, 9);
+    expect(k.walkSpeed).toBeCloseTo(1.6, 9);
+    expect(k.swimSpeed).toBeCloseTo(1.0, 9);
+    expect(k.jumpVel).toBeCloseTo(8.0, 9); // apex 8^2/56 ~ 1.14 m: clears a 1-block ledge
+    expect(k.flySpeed).toBeCloseTo(0, 9); expect(k.flyVSpeed).toBeCloseTo(0, 9);
+    expect(k.canEdit).toBe(false); expect(k.canFly).toBe(false);
+    expect(k.canNoclip).toBe(false); expect(k.collides).toBe(true);
+  });
+
+  it('KINDS.spectator is a non-colliding ghost (all pinned numbers)', () => {
+    const k = KINDS.spectator;
+    expect(k.half).toBeCloseTo(0.3, 9); expect(k.height).toBeCloseTo(1.8, 9);
+    expect(k.eye).toBeCloseTo(1.62, 9);
+    expect(k.walkSpeed).toBeCloseTo(8, 9); expect(k.swimSpeed).toBeCloseTo(5, 9);
+    expect(k.jumpVel).toBeCloseTo(0, 9);
+    expect(k.flySpeed).toBeCloseTo(8, 9); expect(k.flyVSpeed).toBeCloseTo(8, 9);
+    expect(k.canFly).toBe(true); expect(k.canNoclip).toBe(true);
+    expect(k.canEdit).toBe(false); expect(k.collides).toBe(false);
+  });
+
+  it('controllerKindOf recognizes a MobController', () => {
+    const c = new MobController(() => Block.Air, () => 0.5);
+    expect(controllerKindOf(c)).toBe('mob');
+  });
+});
+
+describe('entity — MobController', () => {
+  it('mobRefuseStep: water ahead, a >=3 drop, and a flat step', () => {
+    const water = (x: number, _y: number, z: number) => (z <= 0 ? Block.Water : Block.Air);
+    expect(mobRefuseStep(water, 0, 5, 1, 0)).toBe('water'); // facing -Z into water
+    const floor = (x: number, y: number, z: number) => (y <= 4 ? Block.Stone : Block.Air);
+    expect(mobRefuseStep(floor, 0.5, 5, 0.5, 0)).toBeNull(); // flat floor ahead
+    const pit = (x: number, y: number, z: number) => (y === 4 && x >= 0 ? Block.Stone : Block.Air);
+    expect(mobRefuseStep(pit, 0.5, 5, 0.5, Math.PI / 2)).toBe('drop'); // -X is a pit
+  });
+
+  function doltPath(seed: number): number[] {
+    const world = new World();
+    const c = world.ensureChunk(0, 0, 0);
+    for (let lx = 0; lx < 16; lx++) for (let lz = 0; lz < 16; lz++) c.blocks[localIndex(lx, 4, lz)] = Block.Grass;
+    const rng = new SimRng(seed);
+    const ctrl = new MobController((x, y, z) => world.getBlock(x, y, z), () => rng.next());
+    const e: Entity = {
+      id: 1, kind: KINDS.dolt, pos: { x: 8, y: 5, z: 8 }, vel: { x: 0, y: 0, z: 0 },
+      yaw: 0, pitch: 0, onGround: false, inWater: false, headInWater: false,
+      fly: false, noclip: false, controller: ctrl, baseController: ctrl,
+    };
+    const pts: number[] = [];
+    for (let i = 0; i < 1200; i++) {
+      const it = ctrl.intent(e, i);
+      stepEntity(world, e, it, STEP);
+      pts.push(Math.round(e.pos.x * 1000), Math.round(e.pos.z * 1000));
+    }
+    return pts;
+  }
+
+  it('a fixed seed drives a deterministic 1200-tick path', () => {
+    expect(doltPath(1234)).toEqual(doltPath(1234));
+  });
+
+  it('the dolt actually wanders (a non-trivial path)', () => {
+    const p = doltPath(1234);
+    const cells = new Set<string>();
+    for (let i = 0; i < p.length; i += 2) cells.add([p[i], p[i + 1]].join(','));
+    expect(cells.size).toBeGreaterThan(10);
+  });
+});
+
+describe('entity — possession', () => {
+  function simWithBodyAndDolt() {
+    const world = new World();
+    const sim = new Sim(world, {}, 1234);
+    const human = new HumanController(new Set<string>());
+    // The player body's home controller is IdleController (it stands idle when left); pass
+    // it explicitly — the spawn default would otherwise re-bind baseController to `human`.
+    const body = sim.spawn({ x: 0, y: 5, z: 0 }, human, { kindId: 'player', baseController: new IdleController() });
+    sim.homeId = body.id;
+    const mob = new MobController((x, y, z) => world.getBlock(x, y, z), () => sim.rng.next());
+    const dolt = sim.spawn({ x: 1, y: 5, z: 0 }, mob, { kindId: 'dolt', baseController: mob });
+    const ghost = sim.spawn({ x: 0, y: 9, z: 0 }, new IdleController(), { kindId: 'spectator', baseController: new IdleController() });
+    sim.ghostId = ghost.id;
+    return { sim, world, human, body, dolt, ghost };
+  }
+
+  it('possess swaps the human to the target and releases the body to idle; returnHome restores', () => {
+    const { sim, human, body, dolt } = simWithBodyAndDolt();
+    expect(sim.viewedId).toBe(body.id);
+    possess(sim, human, dolt.id);
+    expect(sim.viewedId).toBe(dolt.id);
+    expect(dolt.controller).toBe(human);
+    expect(body.controller).toBeInstanceOf(IdleController); // body released to idle
+    returnHome(sim, human);
+    expect(sim.viewedId).toBe(body.id);
+    expect(body.controller).toBe(human);
+    expect(dolt.controller).toBeInstanceOf(MobController); // dolt resumed its AI
+  });
+
+  it('spectate moves the human to the single ghost; returnHome restores the body', () => {
+    const { sim, human, body, ghost } = simWithBodyAndDolt();
+    spectate(sim, human);
+    expect(sim.viewedId).toBe(ghost.id);
+    expect(ghost.controller).toBe(human);
+    expect(body.controller).toBeInstanceOf(IdleController); // the body was released to idle
+    returnHome(sim, human);
+    expect(sim.viewedId).toBe(body.id);
+    expect(body.controller).toBe(human);
+    expect(ghost.controller).toBeInstanceOf(IdleController); // the ghost is released
+  });
+
+  it('spawn default: baseController defaults to the passed controller (a bot keeps its script)', () => {
+    const { sim } = simWithBodyAndDolt();
+    const script = new IdleController(); // stand-in for a ScriptController instance
+    const bot = sim.spawn({ x: 2, y: 5, z: 0 }, script, { kindId: 'player' });
+    expect(bot.baseController).toBe(script); // not re-bound to a fresh IdleController
   });
 });

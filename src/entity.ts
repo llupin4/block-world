@@ -30,6 +30,22 @@ export const KINDS: Record<string, EntityKind> = {
     canFly: true, canNoclip: true, canEdit: true,
     collides: true,
   },
+  dolt: {
+    id: 'dolt',
+    half: 0.45, height: 0.9, eye: 0.7,
+    walkSpeed: 1.6, swimSpeed: 1.0, jumpVel: 8.0,
+    flySpeed: 0, flyVSpeed: 0,
+    canFly: false, canNoclip: false, canEdit: false,
+    collides: true,
+  },
+  spectator: {
+    id: 'spectator',
+    half: 0.3, height: 1.8, eye: 1.62,
+    walkSpeed: 8, swimSpeed: 5, jumpVel: 0,
+    flySpeed: 8, flyVSpeed: 8,
+    canFly: true, canNoclip: true, canEdit: false,
+    collides: false,
+  },
 };
 
 // The sim assigns stable, monotonic ids. `pos` is the feet; `yaw`/`pitch` are absolute.
@@ -388,9 +404,94 @@ export function deriveSimSeed(seed: number): number {
   return (seed ^ 0x5eed1234) >>> 0;
 }
 
+export type GetBlock = (x: number, y: number, z: number) => number;
+
+/** Refuse a step into water or off a >=3-block drop (the dolt's local obstacle rule). */
+export function mobRefuseStep(getBlock: GetBlock, x: number, y: number, z: number, heading: number): 'water' | 'drop' | null {
+  const fx = -Math.sin(heading), fz = -Math.cos(heading);
+  const ax = Math.floor(x + fx), az = Math.floor(z + fz);
+  const fy = Math.floor(y);
+  if (getBlock(ax, fy, az) === Block.Water) return 'water';
+  if (getBlock(ax, fy - 1, az) === Block.Air && getBlock(ax, fy - 2, az) === Block.Air && getBlock(ax, fy - 3, az) === Block.Air) return 'drop';
+  return null;
+}
+
+/** Nearest grass surface cell within `radius` of (x,y,z) (for "turn toward grass"); null if none. */
+export function nearestGrass(getBlock: GetBlock, x: number, y: number, z: number, radius: number): { x: number; z: number } | null {
+  const cx = Math.floor(x), cy = Math.floor(y), cz = Math.floor(z);
+  let best: { x: number; z: number; d: number } | null = null;
+  for (let dz = -radius; dz <= radius; dz++)
+    for (let dx = -radius; dx <= radius; dx++) {
+      const wx = cx + dx, wz = cz + dz;
+      for (let wy = cy - 1; wy <= cy + 1; wy++) {
+        if (getBlock(wx, wy, wz) === Block.Grass && getBlock(wx, wy + 1, wz) === Block.Air) {
+          const d = dx * dx + dz * dz;
+          if (!best || d < best.d) best = { x: wx, z: wz, d };
+        }
+      }
+    }
+  return best ? { x: best.x, z: best.z } : null;
+}
+
+/**
+ * The dolt's wander AI. Draws EVERY random from the sim PRNG (`rand`) — the sim's fixed
+ * id-order iteration keeps the draw sequence deterministic (never Math.random, never a
+ * wall clock). Modes: wander (walk a random number of ticks) and idle (stand, then
+ * re-face — sometimes toward the nearest grass). A stall (forward intent but no progress)
+ * for 30 ticks forces a turn. Refuses water and >=3 drops via mobRefuseStep.
+ */
+export class MobController implements Controller {
+  private readonly world: GetBlock;
+  private readonly rand: () => number;
+  private mode: 'wander' | 'idle' = 'wander';
+  private ticksLeft = 0;
+  private heading: number;
+  private stall = 0;
+  private lastX = 0; private lastZ = 0;
+  private first = true;
+
+  constructor(world: GetBlock, rand: () => number) {
+    this.world = world;
+    this.rand = rand;
+    this.heading = rand() * Math.PI * 2;
+    this.ticksLeft = 60 + Math.floor(rand() * 150);
+  }
+
+  intent(e: Entity, _tick: number): Intent {
+    const it: Intent = { ...NULL_INTENT, yaw: this.heading, pitch: e.pitch };
+    if (this.first) { this.lastX = e.pos.x; this.lastZ = e.pos.z; this.first = false; }
+    if (this.ticksLeft <= 0) {
+      if (this.mode === 'wander') {
+        this.mode = 'idle';
+        this.ticksLeft = 30 + Math.floor(this.rand() * 60);
+      } else {
+        this.mode = 'wander';
+        this.ticksLeft = 60 + Math.floor(this.rand() * 150);
+        if (this.rand() < 0.5) {
+          const g = nearestGrass(this.world, e.pos.x, e.pos.y, e.pos.z, 8);
+          this.heading = g ? Math.atan2(-(g.x - e.pos.x), -(g.z - e.pos.z)) : this.rand() * Math.PI * 2;
+        } else {
+          this.heading = this.rand() * Math.PI * 2;
+        }
+      }
+    }
+    this.ticksLeft--;
+    if (this.mode === 'wander') {
+      if (mobRefuseStep(this.world, e.pos.x, e.pos.y, e.pos.z, this.heading) === null) it.forward = 1;
+      const progress = Math.hypot(e.pos.x - this.lastX, e.pos.z - this.lastZ);
+      if (it.forward === 1 && progress < 0.005) {
+        if (++this.stall > 30) { this.heading = this.rand() * Math.PI * 2; this.stall = 0; }
+      } else this.stall = 0;
+    }
+    this.lastX = e.pos.x; this.lastZ = e.pos.z;
+    return it;
+  }
+}
+
 export function controllerKindOf(c: Controller): string {
   if (c instanceof HumanController) return 'human';
   if (c instanceof ScriptController) return 'script';
+  if (c instanceof MobController) return 'mob';
   if (c instanceof IdleController) return 'idle';
   return 'unknown';
 }
@@ -404,6 +505,8 @@ export function controllerKindOf(c: Controller): string {
 export class Sim {
   readonly entities = new Map<number, Entity>();
   viewedId = 0;
+  homeId = 0;   // the player body the human "home" belongs to (possession)
+  ghostId = 0;  // the single spectator ghost (possession)
   respawn: Vec3 = { x: 0, y: 0, z: 0 };
   readonly rng: SimRng;
   // Phase 3: the intent recorder. Phase 1 leaves it unset.
@@ -429,7 +532,7 @@ export class Sim {
 
   setViewed(id: number): void { if (this.entities.has(id)) this.viewedId = id; }
 
-  spawn(pos: Vec3, controller: Controller, opts: { yaw?: number; pitch?: number; kindId?: string } = {}): Entity {
+  spawn(pos: Vec3, controller: Controller, opts: { yaw?: number; pitch?: number; kindId?: string; baseController?: Controller } = {}): Entity {
     const kind = KINDS[opts.kindId ?? 'player'] ?? KINDS.player;
     const e: Entity = {
       id: this.nextId++,
@@ -438,7 +541,7 @@ export class Sim {
       yaw: opts.yaw ?? 0, pitch: opts.pitch ?? 0,
       onGround: false, inWater: false, headInWater: false,
       fly: false, noclip: false,
-      controller, baseController: controller,
+      controller, baseController: opts.baseController ?? controller,
     };
     this.entities.set(e.id, e);
     if (this.viewedId === 0) this.viewedId = e.id;
@@ -666,4 +769,35 @@ export class ScriptController implements Controller {
     if (this.ticksLeft <= 0) this.nextStep();
     return it;
   }
+}
+
+// === possession (pure; mutate the Sim). The human controller is re-attached to whichever
+// entity is viewed; the released entity reverts to its baseController (its kind default). ===
+
+/** Possess `targetId`: release the current viewed to its base controller, attach `human`
+ *  to the target, and switch the view. The target's baseController (its kind default) is
+ *  what un-possessing restores to. */
+export function possess(sim: Sim, human: Controller, targetId: number): void {
+  const cur = sim.viewed();
+  if (cur && cur.id !== targetId) cur.controller = cur.baseController;
+  const t = sim.entities.get(targetId);
+  if (t) { t.controller = human; sim.setViewed(targetId); }
+}
+
+/** Return the human to its home body (releasing whatever is currently viewed). */
+export function returnHome(sim: Sim, human: Controller): void {
+  if (sim.homeId === 0) return;
+  const cur = sim.viewed();
+  if (cur && cur.id !== sim.homeId) cur.controller = cur.baseController;
+  const home = sim.entities.get(sim.homeId);
+  if (home) { home.controller = human; sim.setViewed(sim.homeId); }
+}
+
+/** Swap the human to the single spectator ghost. */
+export function spectate(sim: Sim, human: Controller): void {
+  if (sim.ghostId === 0) return;
+  const cur = sim.viewed();
+  if (cur && cur.id !== sim.ghostId) cur.controller = cur.baseController;
+  const ghost = sim.entities.get(sim.ghostId);
+  if (ghost) { ghost.controller = human; sim.setViewed(sim.ghostId); }
 }
