@@ -540,6 +540,9 @@ export class HumanController implements Controller {
     this.keys = keys; this.yaw = yaw; this.pitch = pitch;
   }
 
+  /** Adopt a look (used at boot to sync the controller with the restored/spawned entity's yaw/pitch). */
+  setLook(yaw: number, pitch: number): void { this.yaw = yaw; this.pitch = pitch; }
+
   mouse(dx: number, dy: number): void {
     this.yaw -= dx * 0.0025; // sensitivity (rad/px) moved from main.ts
     this.pitch = Math.max(-MAX_PITCH, Math.min(MAX_PITCH, this.pitch - dy * 0.0025));

@@ -8,7 +8,7 @@ import { meshChunk, meshChunkRange, probeMeshChunk, type ChunkMesh, type LightSa
 import { SliceScheduler, decideBands, PROBE_VERTS, SLICE_COUNT } from './mesh-slices';
 import { ProfRig, meshVerts, PROF_WORST_KEY } from './prof-rig';
 import { toGeometry } from './geometry';
-import { Player, EYE, type MoveInput } from './player';
+import { Sim, HumanController, IdleController, eyeOf, lookDir, breakRayTarget, type ApplyHooks, type Controller, type EntityRecord } from './entity';
 import { raycastVoxel, REACH, type RayHit } from './raycast';
 import { WaterSim } from './water';
 import { WorldTime, formatClock, tickCrossed } from './time';
@@ -252,7 +252,7 @@ const world = new World();
 // heartbeat (one pulse per WATER_STRIDE substeps; ADR 0011). The boot-generated spawn
 // column is settled by the first tickStreaming, before the first rendered frame, so
 // caves read as already filled.
-const sim = new WaterSim(world);
+const waterSim = new WaterSim(world);
 
 // Light sim (PROJECT.md §18, src/light.ts): two 0..15 fields streamed with each chunk.
 // Runs in a web worker (ADR 0012): the pin-identical LightSim drains/settles over a mirror of
@@ -260,6 +260,19 @@ const sim = new WaterSim(world);
 // feed the frame-end re-mesh via `touched` (the sim.touched contract, one reply late).
 const lightSim = new LightClient(world, worldTime);
 window.__lightDebug = lightSim; // debug surface: cumulative pops/seeds/fieldChanges, latest queue, lastTick
+
+// The entity sim + its edit hooks (ADR 0015): world mutations flow through applyIntent,
+// which calls these. remeshAround + lightSim.edit are the "onEdit"; waterSim.edit is the
+// water-sim edit-origin; a placed spring (the water sim's `p` flag) is the only targetable water.
+// remeshAround is a hoisted function declaration, so the onEdit closure can reference it here.
+const simHooks: ApplyHooks = {
+  onEdit: (x, y, z) => { remeshAround(x, y, z); lightSim.edit(x, y, z); },
+  waterEdit: (x, y, z, block) => { waterSim.edit(x, y, z, block); },
+  springTarget: (x, y, z) => waterSim.cellState(x, y, z).p === 1,
+};
+const sim = new Sim(world, simHooks, TERRAIN_SEED);
+// Frozen non-viewed entities (restored from chunks / the meta) run on the idle controller.
+const streamControllerFor = (_r: EntityRecord): Controller => new IdleController();
 
 // World persistence (ADR 0014): edited chunks snapshot to IndexedDB on unload; on boot
 // the key set + meta load, and previously edited chunks restore verbatim (warm: inline,
@@ -298,9 +311,9 @@ async function startGame(meta: WorldMeta | null): Promise<void> {
     let rec = persist.syncRecord(0, cy, 2);
     if (!rec) rec = await persist.fetchRecord(0, cy, 2); // the record may exist but not be warm (first visit after a reload)
     if (rec) {
-      applyRecord(world, rec);
+      applyRecord(world, rec, sim, streamControllerFor); // restore frozen entities (idle) + the chunk
       streaming.markNeighborsDirty(world, 0, cy, 2, 0, 2);
-      sim.restore(world.getChunk(0, cy, 2)!);
+      waterSim.restore(world.getChunk(0, cy, 2)!);
       lightSim.load(0, cy, 2); // light is never persisted: the worker re-settles
       deferredFirstMesh.add(chunkKey(0, cy, 2));
     } else {
@@ -322,11 +335,12 @@ async function startGame(meta: WorldMeta | null): Promise<void> {
   let sy = 79;
   while (sy >= 0 && !isOpaque(world.getBlock(sx, sy, sz))) sy--;
   SPAWN = new THREE.Vector3(sx + 0.5, sy + 1, sz + 0.5);
+  sim.respawn = { x: SPAWN.x, y: SPAWN.y, z: SPAWN.z }; // the sim's fall-out-of-world respawn point (both branches)
   if (meta) {
     worldTime.restore(meta.time);
-    player.place({ x: meta.player.x, y: meta.player.y, z: meta.player.z });
-    player.yaw = meta.player.yaw;
-    player.pitch = meta.player.pitch;
+    sim.restoreEntities(meta.entities, (r) => (r.id === meta.viewedEntityId ? human : new IdleController())); // viewed -> human, frozen -> idle
+    sim.setViewed(meta.viewedEntityId);
+    if (meta.simPrng !== undefined) sim.rng.restore(meta.simPrng);
     if (meta.hotbar?.slots?.length === 9) {
       for (let i = 0; i < 9; i++) hotbar.setSlot(i, meta.hotbar.slots[i]); // fires onSlotChange → icons refresh
       hotbar.select(meta.hotbar.selected ?? 0);
@@ -336,13 +350,16 @@ async function startGame(meta: WorldMeta | null): Promise<void> {
       refreshPaletteSel(hotbar.block);
     }
   } else {
-    player.place(SPAWN);
-    player.yaw = -Math.PI / 2; // face +x (east), at the sea — the shoreline starts ~6 m from spawn
+    const p = sim.spawn(SPAWN, human, { yaw: -Math.PI / 2, kindId: 'player' }); // face +x (east), at the sea
+    sim.setViewed(p.id);
     hotbar.select(PALETTE_BLOCKS.indexOf(Block.Planks)); // default: planks, as T8's selectedBlock was
   }
-  if (profMode) player.noclip = true; // the rig owns the player: pinned each frame, no physics
+  // The human controller's look is the source of truth (stepEntity adopts it each tick): sync it
+  // to the entity's current look so the first tick does not clobber the spawn/restore facing.
+  { const ve = sim.viewed(); if (ve) human.setLook(ve.yaw, ve.pitch); }
+  if (profMode) { human.frozen = true; const ve = sim.viewed(); if (ve) ve.noclip = true; } // the rig owns the viewed entity
   profRig = profMode
-    ? new ProfRig({ seed: TERRAIN_SEED, phase: meta ? worldTime.dayPhase : startPhase, render: !profNoRender, anchor: { x: player.pos.x, y: player.pos.y, z: player.pos.z } })
+    ? new ProfRig({ seed: TERRAIN_SEED, phase: meta ? worldTime.dayPhase : startPhase, render: !profNoRender, anchor: { x: sim.viewed()!.pos.x, y: sim.viewed()!.pos.y, z: sim.viewed()!.pos.z } })
     : null;
   syncCamera();
   requestAnimationFrame(frame);
@@ -428,20 +445,18 @@ function removeChunkMesh(cx: number, cy: number, cz: number): void {
 
 // === camera ===
 
-// Camera = the player's eyes (feet + EYE). Rotation order YXZ: yaw first, then pitch.
-// Second callback: collision reads WORLD STATE (open doors walkable, closed doors solid) —
-// the flat per-id rule in BLOCKS cannot see door open/closed meta.
-const player = new Player(
-  (x, y, z) => world.getBlock(x, y, z),
-  (x, y, z) => world.isSolid(x, y, z),
-);
-let profRig: ProfRig | null = null; // owned by startGame (it needs the restored player position)
+// Camera = the VIEWED entity's eyes (feet + the kind's eye height). Rotation order YXZ: yaw
+// first, then pitch. (The legacy Player is gone from main.ts — the entity sim owns the player
+// now; the kind supplies the eye, so the old EYE constant is no longer needed here.)
+let profRig: ProfRig | null = null; // owned by startGame (it needs the restored viewed position)
 let profDrainMs = 0;
 camera.rotation.order = 'YXZ';
 
 function syncCamera(): void {
-  camera.position.set(player.pos.x, player.pos.y + EYE, player.pos.z);
-  camera.rotation.set(player.pitch, player.yaw, 0);
+  const ve = sim.viewed();
+  if (!ve) return;
+  camera.position.set(ve.pos.x, ve.pos.y + ve.kind.eye, ve.pos.z);
+  camera.rotation.set(ve.pitch, ve.yaw, 0);
 }
 
 // ?dbg dev-only: exposes the render triple for headless pixel verification (readPixels
@@ -452,19 +467,19 @@ if (new URLSearchParams(location.search).has('dbg')) {
 
 // === input ===
 
-const MAX_PITCH = Math.PI / 2 - 0.01; // never go over the top
-const keys = new Set<string>();
+const keys = new Set<string>(); // shared with the human controller (it reads these to build its intent)
+const human = new HumanController(keys, 0, 0); // the player's controller: hardware state -> one Intent per substep
 
 window.addEventListener('keydown', (e) => {
   keys.add(e.code);
   if (e.repeat) return;
-  if (e.code === 'KeyF') player.fly = !player.fly; // fly toggle
-  if (e.code === 'KeyN') player.noclip = !player.noclip; // noclip toggle
+  if (e.code === 'KeyF') human.toggleFly(); // fly toggle (a one-tick edge the sim consumes)
+  if (e.code === 'KeyN') human.toggleNoclip(); // noclip toggle
   if (e.code === 'KeyE') togglePalette(); // creative palette: open (unlock) / close (re-lock)
   if (e.code === 'KeyH') toggleHelp(); // help overlay: same open (unlock) / close (re-lock)
   if (e.code === 'KeyC') setWireframe(!wireframeOn); // wireframe (PROJECT.md §14: chunk-edge bugs)
   const d = e.code.startsWith('Digit') ? e.code.slice(5) : e.code.startsWith('Numpad') ? e.code.slice(6) : '';
-  if (d >= '1' && d <= '9') hotbar.select(Number(d) - 1); // 1-9 / numpad 1-9 selects a slot
+  if (d >= '1' && d <= '9') { const s = Number(d) - 1; hotbar.select(s); human.select(s); } // 1-9 / numpad 1-9
 });
 window.addEventListener('keyup', (e) => keys.delete(e.code));
 
@@ -484,19 +499,8 @@ document.addEventListener('pointerlockchange', () => {
 
 document.addEventListener('mousemove', (e) => {
   if (document.pointerLockElement !== renderer.domElement) return;
-  player.yaw -= e.movementX * 0.0025;
-  player.pitch = Math.max(-MAX_PITCH, Math.min(MAX_PITCH, player.pitch - e.movementY * 0.0025));
+  human.mouse(e.movementX, e.movementY); // the controller owns yaw/pitch + the pitch clamp
 });
-
-function readMove(): MoveInput {
-  if (profMode) return { forward: 0, strafe: 0, up: false, down: false }; // the rig owns the player
-  return {
-    forward: (keys.has('KeyW') ? 1 : 0) - (keys.has('KeyS') ? 1 : 0),
-    strafe: (keys.has('KeyD') ? 1 : 0) - (keys.has('KeyA') ? 1 : 0),
-    up: keys.has('Space'),
-    down: keys.has('ShiftLeft') || keys.has('ShiftRight'),
-  };
-}
 
 // === actions ===
 
@@ -529,75 +533,9 @@ function onContextMenu(e: Event): void {
   e.preventDefault();
 }
 
-// A placed spring — water the player created (sim's `p` flag) — is the only water the
-// player can break (LMB); breaking it is the way to stop the flow it feeds (a live
-// spring is an eternal emitter; with it gone, the flow it fed re-derives away through
-// the dirty closure — except water that landed on solid, which stands as a pool).
-const springTarget = (x: number, y: number, z: number): boolean => {
-  const b = world.getBlock(x, y, z);
-  if (b !== Block.Air && b !== Block.Water) return true;
-  return b === Block.Water && sim.cellState(x, y, z).p === 1;
-};
-
-function castFromCamera(springs: boolean): RayHit | null {
-  const dir = new THREE.Vector3();
-  camera.getWorldDirection(dir); // view direction in world space, normalized
-  // `springs` cast = BREAK targeting (LMB + crosshair): a spring stops the ray.
-  // Plain cast = PLACE targeting (RMB): water stays pass-through, so aiming at a water
-  // column reaches the solid behind/below it and the placement lands on the water cell
-  // adjacent to that solid (cap or replace a surface cell) — the long-standing placement
-  // behavior, which spring-stop targeting would break (it would displace the target to
-  // the cell beyond the spring).
-  return raycastVoxel(world, camera.position, dir, REACH, springs ? springTarget : undefined);
-}
-
-// Scratch vector: the door-placement branch projects this to the level (XZ) facing.
-const _doorFwd = new THREE.Vector3();
-
-// Placement-support normal -> torch meta face: +Y = 0 (floor post), +X = 1, -X = 2,
-// +Z = 3, -Z = 4. A -Y normal (ceiling) is rejected by the caller.
-function torchFaceFromNormal(nx: number, ny: number, nz: number): number {
-  if (ny > 0) return 0;
-  if (nx > 0) return 1;
-  if (nx < 0) return 2;
-  if (nz > 0) return 3;
-  return 4; // -Z
-}
-
-/** The other half of the door at (x, y, z), or null (an orphaned half). */
-function doorPartner(x: number, y: number, z: number): [number, number, number] | null {
-  const b = world.getBlock(x, y, z);
-  if (b === Block.DoorBottom && world.getBlock(x, y + 1, z) === Block.DoorTop) return [x, y + 1, z];
-  if (b === Block.DoorTop && world.getBlock(x, y - 1, z) === Block.DoorBottom) return [x, y - 1, z];
-  return null;
-}
-
-/** Right-click on a door: flip open/closed on BOTH halves, keeping axis and side (instant snap). */
-function toggleDoorPair(x: number, y: number, z: number): void {
-  const b = world.getBlock(x, y, z);
-  const m = world.getMeta(x, y, z);
-  const meta = doorMeta(!doorOpen(m), doorAxis(m), doorSide(m)); // all three bits preserved
-  world.setBlock(x, y, z, b, meta);
-  remeshAround(x, y, z);
-  const p = doorPartner(x, y, z);
-  if (p) {
-    // the partner's block id is unchanged by the toggle; its meta is forced to match
-    world.setBlock(p[0], p[1], p[2], world.getBlock(p[0], p[1], p[2]), meta);
-    remeshAround(p[0], p[1], p[2]);
-  }
-  lightSim.edit(x, y, z);
-  if (p) lightSim.edit(p[0], p[1], p[2]);
-}
-
-/** Remove ONLY the partner half of the door at (x, y, z); the caller handles that cell itself. */
-function clearDoorPartner(x: number, y: number, z: number): void {
-  const p = doorPartner(x, y, z);
-  if (!p) return;
-  world.setBlock(p[0], p[1], p[2], Block.Air);
-  remeshAround(p[0], p[1], p[2]);
-  sim.edit(p[0], p[1], p[2], Block.Air);
-  lightSim.edit(p[0], p[1], p[2]);
-}
+// The break/place/door/torch raycast (spring targeting, door pairing, torch faces) now lives
+// in entity.ts (applyIntent): it runs from the VIEWED entity's eye, not the camera. main.ts
+// keeps only the crosshair (updateHitbox) and the two-line input edge-setter (onMouseDown).
 
 // Rebuild the edited cell's chunk, plus — when the cell sits on a chunk face — the
 // touched neighbor, so faces on the shared border are regenerated (setBlock only
@@ -620,99 +558,25 @@ function remeshAround(wx: number, wy: number, wz: number): void {
   for (const [nx, ny, nz] of touch) if (world.hasChunk(nx, ny, nz)) rebuildChunkMesh(nx, ny, nz);
 }
 
+// The input edge-setter: LMB/RMB just record an edge on the human controller; the sim's
+// substep loop (sim.tick -> applyIntent) performs the actual break/place from the viewed eye.
 function onMouseDown(e: MouseEvent): void {
-  if (e.button === 0) {
-    const hit = castFromCamera(true); // break targeting: placed springs are targetable
-    if (!hit) return;
-    // `hit` is a breakable solid, a torch, a door half (breaks as a PAIR — the partner
-    // is cleared first, while the aimed cell still identifies it), or a placed spring
-    // (the only targetable water — see castFromCamera).
-    const hb = world.getBlock(hit.x, hit.y, hit.z);
-    if (isDoor(hb)) clearDoorPartner(hit.x, hit.y, hit.z);
-    world.setBlock(hit.x, hit.y, hit.z, Block.Air);
-    remeshAround(hit.x, hit.y, hit.z);
-    sim.edit(hit.x, hit.y, hit.z, Block.Air); // clears the cell's water state + re-marks dependents
-    lightSim.edit(hit.x, hit.y, hit.z); // water/wall removal changes block AND sky exposure
-  } else if (e.button === 2) {
-    const hit = castFromCamera(false); // place targeting: water stays pass-through
-    if (!hit) return;
-    const hb = world.getBlock(hit.x, hit.y, hit.z);
-    const tx = hit.x + hit.nx;
-    const ty = hit.y + hit.ny;
-    const tz = hit.z + hit.nz;
-    if (ty < WORLD_Y_MIN || ty >= WORLD_Y_MAX) return;
-    const target = world.getBlock(tx, ty, tz);
-    const held = hotbar.block;
+  if (e.button === 0) human.primary();
+  else if (e.button === 2) human.secondary();
+}
 
-    // 1) A door under the crosshair TOGGLES — always wins over placement.
-    if (isDoor(hb)) {
-      toggleDoorPair(hit.x, hit.y, hit.z);
-      return;
-    }
-
-    // 2) Torch: AIR target + a solid opaque face behind it. No water, no ceilings,
-    //    no door faces (doors are not opaque -> invalid support), no mid-air.
-    if (held === Block.Torch) {
-      if (target !== Block.Air) return;
-      if (hit.ny < 0) return;
-      if (!isOpaque(hb)) return;
-      if (!player.noclip && player.intersectsVoxel(tx, ty, tz)) return;
-      world.setBlock(tx, ty, tz, Block.Torch, torchMeta(torchFaceFromNormal(hit.nx, hit.ny, hit.nz)));
-      remeshAround(tx, ty, tz);
-      sim.edit(tx, ty, tz, Block.Torch);
-      lightSim.edit(tx, ty, tz); // the glow wave
-      return;
-    }
-
-    // 3) Door: both cells clearable (Air or Water — water dries on placement), within
-    //    height, not overlapping the player in either cell.
-    if (held === Block.DoorBottom) {
-      if (ty + 1 >= WORLD_Y_MAX) return;
-      const above = world.getBlock(tx, ty + 1, tz);
-      if (target !== Block.Air && target !== Block.Water) return;
-      if (above !== Block.Air && above !== Block.Water) return;
-      if (!player.noclip && (player.intersectsVoxel(tx, ty, tz) || player.intersectsVoxel(tx, ty + 1, tz))) return;
-      // Axis from the player's LEVEL FACING: the wide panel face goes perpendicular to
-      // the look direction (the XZ-projected camera world direction, normalized), so a
-      // door placed while facing down a hall covers it. Projecting collapses to 0 when
-      // aiming straight down, where doorPlacementFromView falls back to the aimed
-      // normal — the old face-based rule. The side (hinge edge) still comes from the
-      // aimed-face normal along the thin axis, so the panel hugs the side it was aimed
-      // against.
-      camera.getWorldDirection(_doorFwd);
-      const horiz = Math.hypot(_doorFwd.x, _doorFwd.z);
-      const { axis, side } = doorPlacementFromView(
-        horiz >= 1e-3 ? _doorFwd.x / horiz : 0,
-        horiz >= 1e-3 ? _doorFwd.z / horiz : 0,
-        hit.nx, hit.nz,
-      );
-      const meta = doorMeta(false, axis, side);
-      world.setBlock(tx, ty, tz, Block.DoorBottom, meta);
-      world.setBlock(tx, ty + 1, tz, Block.DoorTop, meta);
-      remeshAround(tx, ty, tz);
-      remeshAround(tx, ty + 1, tz);
-      sim.edit(tx, ty, tz, Block.DoorBottom);
-      sim.edit(tx, ty + 1, tz, Block.DoorTop);
-      lightSim.edit(tx, ty, tz); lightSim.edit(tx, ty + 1, tz);
-      return;
-    }
-
-    // 4) A plain block may replace Air/Water, a TORCH (meta clears with it), or a DOOR
-    //    (the whole pair is removed first). Player-overlap guard before any removal.
-    if (target !== Block.Air && target !== Block.Water && target !== Block.Torch && !isDoor(target)) return;
-    if (!player.noclip && player.intersectsVoxel(tx, ty, tz)) return;
-    if (isDoor(target)) clearDoorPartner(tx, ty, tz);
-    world.setBlock(tx, ty, tz, held); // meta = 0 clears any torch state in the cell
-    remeshAround(tx, ty, tz);
-    sim.edit(tx, ty, tz, held); // Water -> a level-7 source; any other block dries this cell
-    lightSim.edit(tx, ty, tz);
-  }
+// The crosshair break cast (LMB targeting): identical math to the old camera cast, but from
+// the viewed entity's eye + look direction. A placed spring stops the ray (breakRayTarget).
+function castBreakFromViewed(): RayHit | null {
+  const ve = sim.viewed();
+  if (!ve) return null;
+  return raycastVoxel(world, eyeOf(ve), lookDir(ve.yaw, ve.pitch), REACH, breakRayTarget(world, simHooks));
 }
 
 // Per-frame actions: re-target the wireframe from the just-synced camera (called after syncCamera).
 // Shows the BREAK target (same cast as LMB): a spring lights up where you can break it.
 function updateHitbox(): void {
-  const hit = pointerLocked ? castFromCamera(true) : null;
+  const hit = pointerLocked ? castBreakFromViewed() : null;
   if (!hit) {
     hitbox.visible = false;
     return;
@@ -860,6 +724,7 @@ window.addEventListener(
   (e) => {
     if (paletteOpen || helpOpen) return; // an open overlay owns the wheel (and the mouse is free)
     hotbar.cycle(e.deltaY > 0 ? 1 : -1);
+    human.select(hotbar.selected); // reported for replay; unwired in phase 1
   },
   { passive: true },
 );
@@ -875,7 +740,10 @@ window.addEventListener(
 // ADR 0012 defers it one frame so the mesh reads the worker's settled light; the light/water
 // touched carry the same way.
 function tickStreaming(): void {
-  const r = streaming.update(world, chunkOf(player.pos.x), chunkOf(player.pos.z), chunkOf(player.pos.y), persist);
+  const ve = sim.viewed(); // the stream is a pure function of the VIEWED entity's position
+  if (!ve) return;
+  const pcx = chunkOf(ve.pos.x), pcz = chunkOf(ve.pos.z), pcy = chunkOf(ve.pos.y);
+  const r = streaming.update(world, pcx, pcz, pcy, persist, sim); // sim = EntitySource: entities ride the unload
   for (const c of r.unloaded) {
     removeChunkMesh(c.cx, c.cy, c.cz);
     lightSim.unload(c.cx, c.cy, c.cz); // the worker re-seeds the surviving seams (the darkness wave)
@@ -884,13 +752,13 @@ function tickStreaming(): void {
   }
   if (r.unloaded.length) persist.saveMeta(metaSnapshot()); // the world just changed durably (a chunk left): refresh the save point
   for (const c of r.rebuilt) {
-    sim.settle(c.cx, c.cy, c.cz); // POC form of worldgen-fluid settling: settle BEFORE meshing so the new chunk's mesh already shows flooded caves. The settled flag makes re-settling a re-meshed chunk a no-op. settle() never clears sim.touched: cross-seam marks from any settle this frame survive here and to the end-of-frame drain below, which re-meshes them.
+    waterSim.settle(c.cx, c.cy, c.cz); // POC form of worldgen-fluid settling: settle BEFORE meshing so the new chunk's mesh already shows flooded caves. The settled flag makes re-settling a re-meshed chunk a no-op. settle() never clears waterSim.touched: cross-seam marks from any settle this frame survive here and to the end-of-frame drain below, which re-meshes them.
     lightSim.load(c.cx, c.cy, c.cz); // the worker settles it; the fields land with the tick reply
     deferredFirstMesh.add(chunkKey(c.cx, c.cy, c.cz)); // ADR 0012: the first/fresh mesh waits a guaranteed frame (replies are macrotasks — a load-frame drain would mesh from still-zero light); the frame end moves it into pendingRebuild after the first reply has landed
   }
   for (const c of r.restored) {
     const ch = world.getChunk(c.cx, c.cy, c.cz)!;
-    sim.restore(ch); // D1: water restored as-is (settled = true) — rebuild springs/waiting/queue, NO settle
+    waterSim.restore(ch); // D1: water restored as-is (settled = true) — rebuild springs/waiting/queue, NO settle
     lightSim.load(c.cx, c.cy, c.cz); // light is never persisted: the worker re-settles the chunk
     deferredFirstMesh.add(chunkKey(c.cx, c.cy, c.cz)); // first mesh of the restored chunk, same pacing as a load
   }
@@ -908,13 +776,14 @@ function tickStreaming(): void {
       restoring.delete(key); // free the slot whether we apply or drop
       if (!rec) { persist.dropPersisted(c.cx, c.cy, c.cz); return; }
       // Stale guard: the player may have moved on since the fetch started — apply only if the
-      // chunk is still in range of the CURRENT player position (the record stays warm either way).
-      if (!streaming.inRange(c.cx, c.cz, chunkOf(player.pos.x), chunkOf(player.pos.z))) return;
+      // chunk is still in range of the CURRENT viewed position (ve is the live entity, so
+      // ve.pos reads the current position; the record stays warm either way).
+      if (!streaming.inRange(c.cx, c.cz, chunkOf(ve.pos.x), chunkOf(ve.pos.z))) return;
       if (world.hasChunk(c.cx, c.cy, c.cz)) return; // a duplicate in-flight fetch applied it first
-      applyRecord(world, rec);
-      streaming.markNeighborsDirty(world, c.cx, c.cy, c.cz, chunkOf(player.pos.x), chunkOf(player.pos.z));
+      applyRecord(world, rec, sim, streamControllerFor); // restore frozen entities into the sim (idle)
+      streaming.markNeighborsDirty(world, c.cx, c.cy, c.cz, chunkOf(ve.pos.x), chunkOf(ve.pos.z));
       const ch = world.getChunk(c.cx, c.cy, c.cz)!;
-      sim.restore(ch);
+      waterSim.restore(ch);
       lightSim.load(c.cx, c.cy, c.cz);
       deferredFirstMesh.add(key);
     });
@@ -923,9 +792,10 @@ function tickStreaming(): void {
 
 function metaSnapshot(): WorldMeta {
   return {
-    v: 1,
-    seed: TERRAIN_SEED,
-    player: { x: player.pos.x, y: player.pos.y, z: player.pos.z, yaw: player.yaw, pitch: player.pitch },
+    v: 2, seed: TERRAIN_SEED,
+    entities: sim.all().map((e) => sim.toRecord(e)),
+    viewedEntityId: sim.viewedId,
+    simPrng: sim.rng.state(),
     time: worldTime.snapshot(),
     hotbar: { slots: [...hotbar.slots], selected: hotbar.selected },
   };
@@ -949,13 +819,14 @@ setInterval(() => saveAndFlush(), 5000); // best-effort periodic save: the crash
 
 // === water-fx ===
 
-// T12: when the eye voxel is water the whole scene swaps to the water mood —
+// T12: when the viewed entity's head voxel is water the whole scene swaps to the water mood —
 // the FOV squeeze here; the time-driven sky (sky.apply) paints whichever
-// background/fog is active, in both moods. Driven by player.headInWater
-// (T7 samples it each physics step); called per frame below.
+// background/fog is active, in both moods. Driven by headInWater
+// (stepEntity samples it each physics step); called per frame below.
 let waterFx: 'air' | 'water' = 'air';
 function syncWaterFx(): void {
-  const m: 'air' | 'water' = player.headInWater ? 'water' : 'air';
+  const ve = sim.viewed();
+  const m: 'air' | 'water' = ve?.headInWater ? 'water' : 'air';
   if (m === waterFx) return; // stable: one swap per (de)submersion, not per frame
   waterFx = m;
   camera.fov = m === 'water' ? FOV_WATER : FOV_AIR;
@@ -991,11 +862,11 @@ function frame(now: number): void {
   if (dt > 0.1) dt = 0.1; // clamp after tab-switch/hitch
   acc += dt;
   const tickBefore = worldTime.tick; // ADR 0011: the water pulse strides the tick lattice; capture pre-substep tick for the frame-end crossing check
+  human.heldBlock = hotbar.block; // sync the held block for intents (per frame, before the substeps)
   while (acc >= STEP) {
     acc -= STEP;
-    player.update(STEP, readMove());
+    sim.tick(STEP, worldTime.tick); // the sim heartbeat: intent -> applyIntent -> stepEntity, in id order (fall-out-of-world handled inside)
     worldTime.advance(STEP);
-    if (player.pos.y < WORLD_Y_MIN) player.place(SPAWN); // fell out of the world (open cave / dug-away floor)
   }
   tickStreaming(); // ONCE per frame (was inside the substep loop, where the frame-time clamp multiplied the streaming budget by the substep count, up to ~12 chunks/frame)
   if (profRig) {
@@ -1006,17 +877,19 @@ function frame(now: number): void {
     // (the reply does not carry it) — the rig settles on quiescence + the 6312 baseline
     // signature instead (ProfRig.beginFrame).
     const wc = world.getChunk(2, 1, 0);
-    player.place(profRig.beginFrame({
+    const wp = profRig.beginFrame({
       worstLoaded: wc !== undefined,
       worstSettled: wc !== undefined && !pendingRebuild.has(PROF_WORST_KEY) && !scheduler.has(PROF_WORST_KEY),
-    }).waypoint);
+    }).waypoint;
+    const vep = sim.viewed(); // the rig pins the VIEWED entity (frame-end write, same as today)
+    if (vep) { vep.pos.x = wp.x; vep.pos.y = wp.y; vep.pos.z = wp.z; vep.vel = { x: 0, y: 0, z: 0 }; }
   }
   lightSim.tick(LIGHT_TICK_BUDGET); // the worker drains once per frame (ADR 0012) — off the renderer's critical path; idle cost = one worker round-trip per frame (a small reply object)
-  if (tickCrossed(tickBefore, worldTime.tick, WATER_STRIDE)) sim.tick(WATER_PULSE); // water on the tick heartbeat (ADR 0011): one pulse per 30 substeps = 0.5 sim s (was a wall-clock accumulator); settles are event-driven and stay snappy
+  if (tickCrossed(tickBefore, worldTime.tick, WATER_STRIDE)) waterSim.tick(WATER_PULSE); // water on the tick heartbeat (ADR 0011): one pulse per 30 substeps = 0.5 sim s (was a wall-clock accumulator); settles are event-driven and stay snappy
   // Merge this frame's water + light touched chunks into the pending re-mesh set (both sims keep
   // their exact sim.touched contract: consumed and cleared exactly once per frame here).
-  for (const key of sim.touched) pendingRebuild.add(key);
-  sim.touched.clear();
+  for (const key of waterSim.touched) pendingRebuild.add(key);
+  waterSim.touched.clear();
   for (const key of lightSim.touched) pendingRebuild.add(key);
   lightSim.touched.clear();
   // First/fresh meshes of this frame's streamed chunks enter pendingRebuild only now — they were
@@ -1031,7 +904,7 @@ function frame(now: number): void {
   // skipped rebuilds carry one more frame. A probe-complete mesh is ≤ PROBE_VERTS verts =
   // ≤ 16.7 ms by construction, so it flows through the ordinary budget.
   const profDrainT0 = profMode ? performance.now() : 0; // the rig attributes the drain's share of the frame
-  const pcx = chunkOf(player.pos.x), pcy = chunkOf(player.pos.y), pcz = chunkOf(player.pos.z);
+  const vp = sim.viewed()!; const pcx = chunkOf(vp.pos.x), pcy = chunkOf(vp.pos.y), pcz = chunkOf(vp.pos.z); // re-mesh closest to the VIEWED entity first
   const inFlight = scheduler.inFlightKey();
   if (inFlight) {
     const [cx, cy, cz] = inFlight.split(',').map(Number) as [number, number, number];
