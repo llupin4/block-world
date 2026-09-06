@@ -367,6 +367,14 @@ Highlight box: a `THREE.LineSegments` wireframe cube, repositioned to `hit + 0.5
 > eye), not the camera. The `Player` class and its pinned physics/`player.test.ts` stay as the
 > single source of the numbers and the equivalence oracle — the section below describes the
 > physics the player entity reuses verbatim (`stepEntity(playerKind)` ≡ `Player.update`).
+>
+> **Phase 2 (2026-09-06, [ADR 0016](docs/adr/0016-mobs-possession-spectator.md)).** The sim now
+> also drives a **dolt** (a grazing quadruped with a sim-owned wander AI — `MobController`,
+> `src/entity.ts`) and a **spectator** ghost, and the human may **possess** any of them
+> (`possess`/`returnHome`/`spectate`, `pickEntity` before the voxel on both the crosshair and the
+> `P` handler). Box-part rigs (`src/entity-mesh.ts`, one deterministic canvas part-atlas per
+> kind, speed-driven leg phase) render every non-spectator entity; the viewed entity's rig is
+> hidden. Dolts spawn deterministically per chunk (`src/spawn.ts`) and despawn on unload.
 
 **Camera & input.** Pointer Lock API. `mousemove` deltas accumulate into yaw/pitch; clamp pitch to ±(π/2 − 0.01) so you never gimbal at straight up/down.
 
