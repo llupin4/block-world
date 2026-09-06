@@ -8,8 +8,10 @@ import { meshChunk, meshChunkRange, probeMeshChunk, type ChunkMesh, type LightSa
 import { SliceScheduler, decideBands, PROBE_VERTS, SLICE_COUNT } from './mesh-slices';
 import { ProfRig, meshVerts, PROF_WORST_KEY } from './prof-rig';
 import { toGeometry } from './geometry';
-import { Sim, HumanController, IdleController, eyeOf, lookDir, breakRayTarget, type ApplyHooks, type Controller, type EntityRecord } from './entity';
-import { raycastVoxel, REACH, type RayHit } from './raycast';
+import { Sim, HumanController, IdleController, MobController, eyeOf, lookDir, breakRayTarget, possess, returnHome, spectate, type ApplyHooks, type Controller, type EntityRecord } from './entity';
+import { raycastVoxel, pickEntity, REACH, type RayHit } from './raycast';
+import { spawnDolts } from './spawn';
+import { buildEntityRig, updateEntityRig, advanceRigAnim, newRigAnim, RIG_COLORS, LEG_RATE, buildPartAtlas, type Rig, type RigAnim } from './entity-mesh';
 import { WaterSim } from './water';
 import { WorldTime, formatClock, tickCrossed } from './time';
 import { sampleSky, createSky } from './sky';
@@ -271,8 +273,12 @@ const simHooks: ApplyHooks = {
   springTarget: (x, y, z) => waterSim.cellState(x, y, z).p === 1,
 };
 const sim = new Sim(world, simHooks, TERRAIN_SEED);
-// Frozen non-viewed entities (restored from chunks / the meta) run on the idle controller.
-const streamControllerFor = (_r: EntityRecord): Controller => new IdleController();
+// Frozen non-viewed entities (restored from chunks / the meta) run on the idle controller —
+// except a dolt (controllerKind 'mob'), which reattaches its wander AI on walk-back.
+const streamControllerFor = (r: EntityRecord): Controller =>
+  r.controllerKind === 'mob'
+    ? new MobController((x, y, z) => world.getBlock(x, y, z), () => sim.rng.next())
+    : new IdleController();
 
 // World persistence (ADR 0014): edited chunks snapshot to IndexedDB on unload; on boot
 // the key set + meta load, and previously edited chunks restore verbatim (warm: inline,
@@ -338,8 +344,25 @@ async function startGame(meta: WorldMeta | null): Promise<void> {
   sim.respawn = { x: SPAWN.x, y: SPAWN.y, z: SPAWN.z }; // the sim's fall-out-of-world respawn point (both branches)
   if (meta) {
     worldTime.restore(meta.time);
-    sim.restoreEntities(meta.entities, (r) => (r.id === meta.viewedEntityId ? human : new IdleController())); // viewed -> human, frozen -> idle
+    // Restore controllers: a dolt (controllerKind 'mob') reattaches its wander AI; the viewed
+    // non-mob entity (the home body) gets the human controller; the rest stand idle.
+    const controllerFor = (r: EntityRecord): Controller =>
+      r.controllerKind === 'mob'
+        ? new MobController((x, y, z) => world.getBlock(x, y, z), () => sim.rng.next())
+        : (r.id === meta.viewedEntityId ? human : new IdleController());
+    sim.restoreEntities(meta.entities, controllerFor);
     sim.setViewed(meta.viewedEntityId);
+    // The home body idles when left (not the human it was restored with); derive home/ghost from
+    // the restored entities, and spawn the single ghost only if none was restored (it is a normal
+    // entity and restores like any other — never spawn a second one).
+    const body = sim.entities.get(meta.viewedEntityId);
+    if (body && body.kind.id === 'player') body.baseController = new IdleController();
+    sim.homeId = sim.all().find((e) => e.kind.id === 'player')?.id ?? 0;
+    sim.ghostId = sim.all().find((e) => e.kind.id === 'spectator')?.id ?? 0;
+    if (sim.ghostId === 0) {
+      const v = sim.viewed()!;
+      sim.ghostId = sim.spawn({ x: v.pos.x, y: v.pos.y + 4, z: v.pos.z }, new IdleController(), { kindId: 'spectator', baseController: new IdleController() }).id;
+    }
     if (meta.simPrng !== undefined) sim.rng.restore(meta.simPrng);
     if (meta.hotbar?.slots?.length === 9) {
       for (let i = 0; i < 9; i++) hotbar.setSlot(i, meta.hotbar.slots[i]); // fires onSlotChange → icons refresh
@@ -350,8 +373,12 @@ async function startGame(meta: WorldMeta | null): Promise<void> {
       refreshPaletteSel(hotbar.block);
     }
   } else {
-    const p = sim.spawn(SPAWN, human, { yaw: -Math.PI / 2, kindId: 'player' }); // face +x (east), at the sea
+    // Fresh world: the body runs the human controller but idles when left (baseController), and
+    // the single spectator ghost is spawned (it restores like any entity on a later save).
+    const p = sim.spawn(SPAWN, human, { yaw: -Math.PI / 2, kindId: 'player', baseController: new IdleController() }); // face +x (east), at the sea
     sim.setViewed(p.id);
+    sim.homeId = p.id;
+    sim.ghostId = sim.spawn({ x: SPAWN.x, y: SPAWN.y + 4, z: SPAWN.z }, new IdleController(), { kindId: 'spectator', baseController: new IdleController() }).id;
     hotbar.select(PALETTE_BLOCKS.indexOf(Block.Planks)); // default: planks, as T8's selectedBlock was
   }
   // The human controller's look is the source of truth (stepEntity adopts it each tick): sync it
@@ -369,6 +396,44 @@ void persist.boot().then((meta) => {
   window.clearTimeout(bootGate);
   void startGame(meta);
 });
+
+// === entity rigs ===
+
+// One material per kind (a deterministic speckled part-atlas, block-atlas style). The rig
+// renders every non-spectator entity; the viewed entity's rig is hidden (first person).
+const rigOf: Record<string, THREE.Material> = {};
+for (const [id, color] of Object.entries(RIG_COLORS)) rigOf[id] = new THREE.MeshLambertMaterial({ map: buildPartAtlas(color, 0x5eed) });
+const rigs = new Map<number, { rig: Rig; anim: RigAnim }>();
+const kindEl = document.getElementById('kind')!;
+
+function syncEntityRigs(dt: number): void {
+  const seen = new Set<number>();
+  for (const e of sim.all()) {
+    seen.add(e.id);
+    if (e.kind.collides === false) continue; // spectator: no rig
+    let entry = rigs.get(e.id);
+    if (!entry) {
+      const mat = rigOf[e.kind.id] ?? (rigOf[e.kind.id] = new THREE.MeshLambertMaterial({ map: buildPartAtlas(0x888888, 0x5eed) }));
+      const rig = buildEntityRig(e.kind, mat);
+      if (!rig) continue;
+      entry = { rig, anim: newRigAnim() };
+      rigs.set(e.id, entry);
+      scene.add(rig.root);
+    }
+    advanceRigAnim(entry.anim, e, dt, LEG_RATE[e.kind.id] ?? 4);
+    updateEntityRig(entry.rig, e, entry.anim);
+    entry.rig.root.visible = e.id !== sim.viewedId; // hide the viewed entity in first person
+  }
+  for (const [id, entry] of rigs) if (!seen.has(id)) { scene.remove(entry.rig.root); rigs.delete(id); }
+}
+
+// The HUD kind label + hotbar visibility: show what you are viewing, and hide the hotbar when
+// the viewed kind can't edit (a dolt / the ghost can't place blocks).
+function syncHud(): void {
+  const ve = sim.viewed();
+  kindEl.textContent = ve ? `viewing: ${ve.kind.id}` : '';
+  hotbarEl.classList.toggle('hidden', !ve || !ve.kind.canEdit);
+}
 
 // === chunks-meshing ===
 
@@ -478,6 +543,7 @@ window.addEventListener('keydown', (e) => {
   if (e.code === 'KeyE') togglePalette(); // creative palette: open (unlock) / close (re-lock)
   if (e.code === 'KeyH') toggleHelp(); // help overlay: same open (unlock) / close (re-lock)
   if (e.code === 'KeyC') setWireframe(!wireframeOn); // wireframe (PROJECT.md §14: chunk-edge bugs)
+  if (e.code === 'KeyP') onPossess(); // possess the targeted entity, or toggle body<->ghost
   const d = e.code.startsWith('Digit') ? e.code.slice(5) : e.code.startsWith('Numpad') ? e.code.slice(6) : '';
   if (d >= '1' && d <= '9') { const s = Number(d) - 1; hotbar.select(s); human.select(s); } // 1-9 / numpad 1-9
 });
@@ -574,15 +640,34 @@ function castBreakFromViewed(): RayHit | null {
 }
 
 // Per-frame actions: re-target the wireframe from the just-synced camera (called after syncCamera).
-// Shows the BREAK target (same cast as LMB): a spring lights up where you can break it.
+// Shows the BREAK target (same cast as LMB): a spring lights up where you can break it. A closer
+// entity shadows the voxel (pickEntity before the voxel, exactly as onPossess does).
 function updateHitbox(): void {
-  const hit = pointerLocked ? castBreakFromViewed() : null;
-  if (!hit) {
-    hitbox.visible = false;
-    return;
-  }
+  if (!pointerLocked) { hitbox.visible = false; return; }
+  const ve = sim.viewed();
+  if (!ve) { hitbox.visible = false; return; }
+  const ent = pickEntity(eyeOf(ve), lookDir(ve.yaw, ve.pitch), sim.all().filter((x) => x.id !== ve.id), REACH);
+  if (ent) { hitbox.visible = false; return; } // a closer entity shadows the voxel
+  const hit = castBreakFromViewed();
+  if (!hit) { hitbox.visible = false; return; }
   hitbox.position.set(hit.x + 0.5, hit.y + 0.5, hit.z + 0.5);
   hitbox.visible = true;
+}
+
+// Possession (P): if the crosshair is on another entity within reach, drive it; otherwise toggle
+// between the home body and the single spectator ghost.
+function onPossess(): void {
+  const ve = sim.viewed();
+  if (!ve) return;
+  const candidates = sim.all().filter((x) => x.id !== ve.id);
+  const hit = pickEntity(eyeOf(ve), lookDir(ve.yaw, ve.pitch), candidates, REACH);
+  if (hit) {
+    possess(sim, human, candidates[hit.index].id);
+  } else if (sim.viewedId === sim.homeId) {
+    spectate(sim, human);   // at the body -> the ghost
+  } else {
+    returnHome(sim, human); // possessing/ghost -> back to the body
+  }
 }
 
 // === ui ===
@@ -749,6 +834,8 @@ function tickStreaming(): void {
     lightSim.unload(c.cx, c.cy, c.cz); // the worker re-seeds the surviving seams (the darkness wave)
     pendingRebuild.delete(chunkKey(c.cx, c.cy, c.cz)); // don't re-mesh a chunk we just unloaded
     deferredFirstMesh.delete(chunkKey(c.cx, c.cy, c.cz)); // it may still be waiting for its first mesh
+    for (const d of sim.entitiesInChunk(c.cx, c.cy, c.cz)) // the dolts leaving with the chunk persist via the entity-ride; restore on walk-back
+      if (d.kind.id === 'dolt') sim.despawn(d.id);
   }
   if (r.unloaded.length) persist.saveMeta(metaSnapshot()); // the world just changed durably (a chunk left): refresh the save point
   for (const c of r.rebuilt) {
@@ -756,6 +843,7 @@ function tickStreaming(): void {
     lightSim.load(c.cx, c.cy, c.cz); // the worker settles it; the fields land with the tick reply
     deferredFirstMesh.add(chunkKey(c.cx, c.cy, c.cz)); // ADR 0012: the first/fresh mesh waits a guaranteed frame (replies are macrotasks — a load-frame drain would mesh from still-zero light); the frame end moves it into pendingRebuild after the first reply has landed
   }
+  for (const c of r.rebuilt) spawnDolts(world, sim, c.cx, c.cz); // dolts into freshly GENERATED (rebuilt) columns only — restored chunks already carry their persisted dolts (re-rolling would double-populate and diverge)
   for (const c of r.restored) {
     const ch = world.getChunk(c.cx, c.cy, c.cz)!;
     waterSim.restore(ch); // D1: water restored as-is (settled = true) — rebuild springs/waiting/queue, NO settle
@@ -958,6 +1046,8 @@ function frame(now: number): void {
   profDrainMs = profMode ? performance.now() - profDrainT0 : 0;
   syncCamera();
   updateHitbox();
+  syncEntityRigs(dt); // place/update the mob+player rigs; hide the viewed entity's rig (first person)
+  syncHud(); // the "viewing: <kind>" label + hotbar visibility
   syncWaterFx();
   clouds.setVisible(waterFx === 'air');
   const skySample = sampleSky(worldTime.dayPhase);

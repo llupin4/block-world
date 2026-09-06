@@ -27,6 +27,16 @@ html, body { width: 100%; height: 100%; overflow: hidden; background: #0b0e14; }
   text-shadow: 0 1px 2px #000;
   pointer-events: none;
 }
+/* kind label (phase 2 possession): small, top-left, just under the clock; empty until a kind is shown */
+#kind {
+  position: fixed; top: 44px; left: 12px;
+  padding: 4px 9px;
+  background: rgba(10, 14, 22, .45); border-radius: 6px;
+  color: #bcd0ea;
+  font: 11px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace;
+  text-shadow: 0 1px 2px #000;
+  pointer-events: none;
+}
 
 /* hotbar: bottom-center, display-only (T11 fills it); palette: right strip, scrolling rows (icon + name), click targets */
 #hotbar {
