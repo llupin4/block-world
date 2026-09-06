@@ -1,126 +1,115 @@
 import * as THREE from 'three';
-import { type World } from './world';
-import { stepEntity, NULL_INTENT, type Entity } from './entity';
+import { SimRng, type Entity, type EntityKind } from './entity';
 
-// === pure, node-testable walk-cycle math (the browser rig consumes these) ===
+// === pure animation state (node-testable): the leg-swing phase, advanced by horizontal
+// speed (replay-safe — no wall clock). ===
 
-export interface RigAnim {
-  phase: number; // walk-cycle phase in [0,1)
-  speed: number; // 0 (stopped) .. 1 (walking)
+export interface RigAnim { phase: number }
+export function newRigAnim(): RigAnim { return { phase: 0 }; }
+
+export function horizontalSpeed(e: { vel: { x: number; z: number } }): number {
+  return Math.hypot(e.vel.x, e.vel.z);
 }
 
-// Walk cycles per second while walking. Pinned.
-const WALK_FREQ = 12;
-const STOP_EASE = 8; // how fast the phase eases back to 0 when stopped (per second)
-
-/** Advance the walk cycle: while `forward` the phase accrues and wraps into [0,1); when
- *  stopped it eases back to 0. Pinned constants; deterministic (no Math.random). */
-export function advanceRigAnim(anim: RigAnim, forward: number, dt: number): void {
-  if (forward > 0) {
-    anim.phase += dt * forward * WALK_FREQ;
-    if (anim.phase >= 1) anim.phase -= Math.floor(anim.phase);
-    anim.speed = forward;
-  } else {
-    anim.phase *= Math.exp(-STOP_EASE * dt);
-    if (anim.phase < 0.001) anim.phase = 0;
-    anim.speed = 0;
-  }
+/** Advance the leg phase with horizontal speed (rate rad per meter, pinned per kind). */
+export function advanceRigAnim(anim: RigAnim, e: { vel: { x: number; z: number } }, dt: number, rate: number): void {
+  anim.phase += horizontalSpeed(e) * dt * rate;
 }
 
-/** Swing angle for a leg. `side` is -1 (left) / +1 (right): the two sides are out of phase
- *  (opposite swing). Amplitude scales with speed so a stopped rig rests flat. */
-export function legAngles(anim: RigAnim, side: number): number {
-  const amp = 0.5 * anim.speed;
-  return Math.sin(anim.phase * Math.PI * 2 + (side < 0 ? 0 : Math.PI)) * amp;
+/** The four leg swings [FL, BL, FR, BR]: opposite legs swing together; bounded by `amp`.
+ *  `-0` is normalized to `+0` at rest (phase 0) so the tuple is a clean [0,0,0,0]. */
+export function legAngles(anim: RigAnim, amp = 0.5): [number, number, number, number] {
+  const s = Math.sin(anim.phase) * amp;
+  return [s, -s, -s, s].map((v) => (v === 0 ? 0 : v)) as [number, number, number, number];
 }
 
-/** The effective horizontal speed of `e` if it walked one tick (a forward step's distance
- *  over dt), restoring `e.pos` afterwards. Used to scale the walk-cycle frequency. */
-export function horizontalSpeed(world: World, e: Entity, dt: number): number {
-  const bx = e.pos.x, bz = e.pos.z;
-  stepEntity(world, e, { ...NULL_INTENT, forward: 1, yaw: e.yaw }, dt);
-  const d = Math.hypot(e.pos.x - bx, e.pos.z - bz);
-  e.pos.x = bx; e.pos.z = bz;
-  return d / dt;
-}
+// === three.js rig (browser-only; verified in the Task 7 gate) ===
 
-// === the rig definitions (pure data) ===
+interface Part { name: string; size: [number, number, number]; offset: [number, number, number]; leg?: number; head?: boolean; }
 
-export interface RigPartDef {
-  name: string;
-  size: [number, number, number];
-  offset: [number, number, number]; // from the feet origin (feet at y 0)
-}
-
-export interface RigDef {
-  parts: RigPartDef[];
-}
-
-/** The dolt: a head and four legs (front/back x left/right). Pinned. */
-export const KIND_TO_RIG: Record<string, RigDef> = {
-  dolt: {
-    parts: [
-      { name: 'head', size: [0.34, 0.3, 0.34], offset: [0, 0.55, -0.42] },
-      { name: 'frontL', size: [0.14, 0.42, 0.14], offset: [-0.26, 0.21, -0.3] },
-      { name: 'frontR', size: [0.14, 0.42, 0.14], offset: [0.26, 0.21, -0.3] },
-      { name: 'backL', size: [0.14, 0.42, 0.14], offset: [-0.26, 0.21, 0.3] },
-      { name: 'backR', size: [0.14, 0.42, 0.14], offset: [0.26, 0.21, 0.3] },
-    ],
-  },
-};
-
-// === the browser-only three.js rig ===
-
-export interface RigPart {
-  name: string;
-  pivot: THREE.Object3D; // legs swing about this (the hip); the head's pivot is its mesh
-  mesh: THREE.Mesh;
-  side: number; // -1 (left) / +1 (right) for legs; 0 for the head
-  isLeg: boolean;
-}
+const DOLT_PARTS: Part[] = [
+  { name: 'body', size: [0.5, 0.5, 0.9], offset: [0, 0.55, 0] },
+  { name: 'head', size: [0.35, 0.35, 0.4], offset: [0, 0.78, -0.5], head: true },
+  { name: 'legFL', size: [0.16, 0.4, 0.16], offset: [0.28, 0.2, -0.3], leg: 0 },
+  { name: 'legFR', size: [0.16, 0.4, 0.16], offset: [0.28, 0.2, 0.3], leg: 1 },
+  { name: 'legBL', size: [0.16, 0.4, 0.16], offset: [-0.28, 0.2, -0.3], leg: 2 },
+  { name: 'legBR', size: [0.16, 0.4, 0.16], offset: [-0.28, 0.2, 0.3], leg: 3 },
+];
+const PLAYER_PARTS: Part[] = [
+  { name: 'body', size: [0.5, 0.9, 0.3], offset: [0, 0.9, 0] },
+  { name: 'head', size: [0.4, 0.4, 0.4], offset: [0, 1.5, 0], head: true },
+  { name: 'legL', size: [0.2, 0.9, 0.2], offset: [-0.15, 0.45, 0], leg: 0 },
+  { name: 'legR', size: [0.2, 0.9, 0.2], offset: [0.15, 0.45, 0], leg: 1 },
+];
 
 export interface Rig {
-  group: THREE.Group; // positioned at the entity's feet, rotated by yaw
-  parts: RigPart[];
-  anim: RigAnim;
+  root: THREE.Group;   // at the feet; rotation.y = yaw (body follows yaw only)
+  head: THREE.Group;   // rotation.x = pitch (head follows pitch+yaw)
+  legs: THREE.Group[]; // rotation.x = leg swing
 }
 
-/** Build the dolt rig (browser). The group sits at the feet; each leg hangs from a hip pivot
- *  so it swings about the hip. Pinned geometry. */
-export function makeDoltRig(color = 0x8a6d4a): Rig {
-  const group = new THREE.Group();
-  const mat = new THREE.MeshLambertMaterial({ color });
-  const parts: RigPart[] = [];
-  for (const def of KIND_TO_RIG.dolt.parts) {
-    const geo = new THREE.BoxGeometry(def.size[0], def.size[1], def.size[2]);
-    const mesh = new THREE.Mesh(geo, mat);
-    const isLeg = def.name !== 'head';
-    let pivot: THREE.Object3D;
-    if (isLeg) {
-      const hip = new THREE.Object3D();
-      hip.position.set(def.offset[0], def.offset[1] + def.size[1] / 2, def.offset[2]);
-      mesh.position.set(0, -def.size[1] / 2, 0); // the leg hangs below the hip
-      group.add(hip);
-      hip.add(mesh);
-      pivot = hip;
-    } else {
-      mesh.position.set(def.offset[0], def.offset[1], def.offset[2]);
-      group.add(mesh);
-      pivot = mesh;
-    }
-    const side = def.name.endsWith('L') ? -1 : def.name.endsWith('R') ? 1 : 0;
-    parts.push({ name: def.name, pivot, mesh, side, isLeg });
+// One material per kind (no skinning, no morph targets), textured from a small canvas
+// part-atlas in the same style as the block atlas: a deterministic speckle (fixed seed, so
+// the rig looks identical across sessions/replays) of the kind's base colour, crisp
+// NearestFilter. (This is the phase 2 texture — not a punt; see the spec's Rendering.)
+export const RIG_COLORS: Record<string, number> = { dolt: 0x9a7b4f, player: 0x3f6fb5 };
+export const LEG_RATE: Record<string, number> = { dolt: 6, player: 4 };
+
+/** A small speckled canvas texture for a kind's material (block-atlas style). Deterministic
+ *  (fixed-seed jitter) so the rig looks identical across sessions/replays. */
+export function buildPartAtlas(base: number, seed: number): THREE.CanvasTexture {
+  const rng = new SimRng(seed);
+  const S = 32;
+  const canvas = document.createElement('canvas');
+  canvas.width = canvas.height = S;
+  const ctx = canvas.getContext('2d')!;
+  const r = (base >> 16) & 0xff, g = (base >> 8) & 0xff, b = base & 0xff;
+  const c = (v: number) => Math.max(0, Math.min(255, v));
+  const img = ctx.createImageData(S, S);
+  for (let i = 0; i < S * S; i++) {
+    const j = Math.floor((rng.next() - 0.5) * 48); // +-24 jitter
+    img.data[i * 4 + 0] = c(r + j);
+    img.data[i * 4 + 1] = c(g + j);
+    img.data[i * 4 + 2] = c(b + j);
+    img.data[i * 4 + 3] = 255;
   }
-  return { group, parts, anim: { phase: 0, speed: 0 } };
+  ctx.putImageData(img, 0, 0);
+  const tex = new THREE.CanvasTexture(canvas);
+  tex.magFilter = THREE.NearestFilter; // crisp, block-like
+  return tex;
 }
 
-/** Update a rig from an entity's state (browser, per frame): place the group at the feet,
- *  rotate by yaw, and swing the legs from the walk cycle (driven by whether the entity is
- *  moving horizontally). */
-export function updateRig(rig: Rig, e: Entity, dt: number): void {
-  rig.group.position.set(e.pos.x, e.pos.y, e.pos.z);
-  rig.group.rotation.y = e.yaw;
-  const moving = Math.hypot(e.vel.x, e.vel.z) > 0.01;
-  advanceRigAnim(rig.anim, moving ? 1 : 0, dt);
-  for (const p of rig.parts) if (p.isLeg) p.pivot.rotation.x = legAngles(rig.anim, p.side);
+export function buildEntityRig(kind: EntityKind, material: THREE.Material): Rig | null {
+  const parts = kind.id === 'dolt' ? DOLT_PARTS : kind.id === 'player' ? PLAYER_PARTS : null;
+  if (!parts) return null; // spectator: no rig
+  const root = new THREE.Group();
+  const head = new THREE.Group();
+  const legs: THREE.Group[] = [];
+  for (const p of parts) {
+    const mesh = new THREE.Mesh(new THREE.BoxGeometry(p.size[0], p.size[1], p.size[2]), material);
+    if (p.head) { mesh.position.set(...p.offset); head.add(mesh); continue; }
+    if (p.leg !== undefined) {
+      const pivot = new THREE.Group();
+      pivot.position.set(0, p.offset[1] + p.size[1] / 2, 0); // hip pivot at the leg top
+      mesh.position.set(p.offset[0], -p.size[1] / 2, p.offset[2]);
+      pivot.add(mesh);
+      root.add(pivot);
+      legs[p.leg] = pivot;
+      continue;
+    }
+    mesh.position.set(...p.offset);
+    root.add(mesh);
+  }
+  root.add(head);
+  return { root, head, legs };
+}
+
+/** Position the rig at the entity's feet, orient body by yaw + head by pitch, and set the
+ *  leg swings from the accumulated phase. The viewed entity's rig is hidden by the caller. */
+export function updateEntityRig(rig: Rig, e: Entity, anim: RigAnim, amp = 0.5): void {
+  rig.root.position.set(e.pos.x, e.pos.y, e.pos.z);
+  rig.root.rotation.y = e.yaw;
+  rig.head.rotation.x = e.pitch;
+  const a = legAngles(anim, amp);
+  for (let i = 0; i < rig.legs.length; i++) rig.legs[i].rotation.x = a[i] ?? 0;
 }
