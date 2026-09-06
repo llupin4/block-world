@@ -2,9 +2,11 @@ import { Block } from './blocks';
 import { type World } from './world';
 import { SimRng, IdleController, type Sim } from './entity';
 
-/** A dolt can spawn on this cell: grass with two air cells above, at a plausible surface height. */
+/** A dolt can spawn on this cell: grass with two air cells above, at a plausible surface height.
+ *  The upper bound covers the TERRAIN_SEED surface range (measured [13,43]; the land is above the
+ *  sea at y≈33, so a y≤32 cap — the plan's original — found zero cells on this world). */
 export function isDoltSpawnCell(getBlock: (x: number, y: number, z: number) => number, x: number, y: number, z: number): boolean {
-  return getBlock(x, y, z) === Block.Grass && getBlock(x, y + 1, z) === Block.Air && getBlock(x, y + 2, z) === Block.Air && y >= -20 && y <= 32;
+  return getBlock(x, y, z) === Block.Grass && getBlock(x, y + 1, z) === Block.Air && getBlock(x, y + 2, z) === Block.Air && y >= -20 && y <= 48;
 }
 
 /**
@@ -22,7 +24,7 @@ export function rollDoltSpawns(
   for (let t = 0; t < 400 && out.length < count; t++) {
     const lx = Math.floor(next() * 16), lz = Math.floor(next() * 16);
     const x = cx * 16 + lx, z = cz * 16 + lz;
-    let y = 32;
+    let y = 48; // scan from the top of the plausible-surface band down (see isDoltSpawnCell)
     while (y >= -20 && !isDoltSpawnCell(get, x, y, z)) y--;
     if (y >= -20 && !exists(x, y, z)) out.push({ x: x + 0.5, y: y + 1, z: z + 0.5 });
   }
