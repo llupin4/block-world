@@ -45,7 +45,7 @@ export class Recorder {
       }
     };
   }
-  attach(sim: { onIntent: any; onSpawn: any; onDespawn: any; toRecord: (e: Entity) => EntityRecord }): void {
+  attach(sim: { onIntent?: any; onSpawn?: any; onDespawn?: any; toRecord: (e: Entity) => EntityRecord }): void {
     sim.onIntent = this.onIntent;
     // A spawn event carries the entity's pose (via toRecord) so playback can re-spawn it.
     sim.onSpawn = (e: Entity) => this.events.push({ tick: this.lastTick, type: 'spawn', id: e.id, kindId: e.kind.id, pose: sim.toRecord(e) });
