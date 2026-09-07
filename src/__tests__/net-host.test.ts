@@ -3,6 +3,7 @@ import { LoopbackHub } from '../net/transport';
 import { HostSession } from '../net/host';
 import { type Msg } from '../net/messages';
 import { Block } from '../blocks';
+import { Persistence, InMemoryChunkStore } from '../persistence';
 
 const tick = (hub: LoopbackHub, host: HostSession, clients: { tick: (t: number) => void }[], n: number) => {
   for (let t = 0; t < n; t++) { host.tick(t); for (const c of clients) c.tick(t); hub.pump(t); }
@@ -77,5 +78,16 @@ describe('HostSession', () => {
     hub.disconnect('client'); // onPeerLeave fires on the host transport
     expect(host.sim.entities.has(id)).toBe(false); // despawned
     expect((host.persist.meta?.peers as Record<string, unknown> | undefined)?.dave).toBeDefined(); // pose saved
+  });
+
+  it('B1: persist is injected + lastStream is set + clock advances', () => {
+    const store = new InMemoryChunkStore();
+    const persist = new Persistence(store, 1234);
+    const host = new HostSession(new LoopbackHub().connect('host'), 1234, { persist });
+    expect(host.persist).toBe(persist); // the injected persist is used
+    host.tick(0); host.tick(1);
+    expect(host.worldTime.time).toBeGreaterThan(0); // the clock advanced (advanceClock)
+    expect(host.lastStream).not.toBeNull(); // the host streams (the spawn column ring)
+    expect(host.lastStream!.meshable.size).toBeGreaterThan(0); // the own anchor's ring is meshable
   });
 });

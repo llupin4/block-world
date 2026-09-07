@@ -1,9 +1,9 @@
 import { World, chunkKey, chunkOf } from '../world';
 import { WaterSim } from '../water';
-import { Sim, IdleController, type Controller, type Entity, type EntityRecord } from '../entity';
+import { Sim, IdleController, type Controller, type Entity, type EntityRecord, type ApplyHooks } from '../entity';
 import { Persistence, snapshotChunk, InMemoryChunkStore, type ChunkRecord, type WorldMeta } from '../persistence';
 import { Recorder, type ReplaySnapshot } from '../replay';
-import { update as streamUpdate, type Anchor, VIEW_RADIUS as SR_VIEW_RADIUS, CY_MIN, CY_MAX } from '../streaming';
+import { update as streamUpdate, type Anchor, type StreamingUpdate, VIEW_RADIUS as SR_VIEW_RADIUS, CY_MIN, CY_MAX } from '../streaming';
 import { TERRAIN_SEED, TerrainGen, generateChunkTerrain } from '../terrain';
 import { Block } from '../blocks';
 import { WorldTime } from '../time';
@@ -16,7 +16,7 @@ const STEP = 1 / 60, WATER_STRIDE = 30, WATER_PULSE = 1000;
 
 interface Peer { name: string; entityId: number; controller: RemoteController; loaded: Set<string> }
 
-export interface HostOpts { withOwnPlayer?: boolean }
+export interface HostOpts { withOwnPlayer?: boolean; persist?: Persistence; hooks?: ApplyHooks }
 
 // The authoritative host: owns the ONLY sim. Clients send intents; the host applies them
 // through each peer's RemoteController. One tick(tick) = one 60 Hz substep, in order:
@@ -30,6 +30,7 @@ export class HostSession {
   readonly recorder: Recorder;
   readonly spawn: { x: number; y: number; z: number };
   meshable = new Set<string>(); // chunk keys the host meshes (its own anchor's ring)
+  lastStream: StreamingUpdate | null = null; // the last substep's streaming result (the frame consumes it once per frame)
   worldTime = new WorldTime(); // the host's authoritative clock (advanced per tick; the client slews from it)
   private readonly transport: Transport;
   private readonly seed: number;
@@ -40,8 +41,8 @@ export class HostSession {
     this.transport = transport;
     this.seed = seed;
     this.waterSim = new WaterSim(this.world);
-    this.sim = new Sim(this.world, {}, seed);
-    this.persist = new Persistence(new InMemoryChunkStore(), seed);
+    this.persist = opts.persist ?? new Persistence(new InMemoryChunkStore(), seed);
+    this.sim = new Sim(this.world, opts.hooks ?? {}, seed);
     this.recorder = new Recorder(0);
     this.recorder.attach(this.sim);
     // Generate the spawn column (mirrors main.ts's boot column 0,·,2) and scan the topmost
@@ -205,7 +206,9 @@ export class HostSession {
     if (anchors.length) {
       const r = streamUpdate(this.world, anchors, this.persist, this.sim);
       this.meshable = r.meshable;
-      // [POC shortcut] no meshing/lighting on the host in phase A (the host is a pure sim)
+      this.lastStream = r; // [B1] the frame consumes it once per frame (consumeStream)
+    } else {
+      this.lastStream = null;
     }
     if (tick % NET_STATE_STRIDE === 0) this.broadcastState();
     if (tick % TIME_STRIDE === 0) this.broadcast({ type: 'time', tick: this.worldTime.tick, worldTime: this.worldTime.snapshot() });
