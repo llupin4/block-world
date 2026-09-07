@@ -6,6 +6,13 @@ import { type ReplaySnapshot } from '../replay';
 // `EntityRecord`, `WorldMeta`, `ReplaySnapshot` are reused verbatim as wire types.
 export const PROTOCOL_VERSION = 1;
 
+// Net pacing (the host's stride-based broadcasts + the client's remote ring). Pinned by the
+// session spec (phase A); the loopback harness measures latency, not these.
+export const NET_STATE_STRIDE = 3; // broadcast `state` every 3 substeps (~20 Hz @ 60 Hz sim)
+export const CELLS_FULL_THRESHOLD = 512; // a cell batch over this sends a full chunkRec instead of `cells`
+export const NET_REMOTE_RADIUS = 1; // the host keeps each remote's ring at this radius (VIEW_RADIUS − 1)
+export const TIME_STRIDE = 60; // broadcast `time` every 60 substeps (once per sim second)
+
 // [chunk-local idx, block, meta, wlevel, wsource, wplaced, wstream]
 export type CellWrite = [number, number, number, number, number, number, number];
 

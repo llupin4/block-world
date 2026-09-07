@@ -48,6 +48,14 @@ export function chunkOf(w: number): number {
   return Math.floor(w / CHUNK_SIZE);
 }
 
+/** One cell's final state (block + meta + water fields), for the host's per-tick cell broadcast. */
+export interface CellRead {
+  cx: number; cy: number; cz: number;
+  idx: number;
+  block: number; meta: number;
+  l: number; s: number; p: number; st: number; // wlevel, wsource, wplaced, wstream
+}
+
 export class World {
   private chunks = new Map<string, Chunk>();
   onCellWrite?: (x: number, y: number, z: number) => void; // multiplayer: a host cell changed (main.ts
@@ -109,6 +117,14 @@ export class World {
     const c = this.getChunk(chunkOf(wx), chunkOf(wy), chunkOf(wz));
     if (!c) return 0;
     return c.meta[localIndex(wx - c.cx * CHUNK_SIZE, wy - c.cy * CHUNK_SIZE, wz - c.cz * CHUNK_SIZE)];
+  }
+
+  /** One cell's final state (block + meta + water fields) for the host's per-tick cell broadcast. Null when the chunk is missing. */
+  readCell(wx: number, wy: number, wz: number): CellRead | null {
+    const c = this.getChunk(chunkOf(wx), chunkOf(wy), chunkOf(wz));
+    if (!c) return null;
+    const i = localIndex(wx - c.cx * CHUNK_SIZE, wy - c.cy * CHUNK_SIZE, wz - c.cz * CHUNK_SIZE);
+    return { cx: c.cx, cy: c.cy, cz: c.cz, idx: i, block: c.blocks[i], meta: c.meta[i], l: c.wlevel[i], s: c.wsource[i], p: c.wplaced[i], st: c.wstream[i] };
   }
 
   /**

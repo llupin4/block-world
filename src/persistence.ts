@@ -36,6 +36,7 @@ export interface WorldMeta {
   simPrng?: number;              // the sim PRNG state (phase 2 draws from it; phase 3 restores it)
   time: { time: number; tick: number; phaseTotal: number }; // WorldTime.snapshot()
   hotbar: { slots: number[]; selected: number };
+  peers?: Record<string, EntityRecord>; // multiplayer: a peer's pose keyed by name (restore on rejoin)
 }
 
 export type StoreValue = ChunkRecord | WorldMeta;
