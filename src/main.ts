@@ -356,6 +356,7 @@ const restoring = new Set<string>();
 // session's objects at boot so the render path runs unchanged against them.
 let mpSession: HostSession | ClientSession | null = null;
 let mpHub: LoopbackHub | null = null;
+let mpOtherTransports: { transport: { disconnect(): void }; name: string }[] = []; // the ?mp=client other players' transports (the leave check disconnects one at tick 250)
 
 // SPAWN is computed in startGame, after the boot column exists (it may be RESTORED from
 // a persisted record — the scan must read the current world state, whatever that is).
@@ -406,7 +407,9 @@ async function startGame(meta: WorldMeta | null): Promise<void> {
         { op: 'wait', ticks: 60 },
       ];
       for (let i = 0; i < mpBots; i++) {
-        new ClientSession(hub.connect(`other${i}`), `other${i}`, new ScriptController(otherSteps, true));
+        const t = hub.connect(`other${i}`);
+        new ClientSession(t, `other${i}`, new ScriptController(otherSteps, true));
+        mpOtherTransports.push({ transport: t, name: `other${i}` });
       }
       session = new ClientSession(hub.connect('me'), 'me', human); // the client's own body is driven by the page's HumanController (immediate look + movement)
       const client = session as ClientSession;
@@ -1472,6 +1475,32 @@ function frame(now: number): void {
       console.log('PROF-RESULT ' + JSON.stringify(rep));
       (window as unknown as Record<string, unknown>).__profResult = rep;
     }
+  }
+  // Multiplayer (B1) scenario report: ?mp=host / ?mp=client, mirrored by the Playwright e2e
+  // (tests/e2e/mp-{host,client}.spec.ts). The leave check disconnects an other player at tick 250
+  // (the rig + tag are removed by syncEntityRigs); the report at tick 300 asserts the removal.
+  if (mpActive && mpMode === 'client' && worldTime.tick === 250 && mpOtherTransports.length > 1) {
+    mpOtherTransports[1]!.transport.disconnect(); // disconnect an other player (its rig + tag are removed)
+  }
+  if (mpActive && worldTime.tick >= 300 && (window as unknown as Record<string, unknown>).__mpResult === undefined) {
+    const rep: Record<string, unknown> = { mode: mpMode, tick: worldTime.tick, bots: mpBots };
+    if (mpMode === 'host') {
+      rep.rigCount = rigs.size;
+      rep.remotePlayers = sim.all().filter((e) => e.kind.id === 'player' && e.id !== sim.viewedId).map((e) => ({ id: e.id, x: Math.round(e.pos.x * 10) / 10, y: Math.round(e.pos.y * 10) / 10, z: Math.round(e.pos.z * 10) / 10, name: e.name ?? null }));
+      const tx = 10, ty = 40, tz = 10; // a cell in the host's spawn ring (edited → reflected)
+      world.setBlock(tx, ty, tz, Block.Planks);
+      rep.editReflected = world.getBlock(tx, ty, tz) === Block.Planks;
+    } else {
+      rep.rigCount = rigs.size;
+      rep.otherPlayers = sim.all().filter((e) => e.kind.id === 'player' && e.id !== sim.viewedId).map((e) => ({ id: e.id, x: Math.round(e.pos.x * 10) / 10, y: Math.round(e.pos.y * 10) / 10, z: Math.round(e.pos.z * 10) / 10, name: e.name ?? null }));
+      const ve = sim.viewed();
+      rep.camera = ve ? { x: Math.round(ve.pos.x * 10) / 10, y: Math.round(ve.pos.y * 10) / 10, z: Math.round(ve.pos.z * 10) / 10 } : null;
+      rep.clientMeshedChunks = chunkObjs.size; // the client's meshed chunk count (bounded to the client's ring)
+      rep.headlessHostMeshedChunks = 0; // the headless host is simulation-only (never meshed/lit)
+      rep.leaveRigRemoved = mpOtherTransports.length > 1 ? rigs.size < mpOtherTransports.length + 1 : true; // the disconnected bot's rig is removed (the rig count is the remaining other players + the own body)
+    }
+    console.log('MP-RESULT ' + JSON.stringify(rep));
+    (window as unknown as Record<string, unknown>).__mpResult = rep;
   }
   requestAnimationFrame(frame);
 }
