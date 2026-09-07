@@ -18,8 +18,9 @@ import { sampleSky, createSky } from './sky';
 import { createClouds } from './clouds';
 import { LIGHT_AMBIENT, LIGHT_TICK_BUDGET } from './light';
 import { LightClient } from './light-transport';
-import { Persistence, applyRecord, type WorldMeta } from './persistence';
+import { Persistence, applyRecord, snapshotChunk, type WorldMeta } from './persistence';
 import { IndexedDBChunkStore } from './idb-store';
+import { Recorder, ReplayController, parseReplayParam, type Replay, type ReplaySnapshot } from './replay';
 
 // === boot ===
 
@@ -241,6 +242,7 @@ const sky = createSky(scene, FOG_AIR, FOG_WATER, BG_WATER);
 const clouds = createClouds(scene);
 const clockEl = document.getElementById('clock')!;
 let clockLabel = '';
+const scrubEl = document.getElementById('scrub')!; // phase 3: the recording/playback scrub HUD (ADR 0017)
 
 // === world-state ===
 
@@ -288,11 +290,22 @@ const streamControllerFor = (r: EntityRecord): Controller =>
 // store errors internally (D7: IDB failure → session-only persistence).
 let persist: Persistence;
 try {
-  persist = new Persistence(new IndexedDBChunkStore(), TERRAIN_SEED);
+  const idb = new IndexedDBChunkStore();
+  persist = new Persistence(idb, TERRAIN_SEED, idb); // the IDB store is both a ChunkStore and a ReplayStore (phase 3)
 } catch {
   persist = new Persistence(null, TERRAIN_SEED); // no IndexedDB in this environment
 }
 window.__persistDebug = persist; // debug surface: key set, warm cache, store counters
+
+// === Replay recording + playback (phase 3, ADR 0017) ===
+// The record: the sim's intent/spawn/despawn hooks feed a Recorder (delta-coded), which ends in
+// a Replay (snapshot + intent log) saved to the `replays` IDB store under `seed:replay:startTick`.
+// The playback: a fresh world restored from the snapshot, driven tick-by-tick by a
+// ReplayController feeding recorded intents back into the sim (deterministic — no human input).
+let recorder: Recorder | null = null;
+let recording = false;
+let playback: { replay: Replay; paused: boolean } | null = null;
+let replayControllerFor: ((r: EntityRecord) => Controller) | null = null;
 // Cold-restore in-flight keys (ADR 0014): one fetchRecord per key at a time. streaming
 // re-pends a key every frame until its record lands, so without this we would re-attach a
 // new .then continuation (re-running the whole apply) every frame. The key is added when
@@ -312,6 +325,45 @@ let booted = false;
 async function startGame(meta: WorldMeta | null): Promise<void> {
   if (booted) return;
   booted = true;
+  // === replay playback (phase 3, ADR 0017) ===
+  // ?replay=<key> loads a saved session: a fresh world restored from the snapshot, driven
+  // tick-by-tick by a ReplayController (deterministic — no human input). The boot-spawned
+  // player id 1 would shadow the snapshot's entity id 1, so skip the normal spawn/restore.
+  const replayKey = parseReplayParam(location.search);
+  if (replayKey) {
+    void persist.loadReplay(replayKey).then((replay) => {
+      if (!replay) { console.log(`[replay] not found: ${replayKey}`); return; }
+      for (const rec of replay.snapshot.chunks) {
+        applyRecord(world, rec); // chunk arrays only (the 2-arg form: no entity restore)
+        const c = world.getChunk(rec.cx, rec.cy, rec.cz);
+        if (c) {
+          waterSim.restore(c); // the water arrays ride in the chunk arrays; the world sim re-seats them
+          lightSim.load(rec.cx, rec.cy, rec.cz); // light is never persisted: the worker re-settles it
+          deferredFirstMesh.add(chunkKey(rec.cx, rec.cy, rec.cz));
+        }
+      }
+      sim.rng.restore(replay.simPrng);
+      worldTime.restore(replay.snapshot.meta.time); // the world tick resumes at the snapshot's tick (replay.startTick)
+      // Each entity is driven by a ReplayController: a pull-model controller that reports the
+      // LAST logged intent with tick <= the sim's current tick. The sim calls controller.intent(e,
+      // worldTime.tick) each substep, so the world is driven deterministically by the log (no
+      // human input). One ReplayController per entity (its own logged intents).
+      replayControllerFor = (r: EntityRecord): Controller =>
+        new ReplayController(replay.intents.filter((i) => i.entityId === r.id));
+      sim.restoreEntities(replay.snapshot.meta.entities, replayControllerFor);
+      // Derive the ghost (the single spectator); spawn one if the snapshot had none.
+      sim.ghostId = sim.all().find((e) => e.kind.id === 'spectator')?.id ?? 0;
+      if (sim.ghostId === 0) {
+        const v = sim.viewed() ?? sim.all()[0]!;
+        sim.ghostId = sim.spawn({ x: v.pos.x, y: v.pos.y + 4, z: v.pos.z }, new IdleController(), { kindId: 'spectator', baseController: new IdleController() }).id;
+      }
+      sim.setViewed(sim.ghostId); // camera follows the live spectator, not the recorded viewed entity
+      playback = { replay, paused: false };
+      console.log(`[replay] loaded ${replay.intents.length} deltas, playing ${replay.startTick}..${replay.endTick}`);
+    });
+    requestAnimationFrame(frame);
+    return;
+  }
   // T10: only the spawn column is generated up front — here it is either RESTORED (a
   // persisted, edited spawn column: arrays verbatim, settled = true, no settle) or
   // generated exactly as before (settled by the first tickStreaming's remesh path).
@@ -439,6 +491,10 @@ function syncHud(): void {
   const ve = sim.viewed();
   kindEl.textContent = ve ? `viewing: ${ve.kind.id}` : '';
   hotbarEl.classList.toggle('hidden', !ve || !ve.kind.canEdit);
+  // === replay scrub HUD (phase 3, ADR 0017) ===
+  if (recording) { scrubEl.classList.remove('hidden'); scrubEl.textContent = '● recording… (R to stop)'; }
+  else if (playback) { scrubEl.classList.remove('hidden'); scrubEl.textContent = `replay ${playback.paused ? '⏸ paused' : '▶ playing'}   t ${worldTime.tick} / ${playback.replay.endTick}`; }
+  else scrubEl.classList.add('hidden');
 }
 
 // === chunks-meshing ===
@@ -526,6 +582,13 @@ camera.rotation.order = 'YXZ';
 function syncCamera(): void {
   const ve = sim.viewed();
   if (!ve) return;
+  if (playback) {
+    // Live-spectator head-follow (phase 3): the camera follows the ghost, but its LOOK turns with
+    // the live mouse (independent of the recorded world) — the ghost's recorded look is overridden.
+    const look = human.getLook();
+    ve.yaw = look.yaw;
+    ve.pitch = look.pitch;
+  }
   camera.position.set(ve.pos.x, ve.pos.y + ve.kind.eye, ve.pos.z);
   camera.rotation.set(ve.pitch, ve.yaw, 0);
 }
@@ -546,6 +609,7 @@ window.addEventListener('keydown', (e) => {
   if (e.repeat) return;
   if (e.code === 'KeyF') human.toggleFly(); // fly toggle (a one-tick edge the sim consumes)
   if (e.code === 'KeyN') human.toggleNoclip(); // noclip toggle
+  if (e.code === 'KeyR') toggleRecording(); // record start/stop (phase 3, ADR 0017)
   if (e.code === 'KeyE') togglePalette(); // creative palette: open (unlock) / close (re-lock)
   if (e.code === 'KeyH') toggleHelp(); // help overlay: same open (unlock) / close (re-lock)
   if (e.code === 'KeyC') setWireframe(!wireframeOn); // wireframe (PROJECT.md §14: chunk-edge bugs)
@@ -675,6 +739,61 @@ function onPossess(): void {
     returnHome(sim, human); // possessing/ghost -> back to the body
   }
 }
+
+// === replay recording (phase 3, ADR 0017) ===
+// R toggles a recording: the sim's intent/spawn/despawn hooks feed a delta-coded Recorder, and on
+// stop the current world is snapshotted (chunk arrays + meta) into a Replay saved to the `replays`
+// IDB store under `seed:replay:startTick`. The snapshot is the initial state; the intent log is
+// the delta (deterministic — replaying it into a restored snapshot reproduces the session).
+function snapshotState(): ReplaySnapshot {
+  return {
+    chunks: [...world.allChunks()].map((c) => snapshotChunk(c)),
+    meta: {
+      v: 2, seed: TERRAIN_SEED, entities: sim.all().map((e) => sim.toRecord(e)), viewedEntityId: sim.viewedId,
+      time: worldTime.snapshot(),
+      hotbar: { slots: [...hotbar.slots], selected: hotbar.selected },
+      simPrng: sim.rng.state(),
+    },
+  };
+}
+
+let recordStartTick = 0;
+let recordStartPrng = 0;
+let recordStartSnapshot: ReplaySnapshot | null = null;
+
+function startRecording(): void {
+  // The snapshot is the INITIAL state (record start) — the replay restores it, then plays back
+  // the intent log (record start -> stop) deterministically. Capture the tick + PRNG + snapshot NOW.
+  recordStartTick = worldTime.tick;
+  recordStartPrng = sim.rng.state();
+  recordStartSnapshot = snapshotState();
+  const rec = new Recorder(recordStartTick);
+  rec.attach(sim); // wire the sim's onIntent/onSpawn/onDespawn to the Recorder
+  recorder = rec;
+  recording = true;
+  playback = null; // a recording is a live session, not a playback
+  console.log(`[replay] recording from tick ${recordStartTick} (R to stop)`);
+}
+
+function stopRecording(): void {
+  if (!recorder || !recording || !recordStartSnapshot) return;
+  const replay: Replay = {
+    seed: TERRAIN_SEED,
+    startTick: recordStartTick,
+    endTick: worldTime.tick,
+    simPrng: recordStartPrng, // the PRNG at record start (restored before replaying)
+    events: recorder.events,
+    intents: recorder.intents, // delta-coded: an entity with no entry at a tick repeats its previous intent
+    snapshot: recordStartSnapshot, // the initial state (record start)
+  };
+  const key = `${TERRAIN_SEED}:replay:${replay.startTick}`;
+  persist.saveReplay(key, replay);
+  sim.onIntent = sim.onSpawn = sim.onDespawn = undefined; // detach the Recorder
+  recorder = null; recording = false; recordStartSnapshot = null;
+  console.log(`[replay] saved ${key} — ${replay.intents.length} intents, ${replay.events.length} events (replay with ?replay=${key})`);
+}
+
+function toggleRecording(): void { if (recording) stopRecording(); else startRecording(); }
 
 // === ui ===
 
@@ -959,8 +1078,10 @@ function frame(now: number): void {
   human.heldBlock = hotbar.block; // sync the held block for intents (per frame, before the substeps)
   while (acc >= STEP) {
     acc -= STEP;
-    sim.tick(STEP, worldTime.tick); // the sim heartbeat: intent -> applyIntent -> stepEntity, in id order (fall-out-of-world handled inside)
+    if (playback && playback.paused) continue; // a paused replay holds the world (the substep is consumed but nothing advances)
+    sim.tick(STEP, worldTime.tick); // the sim heartbeat: intent -> applyIntent -> stepEntity (ReplayController-driven during playback — deterministic)
     worldTime.advance(STEP);
+    if (playback && worldTime.tick >= playback.replay.endTick) playback.paused = true; // reached the end of the session
   }
   tickStreaming(); // ONCE per frame (was inside the substep loop, where the frame-time clamp multiplied the streaming budget by the substep count, up to ~12 chunks/frame)
   if (profRig) {
