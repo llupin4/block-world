@@ -21,6 +21,11 @@ import { LightClient } from './light-transport';
 import { Persistence, applyRecord, snapshotChunk, type WorldMeta, type PersistSource } from './persistence';
 import { IndexedDBChunkStore } from './idb-store';
 import { Recorder, ReplayController, parseReplayParam, viewedAt, type Replay, type ReplaySnapshot } from './replay';
+// Multiplayer (B1): the in-page LoopbackHub + the HostSession/ClientSession the render path drives.
+import { LoopbackHub } from './net/transport';
+import { HostSession } from './net/host';
+import { ClientSession } from './net/client';
+import { ScriptController, type ScriptStep } from './entity';
 
 // === boot ===
 
@@ -237,7 +242,15 @@ const startPhase = phaseParam !== null && phaseParam !== '' && Number.isFinite(+
 // renderer.render (the SwiftShader fallback; the report records which mode ran).
 const profMode = new URLSearchParams(location.search).get('prof') === 'remesh';
 const profNoRender = profMode && new URLSearchParams(location.search).has('norender');
-const worldTime = new WorldTime(startPhase);
+// ?mp=host|client (B1): drive the render path with a HostSession / ClientSession over an in-page
+// LoopbackHub. ?mp wins over ?replay/?prof (mutually exclusive; the replay/prof boot branches are
+// skipped). ?phase/?dbg still apply. ?mp=host&bots=N (default 2); ?mp=client&bots=N (default 1).
+const mpMode = new URLSearchParams(location.search).get('mp'); // 'host' | 'client' | null
+const mpActive = mpMode === 'host' || mpMode === 'client';
+const mpBots = mpActive
+  ? Math.max(1, parseInt(new URLSearchParams(location.search).get('bots') ?? (mpMode === 'host' ? '2' : '1'), 10) || (mpMode === 'host' ? 2 : 1))
+  : 0;
+let worldTime = new WorldTime(startPhase); // let: the B1 boot reassigns it to the session's clock
 const sky = createSky(scene, FOG_AIR, FOG_WATER, BG_WATER);
 const clouds = createClouds(scene);
 const clockEl = document.getElementById('clock')!;
@@ -256,7 +269,7 @@ scrubQuitEl.addEventListener('click', () => {
 
 // === world-state ===
 
-const world = new World();
+let world = new World(); // let: the B1 boot reassigns it to the session's world
 
 // T10 streams the rest of the world on demand; the spawn column itself is restored or
 // generated in startGame (the boot gate below), so the measured-spawn scan runs after it.
@@ -265,14 +278,16 @@ const world = new World();
 // settled per chunk as streaming loads them (tickStreaming) and advanced on the tick
 // heartbeat (one pulse per WATER_STRIDE substeps; ADR 0011). The boot-generated spawn
 // column is settled by the first tickStreaming, before the first rendered frame, so
-// caves read as already filled.
-const waterSim = new WaterSim(world);
+// caves read as already filled. The client (B1) has no WaterSim (water arrives via cells), so this
+// is nullable and the water-pulse / water-settle paths guard on it.
+let waterSim = new WaterSim(world);
 
 // Light sim (PROJECT.md §18, src/light.ts): two 0..15 fields streamed with each chunk.
 // Runs in a web worker (ADR 0012): the pin-identical LightSim drains/settles over a mirror of
 // the chunk fields; the replies push the touched chunks' fields back into the world and
-// feed the frame-end re-mesh via `touched` (the sim.touched contract, one reply late).
-const lightSim = new LightClient(world, worldTime);
+// feed the frame-end re-mesh via `touched` (the sim.touched contract, one reply late). The B1 boot
+// recreates this for the session's world + clock.
+let lightSim = new LightClient(world, worldTime);
 window.__lightDebug = lightSim; // debug surface: cumulative pops/seeds/fieldChanges, latest queue, lastTick
 
 // The entity sim + its edit hooks (ADR 0015): world mutations flow through applyIntent,
@@ -284,7 +299,7 @@ const simHooks: ApplyHooks = {
   waterEdit: (x, y, z, block) => { waterSim.edit(x, y, z, block); },
   springTarget: (x, y, z) => waterSim.cellState(x, y, z).p === 1,
 };
-const sim = new Sim(world, simHooks, TERRAIN_SEED);
+let sim = new Sim(world, simHooks, TERRAIN_SEED); // let: the B1 boot reassigns it to the session's sim
 // Frozen non-viewed entities (restored from chunks / the meta) run on the idle controller —
 // except a deer (kindId 'deer'; old saves use 'dolt'), which reattaches its wander AI on
 // walk-back. Keying off the kind (not the saved controllerKind) means a dolt persisted while
@@ -334,6 +349,14 @@ let replayControllerFor: ((r: EntityRecord) => Controller) | null = null;
 // the fetch starts and removed when it settles (apply or drop).
 const restoring = new Set<string>();
 
+// === Multiplayer (B1) ===
+// The B1 session (a HostSession for ?mp=host, a ClientSession for ?mp=client) that the frame loop
+// drives (session.tick per substep) + the in-page LoopbackHub (pumped per substep). Null in
+// single-player. The module globals (world/sim/waterSim/worldTime) are reassigned to the
+// session's objects at boot so the render path runs unchanged against them.
+let mpSession: HostSession | ClientSession | null = null;
+let mpHub: LoopbackHub | null = null;
+
 // SPAWN is computed in startGame, after the boot column exists (it may be RESTORED from
 // a persisted record — the scan must read the current world state, whatever that is).
 let SPAWN: THREE.Vector3;
@@ -347,6 +370,57 @@ let booted = false;
 async function startGame(meta: WorldMeta | null): Promise<void> {
   if (booted) return;
   booted = true;
+  // === multiplayer (B1) ===
+  // ?mp wins over ?replay/?prof. The session is created + the module globals are reassigned to the
+  // session's objects so the whole render path (light, re-mesh, syncCamera, syncEntityRigs) runs
+  // unchanged against the session's world/sim. The light worker is recreated for the session's
+  // world + worldTime. The in-page LoopbackHub is pumped per substep (the frame loop).
+  if (mpActive) {
+    const hub = new LoopbackHub();
+    let session: HostSession | ClientSession;
+    if (mpMode === 'host') {
+      // The host renders its authoritative world + the bot clients' remote players (their rigs
+      // appear + move as their intents are applied by the host's sim).
+      session = new HostSession(hub.connect('host'), TERRAIN_SEED, { withOwnPlayer: true, persist, hooks: simHooks });
+      const host = session as HostSession;
+      const botSteps: ScriptStep[] = [
+        { op: 'walkTo', x: 8, z: 48, timeout: 120 },
+        { op: 'walkTo', x: 12, z: 44, timeout: 120 },
+        { op: 'walkTo', x: 6, z: 50, timeout: 120 },
+        { op: 'wait', ticks: 60 },
+      ];
+      for (let i = 0; i < mpBots; i++) {
+        const c = new ClientSession(hub.connect(`bot${i}`), `bot${i}`, new ScriptController(botSteps, true));
+        c.setLightEdit(() => { /* the bot clients are remote (no page light); no-op */ });
+      }
+      world = host.world; sim = host.sim; waterSim = host.waterSim; worldTime = host.worldTime;
+    } else {
+      // The client renders its pristine-terrain world + host-fed cells + the other players'
+      // interpolated rigs + its own body. The in-page headless host is simulation-only (never
+      // meshed/lit — it is not the frame loop's world). waterSim stays the page's (the frame loop
+      // + consumeStream skip water work for the client via the mode check — it has no WaterSim).
+      const headless = new HostSession(hub.connect('headless'), TERRAIN_SEED, { withOwnPlayer: false });
+      const otherSteps: ScriptStep[] = [
+        { op: 'walkTo', x: 8, z: 48, timeout: 120 },
+        { op: 'walkTo', x: 12, z: 44, timeout: 120 },
+        { op: 'wait', ticks: 60 },
+      ];
+      for (let i = 0; i < mpBots; i++) {
+        new ClientSession(hub.connect(`other${i}`), `other${i}`, new ScriptController(otherSteps, true));
+      }
+      session = new ClientSession(hub.connect('me'), 'me', human); // the client's own body is driven by the page's HumanController (immediate look + movement)
+      const client = session as ClientSession;
+      client.setLightEdit((x, y, z) => { lightSim?.edit(x, y, z); }); // the client's light tracks the host's edits
+      world = client.world; sim = client.sim; worldTime = client.worldTime;
+    }
+    lightSim = new LightClient(world, worldTime); // the page's light worker runs on the session's world
+    window.__lightDebug = lightSim;
+    mpSession = session;
+    mpHub = hub;
+    syncCamera();
+    requestAnimationFrame(frame);
+    return;
+  }
   // === replay playback (phase 3, ADR 0017) ===
   // ?replay=<key> loads a saved session: a fresh world restored from the snapshot, driven
   // tick-by-tick by a ReplayController (deterministic — no human input). The boot-spawned
