@@ -34,7 +34,7 @@ of truth for targeting.
 
 ```ts
 interface EntityKind {
-  id: string;            // 'player' | 'spectator' | 'dolt'
+  id: string;            // 'player' | 'spectator' | 'deer'
   half: number;          // AABB half-width x/z
   height: number;        // feet → top of head
   eye: number;           // eye height above the feet

@@ -57,7 +57,7 @@ Existing only: TypeScript + vitest + three. `fake-indexeddb` is already a dev de
 
 ## Pinned numbers (must not regress)
 
-All phase 1/2 pins unchanged (`STEP 1/60`, `TERRAIN_SEED 1234`, the dolt/spectator kinds,
+All phase 1/2 pins unchanged (`STEP 1/60`, `TERRAIN_SEED 1234`, the deer/spectator kinds,
 `WATER_STRIDE 30`/`WATER_PULSE 1000`, `water-load` PIN 1,231,601 / 10,690, `mesher-budget`).
 The replay round-trip and seek tests are pinned at **1200 ticks**; the comparison is
 byte-identical for chunk arrays and 1e-9 for entity transforms.
@@ -307,7 +307,7 @@ feat: replay.ts — the replay model, Recorder (delta-coded), ReplayController, 
 
 **Files:** `src/__tests__/replay.test.ts` (append)
 
-This is the load-bearing test. It records a 1200-tick session (a bot building, a dolt
+This is the load-bearing test. It records a 1200-tick session (a bot building, a deer
 wandering, a spring placed), replays it on a fresh world, and asserts byte/1e-9 identity.
 **If it fails, the bug is in the sim — fix the sim, not the test.**
 
@@ -341,7 +341,7 @@ function snapshotState(world: World, sim: Sim, worldTime: WorldTime): ReplaySnap
 }
 
 // Drive the entity sim + water sim + world time for n ticks EXACTLY as main.ts does (ADR 0011).
-// `onTick` (if given) runs AFTER sim.tick for each tick — used to (a) spawn a mid-session dolt
+// `onTick` (if given) runs AFTER sim.tick for each tick — used to (a) spawn a mid-session deer
 // in the recording and (b) re-apply spawn events in the replay (applySpawnAt).
 function runTicks(world: World, sim: Sim, waterSim: WaterSim, worldTime: WorldTime, n: number, onTick?: (tick: number) => void): void {
   for (let i = 0; i < n; i++) {
@@ -363,7 +363,7 @@ function recordSession(): { replay: Replay; chunks: number[]; entities: EntityRe
   const worldTime = new WorldTime(0);
   const sim = makeSim(world, waterSim);
   // A bot building (dig the wall, cap it with planks) and a player placing a spring — both in
-  // the snapshot. The dolt spawns MID-session (a spawn EVENT, not in the snapshot) so the
+  // the snapshot. The deer spawns MID-session (a spawn EVENT, not in the snapshot) so the
   // replay must re-apply it via applySpawnAt.
   const botScript = [{ op: 'lookAt', x: 0, y: 6, z: 0 }, { op: 'dig', ticks: 20 }, { op: 'place', block: Block.Planks, ticks: 20 }, { op: 'wait', ticks: 1160 }] as const;
   sim.spawn({ x: 0.5, y: 5, z: 4 }, new ScriptController([...botScript]), { baseController: new ScriptController([...botScript]) });
@@ -373,11 +373,11 @@ function recordSession(): { replay: Replay; chunks: number[]; entities: EntityRe
 
   const rec = new Recorder(worldTime.tick);
   rec.attach(sim);
-  const snapshot = snapshotState(world, sim, worldTime); // bot + player only (no dolt yet)
+  const snapshot = snapshotState(world, sim, worldTime); // bot + player only (no deer yet)
   runTicks(world, sim, waterSim, worldTime, 1200, (t) => {
-    if (t === 100) { // mid-session dolt spawn -> a spawn event (fires onSpawn, tick = 100)
-      const doltMob = new MobController((x, y, z) => world.getBlock(x, y, z), () => sim.rng.next());
-      sim.spawn({ x: 10, y: 5, z: 10 }, doltMob, { kindId: 'dolt', baseController: doltMob });
+    if (t === 100) { // mid-session deer spawn -> a spawn event (fires onSpawn, tick = 100)
+      const deerMob = new MobController((x, y, z) => world.getBlock(x, y, z), () => sim.rng.next());
+      sim.spawn({ x: 10, y: 5, z: 10 }, deerMob, { kindId: 'deer', baseController: deerMob });
     }
   });
   const replay: Replay = { seed: TERRAIN_SEED, startTick: 0, endTick: 1200, simPrng: snapshot.meta.simPrng, events: rec.events, intents: rec.intents, snapshot };
@@ -397,7 +397,7 @@ function replayTo(replay: Replay, toTick: number): { chunks: number[]; entities:
   const controllerFor = (r: EntityRecord): Controller => {
     const entries = replay.intents.filter((e) => e.entityId === r.id);
     if (entries.length) return new ReplayController(entries);
-    if (r.kindId === 'dolt') return new MobController((x, y, z) => world.getBlock(x, y, z), () => sim.rng.next());
+    if (r.kindId === 'deer') return new MobController((x, y, z) => world.getBlock(x, y, z), () => sim.rng.next());
     return new IdleController();
   };
   sim.restoreEntities(replay.snapshot.meta.entities, controllerFor);
@@ -622,7 +622,7 @@ if (replayKey) {
       if (r.kindId === 'spectator') return human; // the live spectator (the viewer)
       const entries = replay.intents.filter((e) => e.entityId === r.id);
       if (entries.length) return new ReplayController(entries);
-      if (r.kindId === 'dolt') return new MobController((x, y, z) => world.getBlock(x, y, z), () => sim.rng.next());
+      if (r.kindId === 'deer') return new MobController((x, y, z) => world.getBlock(x, y, z), () => sim.rng.next());
       return new IdleController();
     };
     sim.restoreEntities(replay.snapshot.meta.entities, replayControllerFor);
@@ -690,7 +690,7 @@ determinism gate) and `npm run build` (clean).
 
 **Step 2: Browser acceptance** (manual; `npm run dev`):
 - `R` records a session; `R` again saves it (a console line reports the delta count + tick
-  range). Reload with `?replay=<key>`: the session plays back — the bot rebuilds, the dolt
+  range). Reload with `?replay=<key>`: the session plays back — the bot rebuilds, the deer
   re-wanders, the spring re-flows, byte-identically to the original.
 - The scrub HUD pauses/×1/×4/step works. The spectator can fly around the playback (the
   viewer is a free ghost) without perturbing it.
@@ -705,7 +705,7 @@ tick-ordered PRNG, no wall clock, no insertion-order physics, light excluded) an
 round-trip + seek gates; the IDB `replays` store (key `${seed}:replay:${startTick}`, the
 snapshot reusing ADR 0014 shapes — no new format) and its **v2 bump** (an existing v1 browser
 DB never fires `onupgradeneeded` on a v1 open, so `replays` is only created at v2);
-mid-session **spawn-event replay** (a dolt born during the session is re-applied at its spawn
+mid-session **spawn-event replay** (a deer born during the session is re-applied at its spawn
 tick via `applySpawnAt`, not only at the snapshot); the `?replay` **boot ordering** (skip the
 normal spawn/restore so a boot-spawned id 1 can't shadow the snapshot's id 1); the spectator
 as a non-perturbing live viewer whose controller is the live `human` (the camera follows the
@@ -745,7 +745,7 @@ docs: ADR 0017 — replay (snapshot + intent log); TODO multiplayer reframed
   deterministic given the PRNG) ✓; playback (load snapshot into a fresh world + sim, run
   ticks; the `?replay` boot skips the normal spawn/restore so no id-1 shadow) ✓; the
   spectator viewable with a live human controller (no world-changing intents; the camera
-  follows the ghost, not the recorded viewed entity); the round-trip determinism test (bot building + dolt wandering + spring placed, 1200
+  follows the ghost, not the recorded viewed entity); the round-trip determinism test (bot building + deer wandering + spring placed, 1200
   ticks, byte/1e-9) ✓ + the seek test ✓; `R` start/stop → IDB `${seed}:replay:${startTick}`
   ✓; `?replay=<key>` load + minimal scrub HUD (pause/×1/×4/step) ✓; the "nondeterminism is a
   sim bug" stance ✓; ADR 0017 ✓; the TODO multiplayer item ✓.
@@ -762,7 +762,7 @@ docs: ADR 0017 — replay (snapshot + intent log); TODO multiplayer reframed
   world/sim (a fresh boot) rather than a separate instance — a POC simplification (`[POC
   shortcut]`); (c) the scrub HUD is minimal by design; (d) `InMemoryReplayStore` is for node
   tests; the browser uses the IDB `replays` store; (e) the `recordSession` helper spawns the
-  dolt MID-session (t===100) specifically to exercise spawn-event replay; (f) the IDB store
+  deer MID-session (t===100) specifically to exercise spawn-event replay; (f) the IDB store
   is bumped to **v2** so the `replays` store is actually created for returning (v1) browser
   DBs — the fresh-DB node test alone would not catch this.
 - **Execution order:** Tasks 1→6 in order; Task 3 (the gate) is the critical one; Task 5 is

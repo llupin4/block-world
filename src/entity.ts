@@ -10,7 +10,7 @@ export interface Vec3 { x: number; y: number; z: number }
 // EntityKind: the tunable body of an entity. `player` is built from the old player.ts
 // exports (the single source of the numbers); the other kinds land in phase 2.
 export interface EntityKind {
-  id: string;            // 'player' | 'spectator' | 'dolt'
+  id: string;            // 'player' | 'spectator' | 'deer'
   half: number;          // AABB half-width x/z
   height: number;        // feet -> top of head
   eye: number;           // eye height above the feet
@@ -30,8 +30,8 @@ export const KINDS: Record<string, EntityKind> = {
     canFly: true, canNoclip: true, canEdit: true,
     collides: true,
   },
-  dolt: {
-    id: 'dolt',
+  deer: {
+    id: 'deer',
     half: 0.45, height: 0.9, eye: 0.7,
     walkSpeed: 1.6, swimSpeed: 1.0, jumpVel: 8.0,
     flySpeed: 0, flyVSpeed: 0,
@@ -406,7 +406,7 @@ export function deriveSimSeed(seed: number): number {
 
 export type GetBlock = (x: number, y: number, z: number) => number;
 
-/** Refuse a step into water or off a >=3-block drop (the dolt's local obstacle rule). */
+/** Refuse a step into water or off a >=3-block drop (the deer's local obstacle rule). */
 export function mobRefuseStep(getBlock: GetBlock, x: number, y: number, z: number, heading: number): 'water' | 'drop' | null {
   const fx = -Math.sin(heading), fz = -Math.cos(heading);
   const ax = Math.floor(x + fx), az = Math.floor(z + fz);
@@ -434,7 +434,7 @@ export function nearestGrass(getBlock: GetBlock, x: number, y: number, z: number
 }
 
 /**
- * The dolt's wander AI. Draws EVERY random from the sim PRNG (`rand`) — the sim's fixed
+ * The deer's wander AI. Draws EVERY random from the sim PRNG (`rand`) — the sim's fixed
  * id-order iteration keeps the draw sequence deterministic (never Math.random, never a
  * wall clock). Modes: wander (walk a random number of ticks) and idle (stand, then
  * re-face — sometimes toward the nearest grass). A stall (forward intent but no progress)
@@ -603,7 +603,7 @@ export class Sim {
    *  boot-column records restore before the meta). */
   restoreEntity(rec: EntityRecord, controller: Controller): Entity | null {
     if (this.entities.has(rec.id)) return null;
-    const kind = KINDS[rec.kindId] ?? KINDS.player;
+    const kind = KINDS[rec.kindId] ?? (rec.kindId === 'dolt' ? KINDS.deer : KINDS.player); // legacy 'dolt' saves → deer
     const e: Entity = {
       id: rec.id, kind,
       pos: { x: rec.x, y: rec.y, z: rec.z },

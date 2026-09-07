@@ -10,7 +10,7 @@ import { ProfRig, meshVerts, PROF_WORST_KEY } from './prof-rig';
 import { toGeometry } from './geometry';
 import { Sim, HumanController, IdleController, MobController, eyeOf, lookDir, breakRayTarget, possess, returnHome, spectate, type ApplyHooks, type Controller, type EntityRecord } from './entity';
 import { raycastVoxel, pickEntity, REACH, type RayHit } from './raycast';
-import { spawnDolts } from './spawn';
+import { spawnDeer } from './spawn';
 import { buildEntityRig, updateEntityRig, advanceRigAnim, newRigAnim, RIG_COLORS, LEG_RATE, buildPartAtlas, type Rig, type RigAnim } from './entity-mesh';
 import { WaterSim } from './water';
 import { WorldTime, formatClock, tickCrossed } from './time';
@@ -274,9 +274,11 @@ const simHooks: ApplyHooks = {
 };
 const sim = new Sim(world, simHooks, TERRAIN_SEED);
 // Frozen non-viewed entities (restored from chunks / the meta) run on the idle controller —
-// except a dolt (controllerKind 'mob'), which reattaches its wander AI on walk-back.
+// except a deer (kindId 'deer'; old saves use 'dolt'), which reattaches its wander AI on
+// walk-back. Keying off the kind (not the saved controllerKind) means a dolt persisted while
+// it was still idle (pre-mob save) still wakes up and wanders on restore.
 const streamControllerFor = (r: EntityRecord): Controller =>
-  r.controllerKind === 'mob'
+  (r.kindId === 'deer' || r.kindId === 'dolt')
     ? new MobController((x, y, z) => world.getBlock(x, y, z), () => sim.rng.next())
     : new IdleController();
 
@@ -344,12 +346,16 @@ async function startGame(meta: WorldMeta | null): Promise<void> {
   sim.respawn = { x: SPAWN.x, y: SPAWN.y, z: SPAWN.z }; // the sim's fall-out-of-world respawn point (both branches)
   if (meta) {
     worldTime.restore(meta.time);
-    // Restore controllers: a dolt (controllerKind 'mob') reattaches its wander AI; the viewed
-    // non-mob entity (the home body) gets the human controller; the rest stand idle.
+    // Restore controllers: the viewed entity is driven by the human (possession); a deer
+    // (kindId 'deer'; old saves use 'dolt') reattaches its wander AI; the rest stand idle
+    // (e.g. the home body when left). Keying off the kind — not the saved controllerKind —
+    // means a dolt persisted while idle (pre-mob save) still wanders on restore.
     const controllerFor = (r: EntityRecord): Controller =>
-      r.controllerKind === 'mob'
-        ? new MobController((x, y, z) => world.getBlock(x, y, z), () => sim.rng.next())
-        : (r.id === meta.viewedEntityId ? human : new IdleController());
+      r.id === meta.viewedEntityId
+        ? human
+        : ((r.kindId === 'deer' || r.kindId === 'dolt')
+            ? new MobController((x, y, z) => world.getBlock(x, y, z), () => sim.rng.next())
+            : new IdleController());
     sim.restoreEntities(meta.entities, controllerFor);
     sim.setViewed(meta.viewedEntityId);
     // The home body idles when left (not the human it was restored with); derive home/ghost from
@@ -428,7 +434,7 @@ function syncEntityRigs(dt: number): void {
 }
 
 // The HUD kind label + hotbar visibility: show what you are viewing, and hide the hotbar when
-// the viewed kind can't edit (a dolt / the ghost can't place blocks).
+// the viewed kind can't edit (a deer / the ghost can't place blocks).
 function syncHud(): void {
   const ve = sim.viewed();
   kindEl.textContent = ve ? `viewing: ${ve.kind.id}` : '';
@@ -834,8 +840,8 @@ function tickStreaming(): void {
     lightSim.unload(c.cx, c.cy, c.cz); // the worker re-seeds the surviving seams (the darkness wave)
     pendingRebuild.delete(chunkKey(c.cx, c.cy, c.cz)); // don't re-mesh a chunk we just unloaded
     deferredFirstMesh.delete(chunkKey(c.cx, c.cy, c.cz)); // it may still be waiting for its first mesh
-    for (const d of sim.entitiesInChunk(c.cx, c.cy, c.cz)) // the dolts leaving with the chunk persist via the entity-ride; restore on walk-back
-      if (d.kind.id === 'dolt') sim.despawn(d.id);
+    for (const d of sim.entitiesInChunk(c.cx, c.cy, c.cz)) // the deer leaving with the chunk persist via the entity-ride; restore on walk-back
+      if (d.kind.id === 'deer' || d.kind.id === 'dolt') sim.despawn(d.id);
   }
   if (r.unloaded.length) persist.saveMeta(metaSnapshot()); // the world just changed durably (a chunk left): refresh the save point
   for (const c of r.rebuilt) {
@@ -843,7 +849,7 @@ function tickStreaming(): void {
     lightSim.load(c.cx, c.cy, c.cz); // the worker settles it; the fields land with the tick reply
     deferredFirstMesh.add(chunkKey(c.cx, c.cy, c.cz)); // ADR 0012: the first/fresh mesh waits a guaranteed frame (replies are macrotasks — a load-frame drain would mesh from still-zero light); the frame end moves it into pendingRebuild after the first reply has landed
   }
-  for (const c of r.rebuilt) spawnDolts(world, sim, c.cx, c.cz); // dolts into freshly GENERATED (rebuilt) columns only — restored chunks already carry their persisted dolts (re-rolling would double-populate and diverge)
+  for (const c of r.rebuilt) spawnDeer(world, sim, c.cx, c.cz); // deer into freshly GENERATED (rebuilt) columns only — restored chunks already carry their persisted deer (re-rolling would double-populate and diverge)
   for (const c of r.restored) {
     const ch = world.getChunk(c.cx, c.cy, c.cz)!;
     waterSim.restore(ch); // D1: water restored as-is (settled = true) — rebuild springs/waiting/queue, NO settle

@@ -27,7 +27,7 @@ export function legAngles(anim: RigAnim, amp = 0.5): [number, number, number, nu
 
 interface Part { name: string; size: [number, number, number]; offset: [number, number, number]; leg?: number; head?: boolean; }
 
-const DOLT_PARTS: Part[] = [
+const DEER_PARTS: Part[] = [
   { name: 'body', size: [0.5, 0.5, 0.9], offset: [0, 0.55, 0] },
   { name: 'head', size: [0.35, 0.35, 0.4], offset: [0, 0.78, -0.5], head: true },
   { name: 'legFL', size: [0.16, 0.4, 0.16], offset: [0.28, 0.2, -0.3], leg: 0 },
@@ -52,8 +52,8 @@ export interface Rig {
 // part-atlas in the same style as the block atlas: a deterministic speckle (fixed seed, so
 // the rig looks identical across sessions/replays) of the kind's base colour, crisp
 // NearestFilter. (This is the phase 2 texture — not a punt; see the spec's Rendering.)
-export const RIG_COLORS: Record<string, number> = { dolt: 0x9a7b4f, player: 0x3f6fb5 };
-export const LEG_RATE: Record<string, number> = { dolt: 6, player: 4 };
+export const RIG_COLORS: Record<string, number> = { deer: 0x9a7b4f, player: 0x3f6fb5 };
+export const LEG_RATE: Record<string, number> = { deer: 6, player: 4 };
 
 /** A small speckled canvas texture for a kind's material (block-atlas style). Deterministic
  *  (fixed-seed jitter) so the rig looks identical across sessions/replays. */
@@ -80,7 +80,7 @@ export function buildPartAtlas(base: number, seed: number): THREE.CanvasTexture 
 }
 
 export function buildEntityRig(kind: EntityKind, material: THREE.Material): Rig | null {
-  const parts = kind.id === 'dolt' ? DOLT_PARTS : kind.id === 'player' ? PLAYER_PARTS : null;
+  const parts = kind.id === 'deer' ? DEER_PARTS : kind.id === 'player' ? PLAYER_PARTS : null;
   if (!parts) return null; // spectator: no rig
   const root = new THREE.Group();
   const head = new THREE.Group();

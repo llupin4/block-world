@@ -248,7 +248,7 @@ describe('entity — Sim (registry + tick)', () => {
     sim.respawn = { x: 0, y: 5, z: 0 };
     const p = sim.spawn({ x: 0, y: -40, z: 0 }, new IdleController()); // below WORLD_Y_MIN
     const mob = sim.spawn({ x: 5, y: -40, z: 0 }, new IdleController());
-    mob.kind = { ...mob.kind, id: 'dolt' }; // a non-player kind
+    mob.kind = { ...mob.kind, id: 'deer' }; // a non-player kind
     sim.tick(STEP, 0);
     expect(sim.viewed()?.id).toBe(p.id);
     expect(p.pos).toEqual({ x: 0, y: 5, z: 0 }); // respawned
@@ -341,9 +341,9 @@ describe('entity — controllers', () => {
   });
 });
 
-describe('entity — dolt + spectator kinds', () => {
-  it('KINDS.dolt is the grazing quadruped (all pinned numbers)', () => {
-    const k = KINDS.dolt;
+describe('entity — deer + spectator kinds', () => {
+  it('KINDS.deer is the grazing quadruped (all pinned numbers)', () => {
+    const k = KINDS.deer;
     expect(k.half).toBeCloseTo(0.45, 9);
     expect(k.height).toBeCloseTo(0.9, 9);
     expect(k.eye).toBeCloseTo(0.7, 9);
@@ -382,14 +382,14 @@ describe('entity — MobController', () => {
     expect(mobRefuseStep(pit, 0.5, 5, 0.5, Math.PI / 2)).toBe('drop'); // -X is a pit
   });
 
-  function doltPath(seed: number): number[] {
+  function deerPath(seed: number): number[] {
     const world = new World();
     const c = world.ensureChunk(0, 0, 0);
     for (let lx = 0; lx < 16; lx++) for (let lz = 0; lz < 16; lz++) c.blocks[localIndex(lx, 4, lz)] = Block.Grass;
     const rng = new SimRng(seed);
     const ctrl = new MobController((x, y, z) => world.getBlock(x, y, z), () => rng.next());
     const e: Entity = {
-      id: 1, kind: KINDS.dolt, pos: { x: 8, y: 5, z: 8 }, vel: { x: 0, y: 0, z: 0 },
+      id: 1, kind: KINDS.deer, pos: { x: 8, y: 5, z: 8 }, vel: { x: 0, y: 0, z: 0 },
       yaw: 0, pitch: 0, onGround: false, inWater: false, headInWater: false,
       fly: false, noclip: false, controller: ctrl, baseController: ctrl,
     };
@@ -403,11 +403,11 @@ describe('entity — MobController', () => {
   }
 
   it('a fixed seed drives a deterministic 1200-tick path', () => {
-    expect(doltPath(1234)).toEqual(doltPath(1234));
+    expect(deerPath(1234)).toEqual(deerPath(1234));
   });
 
-  it('the dolt actually wanders (a non-trivial path)', () => {
-    const p = doltPath(1234);
+  it('the deer actually wanders (a non-trivial path)', () => {
+    const p = deerPath(1234);
     const cells = new Set<string>();
     for (let i = 0; i < p.length; i += 2) cells.add([p[i], p[i + 1]].join(','));
     expect(cells.size).toBeGreaterThan(10);
@@ -415,7 +415,7 @@ describe('entity — MobController', () => {
 });
 
 describe('entity — possession', () => {
-  function simWithBodyAndDolt() {
+  function simWithBodyAndDeer() {
     const world = new World();
     const sim = new Sim(world, {}, 1234);
     const human = new HumanController(new Set<string>());
@@ -424,27 +424,27 @@ describe('entity — possession', () => {
     const body = sim.spawn({ x: 0, y: 5, z: 0 }, human, { kindId: 'player', baseController: new IdleController() });
     sim.homeId = body.id;
     const mob = new MobController((x, y, z) => world.getBlock(x, y, z), () => sim.rng.next());
-    const dolt = sim.spawn({ x: 1, y: 5, z: 0 }, mob, { kindId: 'dolt', baseController: mob });
+    const deer = sim.spawn({ x: 1, y: 5, z: 0 }, mob, { kindId: 'deer', baseController: mob });
     const ghost = sim.spawn({ x: 0, y: 9, z: 0 }, new IdleController(), { kindId: 'spectator', baseController: new IdleController() });
     sim.ghostId = ghost.id;
-    return { sim, world, human, body, dolt, ghost };
+    return { sim, world, human, body, deer, ghost };
   }
 
   it('possess swaps the human to the target and releases the body to idle; returnHome restores', () => {
-    const { sim, human, body, dolt } = simWithBodyAndDolt();
+    const { sim, human, body, deer } = simWithBodyAndDeer();
     expect(sim.viewedId).toBe(body.id);
-    possess(sim, human, dolt.id);
-    expect(sim.viewedId).toBe(dolt.id);
-    expect(dolt.controller).toBe(human);
+    possess(sim, human, deer.id);
+    expect(sim.viewedId).toBe(deer.id);
+    expect(deer.controller).toBe(human);
     expect(body.controller).toBeInstanceOf(IdleController); // body released to idle
     returnHome(sim, human);
     expect(sim.viewedId).toBe(body.id);
     expect(body.controller).toBe(human);
-    expect(dolt.controller).toBeInstanceOf(MobController); // dolt resumed its AI
+    expect(deer.controller).toBeInstanceOf(MobController); // deer resumed its AI
   });
 
   it('spectate moves the human to the single ghost; returnHome restores the body', () => {
-    const { sim, human, body, ghost } = simWithBodyAndDolt();
+    const { sim, human, body, ghost } = simWithBodyAndDeer();
     spectate(sim, human);
     expect(sim.viewedId).toBe(ghost.id);
     expect(ghost.controller).toBe(human);
@@ -456,7 +456,7 @@ describe('entity — possession', () => {
   });
 
   it('spawn default: baseController defaults to the passed controller (a bot keeps its script)', () => {
-    const { sim } = simWithBodyAndDolt();
+    const { sim } = simWithBodyAndDeer();
     const script = new IdleController(); // stand-in for a ScriptController instance
     const bot = sim.spawn({ x: 2, y: 5, z: 0 }, script, { kindId: 'player' });
     expect(bot.baseController).toBe(script); // not re-bound to a fresh IdleController

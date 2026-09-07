@@ -11,7 +11,7 @@ snapshot + an intent log**. Record a session (`R`), persist it to IndexedDB, and
 back **deterministically** on a fresh world. The **spectator** can view a playback with its
 own live human controller (which emits no world-changing intents, so it never perturbs the
 replay). The **round-trip determinism test is the whole point**: record a 1200-tick session
-(a bot building, a dolt wandering, a spring placed), play it back on a fresh world, and
+(a bot building, a deer wandering, a spring placed), play it back on a fresh world, and
 assert every loaded chunk's arrays and every entity's transform are byte/1e-9 identical.
 
 ## What must be true
@@ -60,7 +60,7 @@ interface Replay {
 - **`ReplayController`** feeds one entity its logged intents: at tick `T` it returns the
   last logged intent with `tick <= T` (the "repeat previous" semantic); before the first
   entry it returns `NULL_INTENT`. Entities with **no** logged intents run their **default**
-  controller (dolt → `MobController`, player → `IdleController`), which are deterministic
+  controller (deer → `MobController`, player → `IdleController`), which are deterministic
   given the restored PRNG.
 - **Snapshot** reuses `snapshotChunk`/`applyRecord` (ADR 0014) — **no new format**. It is
   the persistence records of every **loaded** chunk + the `WorldMeta` at record start.
@@ -93,12 +93,12 @@ Value = the `Replay` (delta-coded log + events + the snapshot records; the neste
   entity id 1) and instead load the replay: apply its snapshot to the current (freshly
   booted) `World` + `Sim` — the loaded chunk arrays, `sim.rng` restored to
   `replay.simPrng`, and the snapshot's entities (entities with logged intents get a
-  `ReplayController`; a dolt gets a fresh `MobController` bound to the restored PRNG; the
+  `ReplayController`; a deer gets a fresh `MobController` bound to the restored PRNG; the
   single spectator is left for the live controller below) — and enter **playback mode**.
 - **Spawn events are replayed:** the snapshot only holds entities present at record start.
-  Entities that **spawn during** the session (a dolt on a chunk load) are carried as spawn
+  Entities that **spawn during** the session (a deer on a chunk load) are carried as spawn
   `events`; the playback loop processes them, spawning each at its event tick (from the
-  event's pose + its controller), so a mid-session dolt re-spawns at the same tick. (Despawn
+  event's pose + its controller), so a mid-session deer re-spawns at the same tick. (Despawn
   events are re-derived by the sim's fall-out-of-world rule and are not re-applied.)
 - **Playback loop:** the frame loop advances the replay one tick at a time (×1), four per
   frame (×4), or on `step` (one tick); pause stops it. The camera follows the **live
@@ -114,11 +114,11 @@ Value = the `Replay` (delta-coded log + events + the snapshot records; the neste
 ## The determinism test (the gate)
 
 - A **node** test: build a world (floor + a wall a bot builds on + a spring spot), spawn a
-  bot (`ScriptController`: dig N, place N, wait), a dolt (`MobController` wandering), and a
+  bot (`ScriptController`: dig N, place N, wait), a deer (`MobController` wandering), and a
   player (`ScriptController`: place Water once, wait). Attach a `Recorder`, take the
   snapshot, run 1200 ticks (entity sim + water sim + world time, all driven identically).
   On a **fresh** world: apply the snapshot, restore the PRNG + entities (ReplayController
-  for logged entities, default for the dolt), run 1200 ticks. Assert every loaded chunk's
+  for logged entities, default for the deer), run 1200 ticks. Assert every loaded chunk's
   arrays are byte-identical and every entity's transform matches to 1e-9.
 - A **seek** test: replay to tick `T`, snapshot the sim state, then from that snapshot
   replay to `T` again — identical.
@@ -131,7 +131,7 @@ Value = the `Replay` (delta-coded log + events + the snapshot records; the neste
 
 ## Pinned numbers
 
-All phase 1/2 pins unchanged (`STEP 1/60`, `TERRAIN_SEED 1234`, the dolt/spectator kinds, the
+All phase 1/2 pins unchanged (`STEP 1/60`, `TERRAIN_SEED 1234`, the deer/spectator kinds, the
 water `WATER_STRIDE 30`/`WATER_PULSE 1000`, the `water-load`/`mesher-budget` pins). The
 replay round-trip is pinned at **1200 ticks**; the comparison is byte-identical for chunk
 arrays and 1e-9 for entity transforms.

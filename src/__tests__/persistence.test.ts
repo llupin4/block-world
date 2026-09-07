@@ -345,16 +345,24 @@ describe('persistence v2 — entities', () => {
     const world = new World();
     const c = world.ensureChunk(0, 0, 0); c.edited = true;
     const rec: EntityRecord = {
-      id: 7, kindId: 'dolt', x: 2, y: 5, z: 9, vx: 0, vy: 0, vz: 0,
+      id: 7, kindId: 'deer', x: 2, y: 5, z: 9, vx: 0, vy: 0, vz: 0,
+      yaw: 0.3, pitch: 0, fly: false, noclip: false, controllerKind: 'mob',
+    };
+    // A legacy save (pre-rename) used kindId 'dolt'; restoreEntity migrates it to the deer kind.
+    const legacy: EntityRecord = {
+      id: 8, kindId: 'dolt', x: 3, y: 5, z: 10, vx: 0, vy: 0, vz: 0,
       yaw: 0.3, pitch: 0, fly: false, noclip: false, controllerKind: 'idle',
     };
-    const chunkRec = snapshotChunk(c, [rec]);
-    expect(chunkRec.entities).toEqual([rec]);
+    const chunkRec = snapshotChunk(c, [rec, legacy]);
+    expect(chunkRec.entities).toEqual([rec, legacy]);
     const sim = new Sim(world, {}, 1234);
     applyRecord(world, chunkRec, sim, () => new IdleController());
-    expect(sim.all()).toHaveLength(1);
+    expect(sim.all()).toHaveLength(2);
     expect(sim.all()[0].id).toBe(7);
     expect(sim.all()[0].pos.x).toBe(2);
+    expect(sim.all()[0].kind.id).toBe('deer'); // the new id
+    expect(sim.all()[1].id).toBe(8);
+    expect(sim.all()[1].kind.id).toBe('deer'); // legacy 'dolt' migrated to deer
     // A v1 chunk record (no entities) restores with no entities.
     const v1 = snapshotChunk(c);
     delete (v1 as { entities?: unknown }).entities;

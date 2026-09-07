@@ -237,7 +237,7 @@ export interface Vec3 { x: number; y: number; z: number }
 // EntityKind: the tunable body of an entity. `player` is built from the old player.ts
 // exports (the single source of the numbers); the other kinds land in phase 2.
 export interface EntityKind {
-  id: string;            // 'player' | 'spectator' | 'dolt'
+  id: string;            // 'player' | 'spectator' | 'deer'
   half: number;          // AABB half-width x/z
   height: number;        // feet -> top of head
   eye: number;           // eye height above the feet
@@ -791,7 +791,7 @@ describe('entity — Sim (registry + tick)', () => {
     sim.respawn = { x: 0, y: 5, z: 0 };
     const p = sim.spawn({ x: 0, y: -40, z: 0 }, new IdleController()); // below WORLD_Y_MIN
     const mob = sim.spawn({ x: 5, y: -40, z: 0 }, new IdleController());
-    mob.kind = { ...mob.kind, id: 'dolt' }; // a non-player kind
+    mob.kind = { ...mob.kind, id: 'deer' }; // a non-player kind
     sim.tick(STEP, 0);
     expect(sim.viewed()?.id).toBe(p.id);
     expect(p.pos).toEqual({ x: 0, y: 5, z: 0 }); // respawned
@@ -1287,7 +1287,7 @@ describe('persistence v2 — entities', () => {
     const world = new World();
     const c = world.ensureChunk(0, 0, 0); c.edited = true;
     const rec: EntityRecord = {
-      id: 7, kindId: 'dolt', x: 2, y: 5, z: 9, vx: 0, vy: 0, vz: 0,
+      id: 7, kindId: 'deer', x: 2, y: 5, z: 9, vx: 0, vy: 0, vz: 0,
       yaw: 0.3, pitch: 0, fly: false, noclip: false, controllerKind: 'idle',
     };
     const chunkRec = snapshotChunk(c, [rec]);

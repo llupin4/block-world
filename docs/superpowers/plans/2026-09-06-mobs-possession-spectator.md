@@ -1,4 +1,4 @@
-# Plan: mobs, possession, spectator — one dolt, drive any entity, a spectator ghost
+# Plan: mobs, possession, spectator — one deer, drive any entity, a spectator ghost
 
 Spec: `docs/superpowers/specs/2026-09-06-mobs-possession-spectator-design.md`
 Task brief: `docs/plans/entities-controllers.md` (phase 2 section)
@@ -10,24 +10,24 @@ ADR 0016.
 
 ## Goal
 
-Add one mob (the **dolt**, a grazing quadruped), **possession** (drive any entity, including
+Add one mob (the **deer**, a grazing quadruped), **possession** (drive any entity, including
 a spectator ghost), and the **spectator** kind — all on top of the phase 1 entity/sim. Every
 state change still flows through intents on the tick; **all randomness is sim-owned and
 tick-ordered** (never `Math.random`) so phase 3's replays stay deterministic.
 
 ## Architecture
 
-- `src/entity.ts` — `KINDS.dolt` + `KINDS.spectator`; `MobController` (wander AI, draws from
+- `src/entity.ts` — `KINDS.deer` + `KINDS.spectator`; `MobController` (wander AI, draws from
   the sim PRNG) + `mobRefuseStep`/`nearestGrass` (pure); possession primitives
   `possess`/`returnHome`/`spectate` (pure, mutate the `Sim`); `Sim.homeId`/`Sim.ghostId` and
   `spawn(baseController)`; `controllerKindOf` recognizes `MobController`.
 - `src/raycast.ts` — `pickEntity` (nearest entity AABB before the voxel hit).
-- `src/spawn.ts` (new) — `isDoltSpawnCell`/`rollDoltSpawns` (pure, deterministic).
+- `src/spawn.ts` (new) — `isDeerSpawnCell`/`rollDeerSpawns` (pure, deterministic).
 - `src/entity-mesh.ts` (new) — the box-part rigs; the **animation math is pure and
   node-testable** (`advanceRigAnim`/`legAngles`/`horizontalSpeed`); the three.js build/update
   is browser-only.
 - `src/main.ts` — rig rendering + transform updates (hide the viewed rig), the HUD kind label
-  + hotbar visibility, the `P` possession handler (entity-pick), dolt spawn on chunk load +
+  + hotbar visibility, the `P` possession handler (entity-pick), deer spawn on chunk load +
   despawn on unload, and the single spectator ghost.
 
 ## Tech stack
@@ -55,9 +55,9 @@ Existing only: TypeScript + vitest + three. No new dependencies.
 
 ## Pinned numbers (must not regress)
 
-`dolt`: `half 0.45`, `height 0.9`, `eye 0.7`, `walkSpeed 1.6`, `swimSpeed 1.0`, `jumpVel
+`deer`: `half 0.45`, `height 0.9`, `eye 0.7`, `walkSpeed 1.6`, `swimSpeed 1.0`, `jumpVel
 8.0`; `spectator`: `eye 1.62`, `flySpeed 8`, `flyVSpeed 8`; leg-swing `amp 0.5` and
-`rate` per kind (`dolt 6`, `player 4` rad per m); spawn cap `DOLT_CAP 6`, `DOLT_PER_CHUNK
+`rate` per kind (`deer 6`, `player 4` rad per m); spawn cap `DEER_CAP 6`, `DEER_PER_CHUNK
 2`; drop refusal = **3** cells; `REACH 6`; all phase 1 pins unchanged.
 
 ## Execution notes
@@ -83,7 +83,7 @@ docs. The code commits happen in Tasks 2–7.)
 
 ---
 
-## Task 2: `entity.ts` — dolt/spectator kinds, `MobController`, possession
+## Task 2: `entity.ts` — deer/spectator kinds, `MobController`, possession
 
 **Files:** `src/entity.ts`, `src/__tests__/entity.test.ts`
 
@@ -94,9 +94,9 @@ MobController, mobRefuseStep, possess, returnHome, spectate`; `KINDS`, `stepEnti
 `const STEP` are already available):
 
 ```ts
-describe('entity — dolt + spectator kinds', () => {
-  it('KINDS.dolt is the grazing quadruped (all pinned numbers)', () => {
-    const k = KINDS.dolt;
+describe('entity — deer + spectator kinds', () => {
+  it('KINDS.deer is the grazing quadruped (all pinned numbers)', () => {
+    const k = KINDS.deer;
     expect(k.half).toBeCloseTo(0.45, 9);
     expect(k.height).toBeCloseTo(0.9, 9);
     expect(k.eye).toBeCloseTo(0.7, 9);
@@ -135,14 +135,14 @@ describe('entity — MobController', () => {
     expect(mobRefuseStep(pit, 0.5, 5, 0.5, Math.PI / 2)).toBe('drop'); // -X is a pit
   });
 
-  function doltPath(seed: number): number[] {
+  function deerPath(seed: number): number[] {
     const world = new World();
     const c = world.ensureChunk(0, 0, 0);
     for (let lx = 0; lx < 16; lx++) for (let lz = 0; lz < 16; lz++) c.blocks[localIndex(lx, 4, lz)] = Block.Grass;
     const rng = new SimRng(seed);
     const ctrl = new MobController((x, y, z) => world.getBlock(x, y, z), () => rng.next());
     const e: Entity = {
-      id: 1, kind: KINDS.dolt, pos: { x: 8, y: 5, z: 8 }, vel: { x: 0, y: 0, z: 0 },
+      id: 1, kind: KINDS.deer, pos: { x: 8, y: 5, z: 8 }, vel: { x: 0, y: 0, z: 0 },
       yaw: 0, pitch: 0, onGround: false, inWater: false, headInWater: false,
       fly: false, noclip: false, controller: ctrl, baseController: ctrl,
     };
@@ -156,11 +156,11 @@ describe('entity — MobController', () => {
   }
 
   it('a fixed seed drives a deterministic 1200-tick path', () => {
-    expect(doltPath(1234)).toEqual(doltPath(1234));
+    expect(deerPath(1234)).toEqual(deerPath(1234));
   });
 
-  it('the dolt actually wanders (a non-trivial path)', () => {
-    const p = doltPath(1234);
+  it('the deer actually wanders (a non-trivial path)', () => {
+    const p = deerPath(1234);
     const cells = new Set<number[]>();
     for (let i = 0; i < p.length; i += 2) cells.add([p[i], p[i + 1]].join(','));
     expect(cells.size).toBeGreaterThan(10);
@@ -168,7 +168,7 @@ describe('entity — MobController', () => {
 });
 
 describe('entity — possession', () => {
-  function simWithBodyAndDolt() {
+  function simWithBodyAndDeer() {
     const world = new World();
     const sim = new Sim(world, {}, 1234);
     const human = new HumanController(new Set<string>());
@@ -177,27 +177,27 @@ describe('entity — possession', () => {
     const body = sim.spawn({ x: 0, y: 5, z: 0 }, human, { kindId: 'player', baseController: new IdleController() });
     sim.homeId = body.id;
     const mob = new MobController((x, y, z) => world.getBlock(x, y, z), () => sim.rng.next());
-    const dolt = sim.spawn({ x: 1, y: 5, z: 0 }, mob, { kindId: 'dolt', baseController: mob });
+    const deer = sim.spawn({ x: 1, y: 5, z: 0 }, mob, { kindId: 'deer', baseController: mob });
     const ghost = sim.spawn({ x: 0, y: 9, z: 0 }, new IdleController(), { kindId: 'spectator', baseController: new IdleController() });
     sim.ghostId = ghost.id;
-    return { sim, world, human, body, dolt, ghost };
+    return { sim, world, human, body, deer, ghost };
   }
 
   it('possess swaps the human to the target and releases the body to idle; returnHome restores', () => {
-    const { sim, human, body, dolt } = simWithBodyAndDolt();
+    const { sim, human, body, deer } = simWithBodyAndDeer();
     expect(sim.viewedId).toBe(body.id);
-    possess(sim, human, dolt.id);
-    expect(sim.viewedId).toBe(dolt.id);
-    expect(dolt.controller).toBe(human);
+    possess(sim, human, deer.id);
+    expect(sim.viewedId).toBe(deer.id);
+    expect(deer.controller).toBe(human);
     expect(body.controller).toBeInstanceOf(IdleController); // body released to idle
     returnHome(sim, human);
     expect(sim.viewedId).toBe(body.id);
     expect(body.controller).toBe(human);
-    expect(dolt.controller).toBeInstanceOf(MobController); // dolt resumed its AI
+    expect(deer.controller).toBeInstanceOf(MobController); // deer resumed its AI
   });
 
   it('spectate moves the human to the single ghost; returnHome restores the body', () => {
-    const { sim, human, body, ghost } = simWithBodyAndDolt();
+    const { sim, human, body, ghost } = simWithBodyAndDeer();
     spectate(sim, human);
     expect(sim.viewedId).toBe(ghost.id);
     expect(ghost.controller).toBe(human);
@@ -209,7 +209,7 @@ describe('entity — possession', () => {
   });
 
   it('spawn default: baseController defaults to the passed controller (a bot keeps its script)', () => {
-    const { sim } = simWithBodyAndDolt();
+    const { sim } = simWithBodyAndDeer();
     const script = new IdleController(); // stand-in for a ScriptController instance
     const bot = sim.spawn({ x: 2, y: 5, z: 0 }, script, { kindId: 'player' });
     expect(bot.baseController).toBe(script); // not re-bound to a fresh IdleController
@@ -222,8 +222,8 @@ describe('entity — possession', () => {
 1. Add the two kinds to `KINDS`:
 
 ```ts
-  dolt: {
-    id: 'dolt',
+  deer: {
+    id: 'deer',
     half: 0.45, height: 0.9, eye: 0.7,
     walkSpeed: 1.6, swimSpeed: 1.0, jumpVel: 8.0,
     flySpeed: 0, flyVSpeed: 0,
@@ -245,7 +245,7 @@ describe('entity — possession', () => {
 ```ts
 export type GetBlock = (x: number, y: number, z: number) => number;
 
-/** Refuse a step into water or off a >=3-block drop (the dolt's local obstacle rule). */
+/** Refuse a step into water or off a >=3-block drop (the deer's local obstacle rule). */
 export function mobRefuseStep(getBlock: GetBlock, x: number, y: number, z: number, heading: number): 'water' | 'drop' | null {
   const fx = -Math.sin(heading), fz = -Math.cos(heading);
   const ax = Math.floor(x + fx), az = Math.floor(z + fz);
@@ -273,7 +273,7 @@ export function nearestGrass(getBlock: GetBlock, x: number, y: number, z: number
 }
 
 /**
- * The dolt's wander AI. Draws EVERY random from the sim PRNG (`rand`) — the sim's fixed
+ * The deer's wander AI. Draws EVERY random from the sim PRNG (`rand`) — the sim's fixed
  * id-order iteration keeps the draw sequence deterministic (never Math.random, never a
  * wall clock). Modes: wander (walk a random number of ticks) and idle (stand, then
  * re-face — sometimes toward the nearest grass). A stall (forward intent but no progress)
@@ -343,7 +343,7 @@ export function controllerKindOf(c: Controller): string {
 
 In `Sim`: add `homeId = 0;` and `ghostId = 0;` fields; in `spawn`, set
 `baseController: opts.baseController ?? controller` — i.e. the entity's home controller
-defaults to the controller it is spawned with (a bot keeps its `ScriptController`, a dolt
+defaults to the controller it is spawned with (a bot keeps its `ScriptController`, a deer
 keeps its `MobController`). A player body passes an explicit `baseController:
 new IdleController()` so it stands idle when left. (`spawn` signature:
 `spawn(pos, controller, opts?: { kindId?: string; baseController?: Controller })`; add
@@ -387,7 +387,7 @@ export function spectate(sim: Sim, human: Controller): void {
 **Step 4: Commit**
 
 ```
-feat: dolt + spectator kinds, MobController (wander AI on the sim PRNG), possession primitives
+feat: deer + spectator kinds, MobController (wander AI on the sim PRNG), possession primitives
 ```
 
 ---
@@ -402,14 +402,14 @@ feat: dolt + spectator kinds, MobController (wander AI on the sim PRNG), possess
 ```ts
 describe('pickEntity', () => {
   it('hits the nearest entity AABB in front, within reach', () => {
-    // The viewer's eye (y 1.6) looks DOWN at the dolt's chest, so the ray actually enters the
-    // dolt's box (a horizontal ray at y 1.6 would miss the 0.9-tall box entirely).
+    // The viewer's eye (y 1.6) looks DOWN at the deer's chest, so the ray actually enters the
+    // deer's box (a horizontal ray at y 1.6 would miss the 0.9-tall box entirely).
     const origin = { x: 0, y: 1.6, z: 0 };
-    const chest = { x: 0, y: 0.45, z: -3 }; // dolt body centre (feet at y 0, height 0.9)
+    const chest = { x: 0, y: 0.45, z: -3 }; // deer body centre (feet at y 0, height 0.9)
     const len = Math.hypot(chest.y - origin.y, chest.z - origin.z);
     const dir = { x: 0, y: (chest.y - origin.y) / len, z: (chest.z - origin.z) / len };
     const ents = [
-      { pos: { x: 0, y: 0, z: -3 }, kind: { half: 0.45, height: 0.9 } }, // dolt ahead
+      { pos: { x: 0, y: 0, z: -3 }, kind: { half: 0.45, height: 0.9 } }, // deer ahead
       { pos: { x: 5, y: 0, z: -3 }, kind: { half: 0.3, height: 1.8 } },  // far, not in the way
     ];
     const hit = pickEntity(origin, dir, ents, 6);
@@ -421,7 +421,7 @@ describe('pickEntity', () => {
 
   it('returns null when the only entity is beyond reach or behind', () => {
     const origin = { x: 0, y: 1.6, z: 0 };
-    // beyond reach: aimed at the dolt's height (so it WOULD hit if in reach), but 10 m away —
+    // beyond reach: aimed at the deer's height (so it WOULD hit if in reach), but 10 m away —
     // the front face is at ~9.55 m > reach 6.
     const chest = { x: 0, y: 0.45, z: -10 };
     const len = Math.hypot(chest.y - origin.y, chest.z - origin.z);
@@ -483,7 +483,7 @@ feat: pickEntity — nearest entity AABB along the ray (for possession targeting
 
 ---
 
-## Task 4: `src/spawn.ts` — deterministic dolt spawns
+## Task 4: `src/spawn.ts` — deterministic deer spawns
 
 **Files:** `src/spawn.ts` (new), `src/__tests__/spawn.test.ts` (new)
 
@@ -494,7 +494,7 @@ import { describe, it, expect } from 'vitest';
 import { Block } from '../blocks';
 import { World, localIndex } from '../world';
 import { SimRng, Sim, IdleController, stepEntity } from '../entity';
-import { isDoltSpawnCell, rollDoltSpawns, spawnDolts } from '../spawn';
+import { isDeerSpawnCell, rollDeerSpawns, spawnDeer } from '../spawn';
 
 const STEP = 1 / 60;
 
@@ -504,37 +504,37 @@ function grassFloor(world: World, cx: number, cz: number, y: number): void {
 }
 
 describe('spawn', () => {
-  it('isDoltSpawnCell: grass with two air cells above, at a plausible surface height', () => {
+  it('isDeerSpawnCell: grass with two air cells above, at a plausible surface height', () => {
     const world = new World();
     grassFloor(world, 0, 0, 4); // grass at y=4, air above
-    expect(isDoltSpawnCell((x, y, z) => world.getBlock(x, y, z), 8, 4, 8)).toBe(true);
-    expect(isDoltSpawnCell((x, y, z) => world.getBlock(x, y, z), 8, 3, 8)).toBe(false); // not grass
+    expect(isDeerSpawnCell((x, y, z) => world.getBlock(x, y, z), 8, 4, 8)).toBe(true);
+    expect(isDeerSpawnCell((x, y, z) => world.getBlock(x, y, z), 8, 3, 8)).toBe(false); // not grass
   });
 
-  it('rollDoltSpawns: a fixed seed gives a deterministic count at deterministic positions', () => {
+  it('rollDeerSpawns: a fixed seed gives a deterministic count at deterministic positions', () => {
     const a = new World(); grassFloor(a, 0, 0, 4);
     const b = new World(); grassFloor(b, 0, 0, 4);
     const rngA = new SimRng(1234), rngB = new SimRng(1234);
-    const ra = rollDoltSpawns(a, 0, 0, 2, () => rngA.next(), () => false);
-    const rb = rollDoltSpawns(b, 0, 0, 2, () => rngB.next(), () => false);
+    const ra = rollDeerSpawns(a, 0, 0, 2, () => rngA.next(), () => false);
+    const rb = rollDeerSpawns(b, 0, 0, 2, () => rngB.next(), () => false);
     expect(ra).toEqual(rb);
     expect(ra.length).toBe(2);
     for (const p of ra) expect(p.y).toBe(5); // feet on the grass top (grass at y=4)
   });
 
-  it('a fixed seed spawns a deterministic dolt set over a 600-tick session', () => {
+  it('a fixed seed spawns a deterministic deer set over a 600-tick session', () => {
     const run = (): [number, number][] => {
       const world = new World();
       grassFloor(world, 0, 0, 4);
       const sim = new Sim(world, {}, 1234);
       sim.spawn({ x: 0, y: 5, z: 0 }, new IdleController(), { kindId: 'player', baseController: new IdleController() });
-      spawnDolts(world, sim, 0, 0); // dolts into the freshly generated (rebuilt) chunk
+      spawnDeer(world, sim, 0, 0); // deer into the freshly generated (rebuilt) chunk
       for (let i = 0; i < 600; i++)
         for (const e of sim.all()) {
           const it = e.controller.intent(e, i);
           stepEntity(world, e, it, STEP);
         }
-      return sim.all().filter((e) => e.kind.id === 'dolt')
+      return sim.all().filter((e) => e.kind.id === 'deer')
         .map((e) => [Math.round(e.pos.x * 1000), Math.round(e.pos.z * 1000)] as [number, number]);
     };
     expect(run()).toEqual(run());
@@ -542,9 +542,9 @@ describe('spawn', () => {
 });
 ```
 
-(`rollDoltSpawns` takes `rand: () => number` — the tests wrap a `SimRng` as
+(`rollDeerSpawns` takes `rand: () => number` — the tests wrap a `SimRng` as
 `() => rng.next()`, keeping the spawn function PRNG-agnostic and deterministic. The 600-tick
-test drives the real spawn path (`spawnDolts`) + `stepEntity` to pin whole-session dolt
+test drives the real spawn path (`spawnDeer`) + `stepEntity` to pin whole-session deer
 determinism.)
 
 **Step 2: Implement** — create `src/spawn.ts`:
@@ -554,24 +554,24 @@ import { Block } from './blocks';
 import { type World } from './world';
 import { type Sim, MobController } from './entity';
 
-export const DOLT_CAP = 6;      // live dolts in the view ring
-export const DOLT_PER_CHUNK = 2; // max rolled per loaded chunk
+export const DEER_CAP = 6;      // live deer in the view ring
+export const DEER_PER_CHUNK = 2; // max rolled per loaded chunk
 
 export type GetBlock = (x: number, y: number, z: number) => number;
 
-/** A dolt spawn cell: a grass surface with two air cells above (cheap "sky"), at a
+/** A deer spawn cell: a grass surface with two air cells above (cheap "sky"), at a
  *  plausible surface height (above the void). [POC shortcut] — no true sky test. */
-export function isDoltSpawnCell(getBlock: GetBlock, x: number, y: number, z: number): boolean {
+export function isDeerSpawnCell(getBlock: GetBlock, x: number, y: number, z: number): boolean {
   return getBlock(x, y, z) === Block.Grass
     && getBlock(x, y + 1, z) === Block.Air
     && getBlock(x, y + 2, z) === Block.Air
     && y >= 3;
 }
 
-/** Roll up to `maxHere` dolt spawn positions in chunk (cx,cz) from a deterministic `rand`,
+/** Roll up to `maxHere` deer spawn positions in chunk (cx,cz) from a deterministic `rand`,
  *  skipping `occupied` cells. Feet land on the grass top (y+1). Deterministic in (world,
  *  cx, cz, maxHere, rand). */
-export function rollDoltSpawns(
+export function rollDeerSpawns(
   world: World, cx: number, cz: number, maxHere: number, rand: () => number,
   occupied: (x: number, y: number, z: number) => boolean,
 ): { x: number; y: number; z: number }[] {
@@ -581,7 +581,7 @@ export function rollDoltSpawns(
     const wx = cx * 16 + Math.floor(rand() * 16);
     const wz = cz * 16 + Math.floor(rand() * 16);
     for (let y = 40; y >= 3; y--) {
-      if (isDoltSpawnCell(get, wx, y, wz)) {
+      if (isDeerSpawnCell(get, wx, y, wz)) {
         if (!occupied(wx, y + 1, wz)) out.push({ x: wx + 0.5, y: y + 1, z: wz + 0.5 });
         break;
       }
@@ -590,22 +590,22 @@ export function rollDoltSpawns(
   return out;
 }
 
-/** Spawn up to the capped number of dolts into `sim` for a freshly generated (rebuilt) chunk
+/** Spawn up to the capped number of deer into `sim` for a freshly generated (rebuilt) chunk
  *  column, drawing every random from `sim.rng` (deterministic). Shared by main.ts (on chunk
  *  load) and the 600-tick determinism test. Call only for rebuilt chunks — restored chunks
- *  already carry their persisted dolts (re-rolling would double-populate them). */
-export function spawnDolts(world: World, sim: Sim, cx: number, cz: number): void {
-  const live = sim.all().filter((e) => e.kind.id === 'dolt').length;
-  const remaining = DOLT_CAP - live;
+ *  already carry their persisted deer (re-rolling would double-populate them). */
+export function spawnDeer(world: World, sim: Sim, cx: number, cz: number): void {
+  const live = sim.all().filter((e) => e.kind.id === 'deer').length;
+  const remaining = DEER_CAP - live;
   if (remaining <= 0) return;
-  const maxHere = Math.min(DOLT_PER_CHUNK, remaining);
+  const maxHere = Math.min(DEER_PER_CHUNK, remaining);
   const occupied = (x: number, y: number, z: number) =>
     sim.all().some((o) =>
       Math.abs(o.pos.x - x) < 0.5 && Math.abs(o.pos.y - y) < 0.5 && Math.abs(o.pos.z - z) < 0.5);
-  const spots = rollDoltSpawns(world, cx, cz, maxHere, () => sim.rng.next(), occupied);
+  const spots = rollDeerSpawns(world, cx, cz, maxHere, () => sim.rng.next(), occupied);
   for (const s of spots) {
     const m = new MobController((x, y, z) => world.getBlock(x, y, z), () => sim.rng.next());
-    sim.spawn({ x: s.x, y: s.y, z: s.z }, m, { kindId: 'dolt', baseController: m });
+    sim.spawn({ x: s.x, y: s.y, z: s.z }, m, { kindId: 'deer', baseController: m });
   }
 }
 ```
@@ -615,7 +615,7 @@ export function spawnDolts(world: World, sim: Sim, cx: number, cz: number): void
 **Step 4: Commit**
 
 ```
-feat: spawn.ts — deterministic dolt spawn rolls (grass surface, sky, capped)
+feat: spawn.ts — deterministic deer spawn rolls (grass surface, sky, capped)
 ```
 
 ---
@@ -688,7 +688,7 @@ export function legAngles(anim: RigAnim, amp = 0.5): [number, number, number, nu
 
 interface Part { name: string; size: [number, number, number]; offset: [number, number, number]; leg?: number; head?: boolean; }
 
-const DOLT_PARTS: Part[] = [
+const DEER_PARTS: Part[] = [
   { name: 'body', size: [0.5, 0.5, 0.9], offset: [0, 0.55, 0] },
   { name: 'head', size: [0.35, 0.35, 0.4], offset: [0, 0.78, -0.5], head: true },
   { name: 'legFL', size: [0.16, 0.4, 0.16], offset: [0.28, 0.2, -0.3], leg: 0 },
@@ -713,8 +713,8 @@ export interface Rig {
 // part-atlas in the same style as the block atlas: a deterministic speckle (fixed seed, so
 // the rig looks identical across sessions/replays) of the kind's base colour, crisp
 // NearestFilter. (This is the phase 2 texture — not a punt; see the spec's Rendering.)
-export const RIG_COLORS: Record<string, number> = { dolt: 0x9a7b4f, player: 0x3f6fb5 };
-export const LEG_RATE: Record<string, number> = { dolt: 6, player: 4 };
+export const RIG_COLORS: Record<string, number> = { deer: 0x9a7b4f, player: 0x3f6fb5 };
+export const LEG_RATE: Record<string, number> = { deer: 6, player: 4 };
 
 /** A small speckled canvas texture for a kind's material (block-atlas style). Deterministic
  *  (fixed-seed jitter) so the rig looks identical across sessions/replays. */
@@ -741,7 +741,7 @@ export function buildPartAtlas(base: number, seed: number): THREE.CanvasTexture 
 }
 
 export function buildEntityRig(kind: EntityKind, material: THREE.Material): Rig | null {
-  const parts = kind.id === 'dolt' ? DOLT_PARTS : kind.id === 'player' ? PLAYER_PARTS : null;
+  const parts = kind.id === 'deer' ? DEER_PARTS : kind.id === 'player' ? PLAYER_PARTS : null;
   if (!parts) return null; // spectator: no rig
   const root = new THREE.Group();
   const head = new THREE.Group();
@@ -797,7 +797,7 @@ browser gate.
 ```ts
 import { pickEntity } from './raycast';
 import { possess, returnHome, spectate, MobController, type EntityRecord, type Controller } from './entity';
-import { spawnDolts } from './spawn';
+import { spawnDeer } from './spawn';
 import { buildEntityRig, updateEntityRig, advanceRigAnim, newRigAnim, RIG_COLORS, LEG_RATE, buildPartAtlas, type Rig, type RigAnim } from './entity-mesh';
 ```
 
@@ -880,27 +880,27 @@ for that frame (a closer entity shadows the voxel). This must agree with `onPoss
 `pickEntity` before the voxel).
 
 **Step 5: Spawn on chunk load + despawn on unload.** In `tickStreaming`, after the
-`rebuilt`/`restored` handling, spawn dolts into **rebuilt** chunk columns only (freshly
-generated, no saved record) — **restored** chunks already carry their persisted dolts, so
-re-rolling them would double-populate (and diverge from the original session). `spawnDolts`
+`rebuilt`/`restored` handling, spawn deer into **rebuilt** chunk columns only (freshly
+generated, no saved record) — **restored** chunks already carry their persisted deer, so
+re-rolling them would double-populate (and diverge from the original session). `spawnDeer`
 (live in `spawn.ts`, shared with the 600-tick determinism test) caps the population and draws
 every random from `sim.rng`:
 
 ```ts
-for (const c of r.rebuilt) spawnDolts(world, sim, c.cx, c.cz); // NOT r.restored
+for (const c of r.rebuilt) spawnDeer(world, sim, c.cx, c.cz); // NOT r.restored
 ```
 
-In the `unloaded` loop, despawn the dolts whose chunk just left (they persist via the
+In the `unloaded` loop, despawn the deer whose chunk just left (they persist via the
 entity-ride, so they restore on walk-back):
 
 ```ts
 for (const d of sim.entitiesInChunk(c.cx, c.cy, c.cz))
-  if (d.kind.id === 'dolt') sim.despawn(d.id);
+  if (d.kind.id === 'deer') sim.despawn(d.id);
 ```
 
 **Step 6: Restore factory (the `'mob'` case), body home controller, and the single ghost.**
 In `startGame`, phase 1's boot restore uses a `controllerFor` factory to reattach controllers
-to restored entities. Update it so a restored dolt gets a `MobController` (its
+to restored entities. Update it so a restored deer gets a `MobController` (its
 `controllerKind` is `'mob'`), set the restored player body's home controller to
 `IdleController` (it must stand idle when left, not keep the `human` controller it was
 restored with), derive `homeId`/`ghostId` from the restored entities, and spawn the ghost
@@ -924,7 +924,7 @@ if (sim.ghostId === 0) {
 ```
 
 Use the **same** `controllerFor` (with the `'mob'` case) for the streaming restore path
-(`applyRecord(world, rec, sim, streamControllerFor)`) so a dolt frozen in an unloaded chunk
+(`applyRecord(world, rec, sim, streamControllerFor)`) so a deer frozen in an unloaded chunk
 reattaches its AI on walk-back. On the fresh-spawn path (no save), spawn the body with an
 explicit `baseController: new IdleController()` (the spawn default would otherwise bind it to
 `human`).
@@ -935,7 +935,7 @@ green, including the phase 1 gate). Then the Task 7 browser gate.
 **Step 8: Commit**
 
 ```
-feat: main.ts mobs/possession/spectator — rig rendering, HUD, P possession, dolt spawn/despawn, ghost
+feat: main.ts mobs/possession/spectator — rig rendering, HUD, P possession, deer spawn/despawn, ghost
 ```
 
 ---
@@ -948,25 +948,25 @@ feat: main.ts mobs/possession/spectator — rig rendering, HUD, P possession, do
 **Step 1: Full gate.** `npm test` (green; phase 1 pins unchanged) and `npm run build` (clean).
 
 **Step 2: Browser acceptance** (manual; `npm run dev`):
-- Dolts wander near spawn, animate (leg swing from speed), and restore on reload in the same
+- Deers wander near spawn, animate (leg swing from speed), and restore on reload in the same
   spots (fixed seed → same spawn positions).
-- `P` on a dolt: the camera drops to the 0.7 m dolt eye, the hotbar hides (canEdit false),
-  the HUD shows `viewing: dolt`; you walk slow, hop one block, can't break. `P` again (no
+- `P` on a deer: the camera drops to the 0.7 m deer eye, the hotbar hides (canEdit false),
+  the HUD shows `viewing: deer`; you walk slow, hop one block, can't break. `P` again (no
   target): back to the body. `P` at the body (no target): the ghost — fly-through (noclip),
   `viewing: spectator`; `P` on the body: return.
-- The dolt refuses to walk into water or off a tall drop; a possessed dolt left alone wanders
+- The deer refuses to walk into water or off a tall drop; a possessed deer left alone wanders
   back out of a hole.
 - `?prof=remesh` still passes (the rig is additive; the worst-chunk pins are unchanged).
 
 **Step 3: ADR 0016.** Write `docs/adr/0016-mobs-possession-spectator.md` (Status: Accepted;
-Sources: the spec + plan). Capture, at least: the two new kinds (dolt/spectator, the
+Sources: the spec + plan). Capture, at least: the two new kinds (deer/spectator, the
 capability split — capabilities are the kind's, not the controller's); the `MobController`
 wander AI and **why all randomness is sim-owned and tick-ordered** (the sim's fixed id-order
 iteration + per-state draw counts make the sequence deterministic — required for phase 3
 replays; `Math.random` and wall clocks are banned from the sim); the local obstacle rules
 (water + ≥3 drop; the stall counter accumulates on **any** low-progress tick, including a
 refused step) and the stall→turn; spawning (grass/two-air/`y>=3`/cap, despawn on unload,
-**rebuilt-only** rolls, the entity-ride persistence, and the `[POC shortcut]` that a dolt
+**rebuilt-only** rolls, the entity-ride persistence, and the `[POC shortcut]` that a deer
 frozen in an unedited chunk is not persisted) and the spawn-roll determinism (pinned by a
 600-tick test); the box-part rig (one material per kind textured from a deterministic
 **canvas part-atlas** — block-atlas-style speckle, fixed seed; speed-driven leg phase —
@@ -974,7 +974,7 @@ replay-safe); possession (view + controller swap, `baseController` restore, the 
 with `homeId`/`ghostId` derived, the body's home controller `IdleController` at spawn +
 restore, `pickEntity` before the voxel on **both** the crosshair and the `P` handler); and
 the entities-pass-through-each-other note. Alternatives
-considered: a pathfinding dolt (rejected — non-goal), a skinned/morph-target rig (rejected —
+considered: a pathfinding deer (rejected — non-goal), a skinned/morph-target rig (rejected —
 non-goal, beyond leg swing + head look), a per-kind solid colour instead of the canvas
 part-atlas (rejected — the brief asks for block-atlas-style texture and the atlas is cheap),
 `prevController` (remember the *current* controller) instead of `baseController` (rejected —
@@ -995,10 +995,10 @@ docs: ADR 0016 — mobs, possession, spectator
 
 ## Self-review
 
-- **Brief coverage (phase 2):** the dolt (grazing quadruped, the pinned kind, `jumpVel 8.0`
+- **Brief coverage (phase 2):** the deer (grazing quadruped, the pinned kind, `jumpVel 8.0`
   so it clears a 1-block ledge, canEdit/canFly/canNoclip false) ✓; `MobController` wander AI
   with sim-owned tick-ordered PRNG ✓; spawn (grass/two-air/`y>=3`/cap, despawn on unload,
-  **600-tick** whole-session determinism via `spawnDolts`) ✓; box-part rigs (head/body/4 legs;
+  **600-tick** whole-session determinism via `spawnDeer`) ✓; box-part rigs (head/body/4 legs;
   player biped; speed-driven leg swing; viewed rig hidden; **canvas part-atlas** texture) ✓;
   spectator kind (non-colliding ghost, **exactly one** — `ghostId`/`homeId` derived, no second
   ghost on reload) ✓; possession (`P`, `baseController` restore, swap to ghost, return; the
@@ -1006,16 +1006,16 @@ docs: ADR 0016 — mobs, possession, spectator
   (nearest AABB before the voxel, wired to **both** the crosshair and the `P` handler) ✓; gate
   (mob determinism 1200 ticks, refuses drops/water, possession swap/restore, picking,
   browser) ✓; ADR 0016 ✓.
-- **Determinism is the load-bearing invariant:** the dolt AI, the spawn rolls, and (phase 3)
+- **Determinism is the load-bearing invariant:** the deer AI, the spawn rolls, and (phase 3)
   the replay all draw from `sim.rng` in the sim's fixed id-order — never `Math.random`,
   never a wall clock. The leg phase is driven by `e.vel` (replay-safe); the part-atlas
   speckle is a fixed seed (cosmetic, not sim state).
 - **Known risks / documented punts:** (a) the rig is three.js/browser-only — the pure
   animation math is node-tested, the mesh build + `buildPartAtlas` are gate-verified; the
-  node test transitively imports `three` (isomorphic — low risk); (b) `spawnDolts` draws from
+  node test transitively imports `three` (isomorphic — low risk); (b) `spawnDeer` draws from
   `sim.rng` on chunk load (frame-timed) — deterministic per (world, seed, load order); (c)
   the `occupied` closure is O(entities) per candidate — fine at POC population (≤ 6); (d) a
-  dolt rides the phase 1 **edited-only** chunk gate — a dolt frozen in an *unedited* chunk is
+  deer rides the phase 1 **edited-only** chunk gate — a deer frozen in an *unedited* chunk is
   not persisted (the same as an unedited chunk's water); `[POC shortcut]`.
 - **Execution order:** Tasks 1→7 in order; Task 6 is the integration; the phase 1 gate must
   stay green throughout. Phase 3 starts only after Task 7's gate is green.

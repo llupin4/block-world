@@ -58,14 +58,14 @@ describe('raycastVoxel — DDA over the voxel lattice', () => {
 
 describe('pickEntity', () => {
   it('hits the nearest entity AABB in front, within reach', () => {
-    // The viewer's eye (y 1.6) looks DOWN at the dolt's chest, so the ray actually enters the
-    // dolt's box (a horizontal ray at y 1.6 would miss the 0.9-tall box entirely).
+    // The viewer's eye (y 1.6) looks DOWN at the deer's chest, so the ray actually enters the
+    // deer's box (a horizontal ray at y 1.6 would miss the 0.9-tall box entirely).
     const origin = { x: 0, y: 1.6, z: 0 };
-    const chest = { x: 0, y: 0.45, z: -3 }; // dolt body centre (feet at y 0, height 0.9)
+    const chest = { x: 0, y: 0.45, z: -3 }; // deer body centre (feet at y 0, height 0.9)
     const len = Math.hypot(chest.y - origin.y, chest.z - origin.z);
     const dir = { x: 0, y: (chest.y - origin.y) / len, z: (chest.z - origin.z) / len };
     const ents = [
-      { pos: { x: 0, y: 0, z: -3 }, kind: { half: 0.45, height: 0.9 } }, // dolt ahead
+      { pos: { x: 0, y: 0, z: -3 }, kind: { half: 0.45, height: 0.9 } }, // deer ahead
       { pos: { x: 5, y: 0, z: -3 }, kind: { half: 0.3, height: 1.8 } },  // far, not in the way
     ];
     const hit = pickEntity(origin, dir, ents, 6);
@@ -77,7 +77,7 @@ describe('pickEntity', () => {
 
   it('returns null when the only entity is beyond reach or behind', () => {
     const origin = { x: 0, y: 1.6, z: 0 };
-    // beyond reach: aimed at the dolt's height (so it WOULD hit if in reach), but 10 m away —
+    // beyond reach: aimed at the deer's height (so it WOULD hit if in reach), but 10 m away —
     // the front face is at ~9.55 m > reach 6.
     const chest = { x: 0, y: 0.45, z: -10 };
     const len = Math.hypot(chest.y - origin.y, chest.z - origin.z);
