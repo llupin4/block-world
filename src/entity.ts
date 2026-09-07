@@ -557,8 +557,8 @@ export class Sim {
     this.entities.delete(id);
     if (this.viewedId === id) {
       this.viewedId = 0;
-      const first = this.entities.keys().next().value;
-      if (first !== undefined) this.viewedId = first;
+      const lowest = this.all()[0]; // id-ordered: the deterministic fallback
+      if (lowest !== undefined) this.viewedId = lowest.id;
     }
   }
 

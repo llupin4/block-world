@@ -462,3 +462,23 @@ describe('entity — possession', () => {
     expect(bot.baseController).toBe(script); // not re-bound to a fresh IdleController
   });
 });
+
+describe('entity — Sim.despawn viewed fallback (deterministic, D3)', () => {
+  it('despawning the viewed entity falls back to the LOWEST id, not insertion order', () => {
+    const world = new World();
+    const sim = new Sim(world, {}, 1);
+    const a = sim.spawn({ x: 0, y: 0, z: 0 }, new IdleController()); // id 1
+    const b = sim.spawn({ x: 1, y: 0, z: 0 }, new IdleController()); // id 2
+    const c = sim.spawn({ x: 2, y: 0, z: 0 }, new IdleController()); // id 3
+    sim.setViewed(c.id);                       // view the highest id
+    sim.despawn(a.id);                         // viewed stays c; a is gone (insertion order now b, c)
+    sim.restoreEntity({                        // re-add a: LAST inserted, but the LOWEST id
+      id: a.id, kindId: 'player', x: 0, y: 0, z: 0, vx: 0, vy: 0, vz: 0,
+      yaw: 0, pitch: 0, fly: false, noclip: false, controllerKind: 'idle',
+    }, new IdleController());
+    expect(sim.viewedId).toBe(c.id);           // restoring does not change viewed
+    sim.despawn(c.id);                         // despawn the viewed
+    expect(sim.viewedId).toBe(a.id);           // LOWEST id (1) — insertion order would give b (2)
+    expect(sim.viewedId).not.toBe(b.id);
+  });
+});
