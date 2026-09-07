@@ -28,8 +28,10 @@ const REMESH_BUDGET = 1; // dirty chunk rebuilds per call (main.ts performs the 
 export interface Coord { cx: number; cy: number; cz: number }
 
 export interface StreamingUpdate {
-  rebuilt: Coord[];  // loaded (freshly generated) and dirty-remeshed chunks: main.ts calls
+  rebuilt: Coord[];  // loaded (freshly generated) and dirty-remeshed chunks (their concatenation): main.ts calls
                      // rebuildChunkMesh on each, which clears the chunk's dirty flag
+  generated: Coord[]; // freshly GENERATED columns — the ONLY ones spawnDeer tops up
+  remeshed: Coord[];  // dirty-RE-MESHED chunks — no spawnDeer
   restored: Coord[]; // chunks restored from a WARM persistence record this call (applied inline):
                      // main.ts runs sim.restore + lightSim.load + deferredFirstMesh (no settle — settled is already true)
   pending: Coord[];  // in the persistence key set but not warm: main.ts fetches async (fetchRecord →
@@ -86,6 +88,8 @@ export function markNeighborsDirty(world: World, cx: number, cy: number, cz: num
  */
 export function update(world: World, pcx: number, pcz: number, pcy = 2, persist?: PersistSource, sim?: EntitySource): StreamingUpdate {
   const rebuilt: Coord[] = [];
+  const generated: Coord[] = [];
+  const remeshed: Coord[] = [];
   const restored: Coord[] = [];
   const pending: Coord[] = [];
   const unloaded: Coord[] = [];
@@ -119,6 +123,7 @@ export function update(world: World, pcx: number, pcz: number, pcy = 2, persist?
     generateChunkTerrain(world, GEN, c.cx, c.cy, c.cz); // fills data, sets dirty
     markNeighborsDirty(world, c.cx, c.cy, c.cz, pcx, pcz);
     rebuilt.push(c);
+    generated.push(c);
     done.add(chunkKey(c.cx, c.cy, c.cz));
   }
   pending.sort((a, b) => cmp(a, b, pcx, pcz, pcy)); // deterministic fetch order (closest first)
@@ -132,6 +137,7 @@ export function update(world: World, pcx: number, pcz: number, pcy = 2, persist?
   dirty.sort((a, b) => cmp(a, b, pcx, pcz, pcy));
   for (const c of dirty.slice(0, REMESH_BUDGET)) {
     rebuilt.push(c);
+    remeshed.push(c);
     done.add(chunkKey(c.cx, c.cy, c.cz));
   }
 
@@ -147,5 +153,5 @@ export function update(world: World, pcx: number, pcz: number, pcy = 2, persist?
     unloaded.push({ cx: c.cx, cy: c.cy, cz: c.cz });
   }
 
-  return { rebuilt, restored, pending, unloaded };
+  return { rebuilt, generated, remeshed, restored, pending, unloaded };
 }

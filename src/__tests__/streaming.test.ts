@@ -199,3 +199,41 @@ describe('streaming — entities ride the unload', () => {
     expect(captured).toBeUndefined();
   });
 });
+
+describe('streaming — generated vs remeshed (multiplayer pre-work D2)', () => {
+  it('a fresh generate lands in generated; a dirty remesh in remeshed; rebuilt is the union', () => {
+    const world = new World();
+    const f = update(world, 2, 2, 2);
+    expect(f.generated).toEqual([{ cx: 2, cy: 2, cz: 2 }]); // cold start: a fresh generate
+    expect(f.remeshed).toEqual([]);
+    expect(f.rebuilt).toEqual([{ cx: 2, cy: 2, cz: 2 }]);   // the union
+    for (const c of f.rebuilt) world.getChunk(c.cx, c.cy, c.cz)!.dirty = false;
+
+    converge(world);
+    for (const c of world.allChunks()) c.dirty = false;
+
+    world.getChunk(2, 2, 2)!.dirty = true; // mark an already-loaded chunk dirty
+    const r = update(world, 2, 2, 2);
+    expect(r.generated).toEqual([]);                        // nothing new to generate
+    expect(r.remeshed).toContainEqual({ cx: 2, cy: 2, cz: 2 }); // it remeshes
+    expect(r.rebuilt).toContainEqual({ cx: 2, cy: 2, cz: 2 });  // still in the union
+    expect(r.rebuilt.length).toBe(1);
+  });
+
+  it('a remeshed (dirty) column is never in generated, so spawnDeer (generated-only) cannot re-top it', () => {
+    // A column that already has 1 deer is a partial column: a remesh must NOT add a second.
+    const world = new World();
+    const sim = new Sim(world, {}, TERRAIN_SEED);
+    converge(world); // all 125 chunks of the (2,2) ring loaded → nothing left to generate
+    for (const c of world.allChunks()) c.dirty = false;
+    sim.spawn({ x: 8, y: 5, z: 8 }, new IdleController()); // a deer in chunk (0,0,0) (in the ring)
+    world.getChunk(0, 0, 0)!.dirty = true; // dirty the deer's column (a remesh, not a generate)
+    const before = sim.all().length;
+    const r = update(world, 2, 2, 2); // same anchor as converge → no missing chunks
+    expect(r.generated).toEqual([]);                            // nothing to generate (converged)
+    expect(r.remeshed).toContainEqual({ cx: 0, cy: 0, cz: 0 }); // the deer's column remeshes
+    // main.ts's spawnDeer loop iterates r.generated only → the deer's column is untouched:
+    for (const c of r.generated) { /* spawnDeer would run here only */ }
+    expect(sim.all().length).toBe(before); // unchanged
+  });
+});

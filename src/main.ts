@@ -1103,7 +1103,7 @@ function tickStreaming(): void {
     lightSim.load(c.cx, c.cy, c.cz); // the worker settles it; the fields land with the tick reply
     deferredFirstMesh.add(chunkKey(c.cx, c.cy, c.cz)); // ADR 0012: the first/fresh mesh waits a guaranteed frame (replies are macrotasks — a load-frame drain would mesh from still-zero light); the frame end moves it into pendingRebuild after the first reply has landed
   }
-  for (const c of r.rebuilt) spawnDeer(world, sim, c.cx, c.cz); // deer into freshly GENERATED (rebuilt) columns only — restored chunks already carry their persisted deer (re-rolling would double-populate and diverge)
+  for (const c of r.generated) spawnDeer(world, sim, c.cx, c.cz); // deer into freshly GENERATED columns only: a remesh must not re-top a column whose deer wandered away (pre-work D2); restored chunks already carry their persisted deer
   for (const c of r.restored) {
     const ch = world.getChunk(c.cx, c.cy, c.cz)!;
     waterSim.restore(ch); // D1: water restored as-is (settled = true) — rebuild springs/waiting/queue, NO settle
