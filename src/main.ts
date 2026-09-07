@@ -692,12 +692,17 @@ camera.rotation.order = 'YXZ';
 function syncCamera(): void {
   const ve = sim.viewed();
   if (!ve) return;
-  // The camera follows the viewed entity's position + look. During playback the viewed entity is
-  // the recorded player body, whose yaw/pitch are driven tick-by-tick by the ReplayController
-  // (stepEntity applies the recorded look) — so the camera plays back the recorded perspective
-  // exactly (position + head rotation). No live-mouse override: the viewer sees what the player saw.
+  // The camera follows the viewed entity's position + look. The client's own body: the position is
+  // interpolated (syncPoses wrote it at renderTick); the look is immediate (the page's
+  // HumanController's live mouse look, not the interpolated pose) — so the look never feels 100 ms
+  // behind, even though the body's position lags by NET_INTERP_TICKS.
   camera.position.set(ve.pos.x, ve.pos.y + ve.kind.eye, ve.pos.z);
-  camera.rotation.set(ve.pitch, ve.yaw, 0);
+  if (mpSession instanceof ClientSession) {
+    const look = human.getLook();
+    camera.rotation.set(look.pitch, look.yaw, 0);
+  } else {
+    camera.rotation.set(ve.pitch, ve.yaw, 0);
+  }
 }
 
 // ?dbg dev-only: exposes the render triple for headless pixel verification (readPixels
@@ -1405,6 +1410,7 @@ function frame(now: number): void {
     }
   }
   profDrainMs = profMode ? performance.now() - profDrainT0 : 0;
+  if (mpSession instanceof ClientSession) mpSession.syncPoses(); // interpolate the entities' poses at renderTick (the own body's position)
   syncCamera();
   updateHitbox();
   syncEntityRigs(dt); // place/update the mob+player rigs; hide the viewed entity's rig (first person)
