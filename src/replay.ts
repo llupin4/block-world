@@ -14,6 +14,8 @@ export interface Replay {
   viewed?: { tick: number; id: number }[]; // the user's PERSPECTIVE over time (possession changes), tick-ordered.
                                             // Optional: old recordings lack it (they follow the snapshot's
                                             // viewedEntityId for the whole session).
+  recordedAt?: number; // wall-clock ms when the recording was SAVED (for the recordings list). Optional:
+                       // old recordings lack it (they sort last / show "—").
   snapshot: ReplaySnapshot;  // every loaded chunk + the WorldMeta at record start (ADR 0014 shapes)
 }
 
@@ -110,10 +112,12 @@ export function viewedAt(replay: Replay, tick: number): number {
 export interface ReplayStore {
   putReplay(key: string, replay: Replay): Promise<void>;
   getReplay(key: string): Promise<Replay | undefined>;
+  listReplays(): Promise<Replay[]>; // every saved recording (the recordings list)
 }
 /** Node-test backend (mirrors InMemoryChunkStore). */
 export class InMemoryReplayStore implements ReplayStore {
   private data = new Map<string, Replay>();
   async putReplay(key: string, replay: Replay): Promise<void> { this.data.set(key, replay); }
   async getReplay(key: string): Promise<Replay | undefined> { return this.data.get(key); }
+  async listReplays(): Promise<Replay[]> { return [...this.data.values()]; }
 }

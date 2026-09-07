@@ -222,6 +222,11 @@ export class Persistence implements PersistSource {
     return this.replayStore?.getReplay(key).catch(() => undefined) ?? Promise.resolve(undefined);
   }
 
+  /** Every saved recording (the recordings list). Error-tolerant (D7): a store failure is an empty list. */
+  listReplays(): Promise<Replay[]> {
+    return this.replayStore?.listReplays().catch(() => []) ?? Promise.resolve([]);
+  }
+
 /** Load the key set + the world meta; resolves with the meta (null when absent).
    *  Never rejects: a store failure leaves an empty key set (D7). */
   async boot(): Promise<WorldMeta | null> {

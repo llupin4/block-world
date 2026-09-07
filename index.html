@@ -35,10 +35,19 @@
         <span class="key">F</span><span>toggle fly</span><span class="key">C</span><span>toggle wireframe</span>
         <span class="key">N</span><span>toggle noclip</span><span class="key">H</span><span>help (this overlay)</span>
         <span class="key">P</span><span>possess the aimed entity / return home</span>
-        <span class="key">R</span><span>start / stop recording (play back with ?replay=…)</span>
+        <span class="key">R</span><span>recordings: list / record / play back</span>
         <span class="key">ESC</span><span>release mouse</span><span class="key">RMB</span><span>on a door: open / close</span>
       </div>
       <div class="foot">H or click to close</div>
+    </div>
+    <!-- recordings list (R): rows are generated in main.ts (one .row per saved recording) -->
+    <div id="replays" class="hidden">
+      <div class="title">recordings</div>
+      <div id="replays-list" class="list"></div>
+      <div class="foot">
+        <button id="replays-record" class="btn">● record new</button>
+        <span class="hint">R or click to close · click a row to play</span>
+      </div>
     </div>
     <div id="help-hint" title="How to play (H)">
       <span class="q">?</span>

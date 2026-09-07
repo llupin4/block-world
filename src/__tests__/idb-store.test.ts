@@ -89,4 +89,16 @@ describe('IndexedDBChunkStore — replays (fake-indexeddb)', () => {
     expect(got!.intents[0].intent.forward).toBe(0);
     expect(got!.simPrng).toBe(0xdeadbeef);
   });
+
+  it('listReplays returns every saved recording (empty store → [])', async () => {
+    setIndexedDB();
+    const store = new IndexedDBChunkStore('bw-idb-replay-list', 2);
+    expect(await store.listReplays()).toEqual([]);
+    await store.putReplay('1234:replay:0', { ...replayRec(), recordedAt: 1000 });
+    await store.putReplay('1234:replay:100', { ...replayRec(), startTick: 100, recordedAt: 2000 });
+    const all = await store.listReplays();
+    expect(all).toHaveLength(2);
+    expect(all.map((r) => r.startTick).sort()).toEqual([0, 100]);
+    expect(all.map((r) => r.recordedAt).sort()).toEqual([1000, 2000]);
+  });
 });

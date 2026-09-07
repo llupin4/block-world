@@ -614,7 +614,10 @@ window.addEventListener('keydown', (e) => {
   if (e.repeat) return;
   if (e.code === 'KeyF') human.toggleFly(); // fly toggle (a one-tick edge the sim consumes)
   if (e.code === 'KeyN') human.toggleNoclip(); // noclip toggle
-  if (e.code === 'KeyR') toggleRecording(); // record start/stop (phase 3, ADR 0017)
+  if (e.code === 'KeyR') {
+    if (recording) { stopRecording(); openReplays(); } // stop + auto-open the list (the new recording is there)
+    else toggleReplays(); // open/close the recordings list
+  }
   if (e.code === 'KeyE') togglePalette(); // creative palette: open (unlock) / close (re-lock)
   if (e.code === 'KeyH') toggleHelp(); // help overlay: same open (unlock) / close (re-lock)
   if (e.code === 'KeyC') setWireframe(!wireframeOn); // wireframe (PROJECT.md §14: chunk-edge bugs)
@@ -628,6 +631,7 @@ window.addEventListener('keyup', (e) => keys.delete(e.code));
 renderer.domElement.addEventListener('click', () => {
   if (paletteOpen) closePalette();
   else if (helpOpen) closeHelp();
+  else if (replaysOpen) closeReplays();
   else lockPointer();
 });
 
@@ -797,6 +801,7 @@ function stopRecording(): void {
     events: recorder.events,
     intents: recorder.intents, // delta-coded: an entity with no entry at a tick repeats its previous intent
     viewed: recorder.viewed,   // the user's perspective over time (possession changes)
+    recordedAt: Date.now(),    // wall-clock save time (for the recordings list)
     snapshot: recordStartSnapshot, // the initial state (record start)
   };
   const key = `${TERRAIN_SEED}:replay:${replay.startTick}`;
@@ -805,8 +810,6 @@ function stopRecording(): void {
   recorder = null; recording = false; recordStartSnapshot = null;
   console.log(`[replay] saved ${key} — ${replay.intents.length} intents, ${replay.events.length} events (replay with ?replay=${key})`);
 }
-
-function toggleRecording(): void { if (recording) stopRecording(); else startRecording(); }
 
 // === ui ===
 
@@ -873,8 +876,12 @@ hotbar.onSlotChange = (i) => {
 
 let paletteOpen = false;
 let helpOpen = false;
+let replaysOpen = false;
 const helpEl = document.getElementById('help')!;
 const helpHintEl = document.getElementById('help-hint')!;
+const replaysEl = document.getElementById('replays')!;
+const replaysListEl = document.getElementById('replays-list')!;
+const replaysRecordEl = document.getElementById('replays-record')!;
 
 // Browsers enforce a ~1 s re-lock cooldown after ESC; a rejected request is benign
 // (the cooldown is the only realistic failure), so swallow it rather than throw.
@@ -883,10 +890,10 @@ function lockPointer(): void {
   if (r instanceof Promise) r.catch(() => {}); // Safari rejects without a user gesture
 }
 
-// Invariant: at most one overlay (palette/help) is open. The badge advertises help and is
+// Invariant: at most one overlay (palette/help/replays) is open. The badge advertises help and is
 // visible only when nothing is open.
 function syncOverlays(): void {
-  helpHintEl.classList.toggle('hidden', paletteOpen || helpOpen);
+  helpHintEl.classList.toggle('hidden', paletteOpen || helpOpen || replaysOpen);
 }
 
 function closePalette(): void {
@@ -902,6 +909,10 @@ function openPalette(): void {
   if (helpOpen) {
     helpOpen = false;
     helpEl.classList.add('hidden');
+  }
+  if (replaysOpen) {
+    replaysOpen = false;
+    replaysEl.classList.add('hidden');
   }
   paletteOpen = true;
   paletteEl.classList.remove('hidden');
@@ -921,6 +932,10 @@ function openHelp(): void {
     paletteOpen = false;
     paletteEl.classList.add('hidden');
   }
+  if (replaysOpen) {
+    replaysOpen = false;
+    replaysEl.classList.add('hidden');
+  }
   helpOpen = true;
   helpEl.classList.remove('hidden');
   syncOverlays();
@@ -937,6 +952,85 @@ function toggleHelp(): void {
   else openHelp();
 }
 
+// The recordings list (R): a centered panel of the saved recordings (newest first) + a
+// "record new" button. Opening it fetches the list from the replay store and closes the
+// other overlays. A row click reloads the page with ?replay=<key> (a full-page load of that session).
+function openReplays(): void {
+  if (paletteOpen) {
+    paletteOpen = false;
+    paletteEl.classList.add('hidden');
+  }
+  if (helpOpen) {
+    helpOpen = false;
+    helpEl.classList.add('hidden');
+  }
+  replaysOpen = true;
+  replaysEl.classList.remove('hidden');
+  syncOverlays();
+  document.exitPointerLock();
+  refreshReplayList(); // (re)load the recordings (async; renders into the panel when resolved)
+}
+
+function closeReplays(): void {
+  replaysEl.classList.add('hidden');
+  replaysOpen = false;
+  syncOverlays();
+  lockPointer();
+}
+
+function toggleReplays(): void {
+  if (replaysOpen) closeReplays();
+  else openReplays();
+}
+
+// Fetch the saved recordings and render them (newest first). Called on open and after a save.
+function refreshReplayList(): void {
+  persist.listReplays().then((replays) => {
+    if (!replaysOpen) return; // closed while the fetch was in flight — don't render into a hidden panel
+    buildReplayList(replays);
+  });
+}
+
+// Render the recordings list: one row per recording (date, length, start tick). An empty store
+// shows a hint. Each row is a full-page load of its session (?replay=<key>).
+function buildReplayList(replays: Replay[]): void {
+  replaysListEl.replaceChildren();
+  if (replays.length === 0) {
+    const empty = document.createElement('div');
+    empty.className = 'empty';
+    empty.textContent = 'no recordings yet — press R, then record something';
+    replaysListEl.append(empty);
+    return;
+  }
+  const sorted = [...replays].sort((a, b) => (b.recordedAt ?? 0) - (a.recordedAt ?? 0)); // newest first
+  for (const r of sorted) {
+    const key = `${r.seed}:replay:${r.startTick}`;
+    const row = document.createElement('div');
+    row.className = 'row';
+    const when = document.createElement('span');
+    when.className = 'when';
+    when.textContent = r.recordedAt ? new Date(r.recordedAt).toLocaleString() : '—';
+    const len = document.createElement('span');
+    len.className = 'len';
+    len.textContent = `${((r.endTick - r.startTick) * STEP).toFixed(1)} s`;
+    const tick = document.createElement('span');
+    tick.className = 'tick';
+    tick.textContent = `#${r.startTick}`;
+    row.append(when, len, tick);
+    row.addEventListener('click', () => {
+      const url = new URL(location.href);
+      url.searchParams.set('replay', key);
+      location.href = url.toString(); // full-page load of the session
+    });
+    replaysListEl.append(row);
+  }
+}
+
+replaysRecordEl.addEventListener('click', () => {
+  startRecording(); // begin a recording (the list closes; the new recording appears on stop)
+  closeReplays();
+});
+
 helpHintEl.addEventListener('click', () => { if (!helpOpen) openHelp(); });
 
 // The default hotbar select happens in startGame (a restored meta takes the slots instead).
@@ -945,7 +1039,7 @@ helpHintEl.addEventListener('click', () => { if (!helpOpen) openHelp(); });
 window.addEventListener(
   'wheel',
   (e) => {
-    if (paletteOpen || helpOpen) return; // an open overlay owns the wheel (and the mouse is free)
+    if (paletteOpen || helpOpen || replaysOpen) return; // an open overlay owns the wheel (and the mouse is free)
     hotbar.cycle(e.deltaY > 0 ? 1 : -1);
     human.select(hotbar.selected); // reported for replay; unwired in phase 1
   },

@@ -89,6 +89,46 @@ html, body { width: 100%; height: 100%; overflow: hidden; background: #0b0e14; }
 }
 #help .foot { margin-top: 10px; color: rgba(232, 238, 247, .6); font-size: 12px; }
 
+/* recordings list (R): centered panel of the saved recordings (newest first) + a "record new"
+   button (phase 3). A row is a full-page load of its session (?replay=<key>). */
+#replays {
+  position: fixed; left: 50%; top: 50%; transform: translate(-50%, -50%);
+  width: min(90vw, 520px);
+  padding: 18px 22px;
+  background: rgba(10, 14, 22, .85); border-radius: 10px;
+  color: #e8eef7; font: 13px/1.6 system-ui, sans-serif;
+  text-shadow: 0 1px 2px #000;
+}
+#replays .title { font-weight: 600; font-size: 15px; margin-bottom: 10px; }
+#replays .list {
+  display: flex; flex-direction: column; gap: 6px;
+  max-height: 60vh; overflow-y: auto; margin-bottom: 12px;
+}
+#replays .list { scrollbar-width: thin; scrollbar-color: rgba(150, 170, 200, .45) transparent; }
+#replays .list::-webkit-scrollbar { width: 8px; }
+#replays .list::-webkit-scrollbar-thumb { background: rgba(150, 170, 200, .4); border-radius: 4px; }
+#replays .row {
+  display: grid; grid-template-columns: 1fr auto auto;
+  gap: 10px; align-items: center;
+  padding: 8px 10px;
+  background: rgba(255, 255, 255, .06); border-radius: 6px;
+  cursor: pointer;
+}
+#replays .row:hover { background: rgba(255, 255, 255, .14); }
+#replays .row .when { font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#replays .row .len { font-size: 12px; color: #9fd0a0; font-variant-numeric: tabular-nums; }
+#replays .row .tick { font-size: 11px; color: rgba(232, 238, 247, .55); font-variant-numeric: tabular-nums; }
+#replays .empty { padding: 18px 4px; color: rgba(232, 238, 247, .6); font-size: 12px; }
+#replays .foot { display: flex; align-items: center; gap: 10px; }
+#replays .btn {
+  padding: 6px 12px;
+  background: rgba(159, 208, 160, .18); border: 1px solid rgba(159, 208, 160, .5);
+  border-radius: 6px; color: #9fd0a0; font: 12px/1.4 system-ui, sans-serif;
+  cursor: pointer; text-shadow: none;
+}
+#replays .btn:hover { background: rgba(159, 208, 160, .3); }
+#replays .hint { font-size: 11px; color: rgba(232, 238, 247, .5); }
+
 /* shared keycap look: help grid, badge's "h", hotbar slot numbers */
 .key {
   display: inline-block;

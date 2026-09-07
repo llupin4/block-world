@@ -63,6 +63,19 @@ describe('replay — delta-coding + ReplayController', () => {
     expect(await s.getReplay('1:replay:99')).toBeUndefined();
   });
 
+  it('InMemoryReplayStore.listReplays returns every saved recording (empty → [])', async () => {
+    const s = new InMemoryReplayStore();
+    expect(await s.listReplays()).toEqual([]);
+    const mk = (startTick: number, recordedAt?: number): Replay =>
+      ({ seed: 1, startTick, endTick: startTick + 10, simPrng: 42, events: [], intents: [], recordedAt, snapshot: { chunks: [], meta: {} as never } });
+    await s.putReplay('1:replay:0', mk(0, 1000));
+    await s.putReplay('1:replay:100', mk(100, 2000));
+    const all = await s.listReplays();
+    expect(all).toHaveLength(2);
+    expect(all.map((r) => r.startTick).sort()).toEqual([0, 100]);
+    expect(all.map((r) => r.recordedAt).sort()).toEqual([1000, 2000]);
+  });
+
   it('parseReplayParam reads the ?replay key (or null)', () => {
     expect(parseReplayParam('?replay=1234:replay:0')).toBe('1234:replay:0');
     expect(parseReplayParam('?foo=bar')).toBeNull();

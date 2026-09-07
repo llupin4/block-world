@@ -378,13 +378,15 @@ Highlight box: a `THREE.LineSegments` wireframe cube, repositioned to `hit + 0.5
 >
 > **Phase 3 (2026-09-06, [ADR 0017](docs/adr/0017-replay.md)).** Because every world change flows
 > through intents on the tick (ADR 0015) and the sim is deterministic (ADR 0016), a **replay is an
-> initial snapshot + a delta-coded intent log** (`src/replay.ts`). `R` records a session to a
-> `replays` IndexedDB store (key `${seed}:replay:${startTick}`); `?replay=<key>` restores the
-> snapshot on a fresh world and plays the log back deterministically — each entity driven by a
-> pull-model `ReplayController` that reports the last logged intent at the current tick. The
-> spectator ghost watches non-perturbingly (its kind `canEdit: false`) and head-follows the live
-> mouse. The round-trip test (record → replay, byte/`1e-9` identical) + a seek test are the
-> load-bearing determinism gate.
+> initial snapshot + a delta-coded intent log** (`src/replay.ts`). `R` opens the **recordings list**
+> (`#replays`): a "record new" button starts a session (saved to the `replays` IndexedDB store, key
+> `${seed}:replay:${startTick}`, with a `recordedAt`), and `R` while recording stops it. `?replay=<key>`
+> restores the snapshot on a fresh world and plays the log back deterministically — each entity driven
+> by a pull-model `ReplayController` that reports the last logged intent at the current tick. The
+> camera follows the **recorded perspective** (the viewed entity at record start, switched by
+> `viewedAt` as the user possessed others) — no live-mouse head-follow, so the viewer sees exactly
+> what the recorder saw. The round-trip test (record → replay, byte/`1e-9` identical) + a seek test
+> are the load-bearing determinism gate.
 
 **Camera & input.** Pointer Lock API. `mousemove` deltas accumulate into yaw/pitch; clamp pitch to ±(π/2 − 0.01) so you never gimbal at straight up/down.
 

@@ -94,4 +94,9 @@ export class IndexedDBChunkStore implements ChunkStore {
     const r = await this.txReplay<Replay | undefined>('readonly', (s) => s.get(key) as IDBRequest<Replay | undefined>);
     return r ?? undefined;
   }
+
+  /** Every saved recording (the recordings list): one `getAll()` over the `replays` store. */
+  async listReplays(): Promise<Replay[]> {
+    return this.txReplay<Replay[]>('readonly', (s) => s.getAll() as IDBRequest<Replay[]>);
+  }
 }

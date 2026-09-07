@@ -15,17 +15,22 @@ made the sim deterministic (a fixed id-order `tick` + a sim-owned, tick-ordered 
 consequence: a whole session is re-derivable from an **initial snapshot + an intent log** — no
 per-tick state is needed, because every state change is an intent. Phase 3 captures that
 invariant concretely. Record a session (`R`), persist it to IndexedDB, and play it back
-**deterministically** on a fresh world. The **spectator** (ADR 0016's single ghost) can watch a
-playback with its own live human controller — which, because the kind is `canEdit: false`, emits
-no world-changing intents — so it never perturbs the replay. The **round-trip determinism test is
-the load-bearing invariant**: record a session, replay it on a fresh world, and assert every
+**deterministically** on a fresh world. A playback is non-perturbing: every entity is driven by a
+`ReplayController` (the replayed intents), so the recorded world is never touched by live input, and
+the camera follows the recorded perspective (what the recorder actually saw). The **round-trip
+determinism test is the load-bearing invariant**: record a session, replay it on a fresh world, and
+assert every
 loaded chunk's arrays and every entity's transform are byte/`1e-9` identical (and that seeking
 re-simulates to the same state).
 
 ## Decision
 
 **The model (`src/replay.ts`).** A `Replay` is `{ seed, startTick, endTick, simPrng, events,
-intents, snapshot }`. The `snapshot` reuses ADR 0014's shapes (`ChunkRecord[]` + `WorldMeta`) so
+intents, viewed?, recordedAt?, snapshot }`. `viewed` is a tick-ordered list of `{ tick, id }` — the
+PERSPECTIVE (viewed entity) the user switched to by possessing entities, so playback follows what
+they actually saw (a possessed deer, not always the player body); optional, old recordings lack it.
+`recordedAt` is the wall-clock ms the recording was saved (the recordings list sorts newest-first);
+also optional. The `snapshot` reuses ADR 0014's shapes (`ChunkRecord[]` + `WorldMeta`) so
 a replay restores exactly like a saved world. The `intents` are **delta-coded**: an `IntentEntry`
 is `{ tick, entityId, intent }`, and an entity with no entry at a tick **repeats its previous
 intent** (`intentEqual` compares the optional fields — `select`/`block`/toggles — with sentinels
@@ -37,7 +42,8 @@ at **record start** (restored before replaying).
 
 **The `Recorder`.** `attach(sim)` wires the sim's `onIntent`/`onSpawn`/`onDespawn` hooks (ADR
 0015's sim now exposes them). The `onIntent(tick, e, it)` callback delta-codes: it logs an intent
-only when it differs from the entity's last logged intent. The snapshot + `simPrng` + `startTick`
+only when it differs from the entity's last logged intent. `onViewed(tick, id)` (called from the
+browser on possession) logs the perspective switch into `viewed`. The snapshot + `simPrng` + `startTick`
 are captured at **record start** (the initial state); `endTick` + the log are read at record stop.
 
 **The `ReplayController`.** A pull-model controller (implements `Controller.intent(e, tick)`)
@@ -53,18 +59,22 @@ silently never be created for returning users (the fresh-DB node test masks this
 user's DB fires `onupgradeneeded` (v1 → v2) and `replays` is created. `Persistence.saveReplay` /
 `loadReplay` are error-tolerant (D7: a store failure is a no-op). Key: `${seed}:replay:${startTick}`.
 
-**The browser (`main.ts`).** `R` toggles recording (capture the snapshot/PRNG/tick at start, wire
-the `Recorder`; on stop, build the `Replay` and `saveReplay`). `?replay=<key>` loads a replay and
-**skips the boot spawn/restore** — a boot-spawned player id 1 would shadow the snapshot's entity id
-1 — and instead restores the snapshot: chunk arrays via `applyRecord` (the 2-arg form), water via
-`waterSim.restore`, light via `lightSim.load` (never persisted — the worker re-settles it),
-entities via `sim.restoreEntities` with the `ReplayController` factory, the PRNG via
+**The browser (`main.ts`).** `R` opens the **recordings list** (`#replays`, a centered panel of the
+saved recordings, newest-first, each row a full-page `?replay=<key>` load); a "record new" button
+starts a recording, and pressing `R` while recording **stops** it and re-opens the list. A
+recording captures the snapshot/PRNG/tick at start, wires the `Recorder` (intents + spawn/despawn +
+`onViewed`), and on stop builds the `Replay` (with `recordedAt`) and `saveReplay`. `?replay=<key>`
+loads a replay and **skips the boot spawn/restore** — a boot-spawned player id 1 would shadow the
+snapshot's entity id 1 — and instead restores the snapshot: chunk arrays via `applyRecord` (the
+2-arg form), water via `waterSim.restore`, light via `lightSim.load` (never persisted — the worker
+re-settles it), entities via `sim.restoreEntities` with the `ReplayController` factory, the PRNG via
 `sim.rng.restore(replay.simPrng)`, the world time via `worldTime.restore`. The frame loop's substep
 is **unchanged** (`sim.tick` + `worldTime.advance`); playback just uses `ReplayController`s plus a
-pause/end check. The camera follows the spectator ghost (`sim.setViewed(ghostId)`), and the ghost's
-look **head-follows the live mouse** (`human.getLook()` → the ghost's `yaw`/`pitch`), so the
-spectator can look around the recorded world without touching it. A scrub HUD (`#scrub`) shows the
-recording/playback state + the current tick.
+pause/end check. The camera follows the **recorded perspective**: the viewed entity at record start
+(the snapshot's `viewedEntityId`), switched each substep by `viewedAt(replay, tick)` to whatever the
+user possessed during the recording — so the viewer sees exactly what the recorder saw (position +
+head rotation, from the replayed intents). No live-mouse head-follow (it would mask the recorded
+look). A scrub HUD (`#scrub`) shows the recording/playback state + the current tick.
 
 ## Alternatives
 
@@ -88,9 +98,10 @@ recording/playback state + the current tick.
   the replay** (likely suspects: `Set`/`Map` iteration that depends on insertion timing across
   frames, `performance.now()` leaking into sim state). The light is **excluded** — it does not
   affect sim state (the worker re-settles it on load).
-- **The spectator is non-perturbing.** Its kind `canEdit: false` means its live human controller
-  emits no world-changing intents, so watching a playback never perturbs it. The head-follow is
-  cosmetic (the ghost's look follows the mouse; its position is the recorded world's).
+- **The playback is non-perturbing.** During playback every entity is driven by a `ReplayController`
+  (replayed intents), not the live human controller, so watching never perturbs the recorded world.
+  The camera follows the recorded perspective (position + look from the replayed intents) — no
+  live-mouse override, so the recorded head-rotation is what the viewer sees.
 - **The snapshot covers the recorded area.** A replay is fully deterministic for the chunks in its
   snapshot; a playback that streams a *new* area beyond the snapshot re-generates the terrain
   (deterministic per seed) and re-settles the light/water. Short sessions (the player stays in the
