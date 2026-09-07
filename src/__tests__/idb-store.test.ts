@@ -73,3 +73,20 @@ describe('IndexedDBChunkStore (fake-indexeddb)', () => {
     expect(await store.keys('nope:')).toEqual([]);
   });
 });
+
+const replayRec = (): import('../replay').Replay => ({
+  seed: 1234, startTick: 0, endTick: 10, simPrng: 0xdeadbeef, events: [],
+  intents: [{ tick: 0, entityId: 1, intent: { forward: 0, strafe: 0, up: false, down: false, yaw: 0, pitch: 0, primary: false, secondary: false } }],
+  snapshot: { chunks: [], meta: { v: 2, seed: 1234, entities: [], viewedEntityId: 1, time: { time: 0, tick: 0, phaseTotal: 0 }, hotbar: { slots: [1, 2, 3, 4, 5, 6, 7, 8, 9], selected: 0 } } },
+});
+
+describe('IndexedDBChunkStore — replays (fake-indexeddb)', () => {
+  it('putReplay/getReplay round-trips a replay', async () => {
+    setIndexedDB();
+    const store = new IndexedDBChunkStore('bw-idb-replay', 2);
+    await store.putReplay('1234:replay:0', replayRec());
+    const got = await store.getReplay('1234:replay:0');
+    expect(got!.intents[0].intent.forward).toBe(0);
+    expect(got!.simPrng).toBe(0xdeadbeef);
+  });
+});

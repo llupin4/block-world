@@ -1,5 +1,6 @@
 import { type Chunk, type World } from './world';
 import { type EntityRecord, type Controller } from './entity';
+import { type Replay, type ReplayStore } from './replay';
 
 declare global {
   interface Window {
@@ -194,6 +195,7 @@ const WARM_CAP = 512;
  */
 export class Persistence implements PersistSource {
   private readonly store: ChunkStore | null;
+  private readonly replayStore: ReplayStore | null; // phase 3: the replay log store (ADR 0017)
   private readonly seed: number;
   private readonly warm = new Map<string, ChunkRecord>(); // insertion-ordered: oldest = first key
   private readonly persistedKeys = new Set<string>(); // preloaded at boot; updated on put/drop
@@ -201,13 +203,23 @@ export class Persistence implements PersistSource {
   private readonly pendingPuts = new Set<Promise<void>>();
   meta: WorldMeta | null = null;
 
-  constructor(store: ChunkStore | null, seed: number) {
+  constructor(store: ChunkStore | null, seed: number, replayStore?: ReplayStore) {
     this.store = store;
     this.seed = seed;
+    this.replayStore = replayStore ?? null;
   }
 
   key(cx: number, cy: number, cz: number): string {
     return chunkRecordKey(this.seed, cx, cy, cz);
+  }
+
+  // --- replays (phase 3, ADR 0017): error-tolerant (D7) — a store failure is a no-op ---
+  saveReplay(key: string, replay: Replay): void {
+    this.replayStore?.putReplay(key, replay).catch(() => undefined);
+  }
+
+  loadReplay(key: string): Promise<Replay | undefined> {
+    return this.replayStore?.getReplay(key).catch(() => undefined) ?? Promise.resolve(undefined);
   }
 
 /** Load the key set + the world meta; resolves with the meta (null when absent).
