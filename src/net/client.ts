@@ -1,12 +1,13 @@
 import { World, chunkKey, chunkOf } from '../world';
 import { Sim, NULL_INTENT, type Controller, type Intent } from '../entity';
 import { applyRecord, type ChunkRecord } from '../persistence';
-import { update as streamUpdate, VIEW_RADIUS, type Anchor } from '../streaming';
-import { type Msg, type CellWrite, PROTOCOL_VERSION } from './messages';
+import { update as streamUpdate, VIEW_RADIUS, type Anchor, type StreamingUpdate } from '../streaming';
+import { type Msg, type CellWrite, PROTOCOL_VERSION, NET_INTERP_TICKS } from './messages';
 import { NetworkPersistSource } from './network-persist';
 import { intentEqual } from '../replay';
 import { type Transport } from './transport';
 import { WorldTime } from '../time';
+import { PoseRing, interpose } from './interp';
 
 // A frozen container controller: client entities never self-drive (their poses come from `state`),
 // so their controller just reports NULL_INTENT.
@@ -25,6 +26,9 @@ export class ClientSession {
   private readonly transport: Transport;
   private name = '';
   entityId = -1; // the host-assigned id for this client's entity (set on welcome); public for tests/rejoin
+  lastStream: StreamingUpdate | null = null; // the last substep's own-ring streaming result (the frame consumes it)
+  private rings = new Map<number, PoseRing>(); // per-entity jitter buffer (host-tick-tagged poses)
+  private lightEdit: ((x: number, y: number, z: number) => void) | null = null; // set by the boot (the page's lightSim.edit)
   private own = { x: 0, y: 0, z: 0, yaw: 0, pitch: 0 }; // the last state pose for the own entity
   private lastIntent: Intent | undefined;
   private joined = false;
@@ -51,12 +55,15 @@ export class ClientSession {
   }
   private fire(ev: string): void { for (const cb of this.handlers.get(ev) ?? []) cb(); }
 
+  /** The boot wires the page's light worker here: on a `cells` batch the client's light tracks the host's edits. */
+  setLightEdit(fn: (x: number, y: number, z: number) => void): void { this.lightEdit = fn; }
+
   private parse(key: string): [number, number, number] {
     const [a, b, c] = key.split(',').map(Number);
     return [a, b, c];
   }
 
-  private onMessage(msg: Msg): void {
+  onMessage(msg: Msg): void {
     switch (msg.type) {
       case 'welcome': {
         this.entityId = msg.yourEntityId;
@@ -77,13 +84,16 @@ export class ClientSession {
       case 'state':
         for (const n of msg.entities) {
           if (n.id === this.entityId) this.own = { x: n.x, y: n.y, z: n.z, yaw: n.yaw, pitch: n.pitch };
+          let ring = this.rings.get(n.id);
+          if (!ring) { ring = new PoseRing(); this.rings.set(n.id, ring); }
+          ring.push({ tick: msg.tick, x: n.x, y: n.y, z: n.z, yaw: n.yaw, pitch: n.pitch }); // host-tick-tagged sample (interpolation)
           const ent = this.sim.entities.get(n.id);
           if (ent) { ent.pos = { x: n.x, y: n.y, z: n.z }; ent.yaw = n.yaw; ent.pitch = n.pitch; }
         }
         break;
       case 'cells': this.applyCells(msg.chunk, msg.writes); break;
       case 'spawn': this.sim.restoreEntity(msg.pose, NULL_CTRL); break;
-      case 'despawn': this.sim.despawn(msg.id); break;
+      case 'despawn': this.sim.despawn(msg.id); this.rings.delete(msg.id); break;
       case 'time': this.worldTime.slew(msg.worldTime); break; // the client keeps its own tick (the frame loop owns it)
       default: break;
     }
@@ -96,6 +106,10 @@ export class ClientSession {
     for (const [idx, block, meta, l, s, p, st] of writes) {
       c.blocks[idx] = block; c.meta[idx] = meta;
       c.wlevel[idx] = l; c.wsource[idx] = s; c.wplaced[idx] = p; c.wstream[idx] = st;
+      if (this.lightEdit) { // the client's light tracks the host's edits (localIndex = lx + lz*16 + ly*256)
+        const lx = idx % 16, lz = ((idx / 16) | 0) % 16, ly = ((idx / 256) | 0) % 16;
+        this.lightEdit(cx * 16 + lx, cy * 16 + ly, cz * 16 + lz);
+      }
     }
   }
 
@@ -119,8 +133,23 @@ export class ClientSession {
     }
     const anchor: Anchor = { cx: chunkOf(this.own.x), cz: chunkOf(this.own.z), cy: 2, radius: VIEW_RADIUS, meshable: true };
     const r = streamUpdate(this.world, [anchor], this.persist, this.sim);
+    this.lastStream = r; // [B1] the frame consumes it once per frame (consumeStream)
     for (const c of r.generated) this.transport.send('all', { type: 'chunkLoaded', key: chunkKey(c.cx, c.cy, c.cz) });
     for (const c of r.unloaded) this.transport.send('all', { type: 'chunkUnloaded', key: chunkKey(c.cx, c.cy, c.cz) });
+  }
+
+  /** The frame calls this once per frame (after the substep): interpolate each entity's pose at
+   * renderTick = worldTime.tick − NET_INTERP_TICKS and write it to the sim (so the rig + camera
+   * use the interpolated pose). The own body's position is interpolated; its look is client-owned
+   * (the camera's yaw/pitch come from the human controller, not this). */
+  syncPoses(): void {
+    const renderTick = this.worldTime.tick - NET_INTERP_TICKS;
+    for (const [id, ring] of this.rings) {
+      const ent = this.sim.entities.get(id);
+      if (!ent) continue;
+      const p = interpose(ring.samples, renderTick);
+      ent.pos = { x: p.x, y: p.y, z: p.z }; ent.yaw = p.yaw; ent.pitch = p.pitch;
+    }
   }
 
   /** Drop the connection (the host sees the peer leave and persists the pose). */
