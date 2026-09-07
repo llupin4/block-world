@@ -511,6 +511,8 @@ export class Sim {
   readonly rng: SimRng;
   // Phase 3: the intent recorder. Phase 1 leaves it unset.
   onIntent?: (tick: number, e: Entity, it: Intent) => void;
+  onSpawn?: (e: Entity) => void;   // phase 3: the Recorder captures spawn events (mid-session spawns)
+  onDespawn?: (e: Entity) => void; // phase 3: the Recorder captures despawn events
 
   private readonly world: World;
   private readonly hooks: ApplyHooks;
@@ -545,10 +547,13 @@ export class Sim {
     };
     this.entities.set(e.id, e);
     if (this.viewedId === 0) this.viewedId = e.id;
+    this.onSpawn?.(e);
     return e;
   }
 
   despawn(id: number): void {
+    const e = this.entities.get(id);
+    if (e) this.onDespawn?.(e); // the Recorder captures the despawn before the entity is gone
     this.entities.delete(id);
     if (this.viewedId === id) {
       this.viewedId = 0;
