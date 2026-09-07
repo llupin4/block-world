@@ -331,8 +331,8 @@ async function startGame(meta: WorldMeta | null): Promise<void> {
   // player id 1 would shadow the snapshot's entity id 1, so skip the normal spawn/restore.
   const replayKey = parseReplayParam(location.search);
   if (replayKey) {
-    void persist.loadReplay(replayKey).then((replay) => {
-      if (!replay) { console.log(`[replay] not found: ${replayKey}`); return; }
+    const replay = await persist.loadReplay(replayKey); // await (startGame is async) so the frame loop starts AFTER the load — no race with an empty sim
+    if (replay) {
       for (const rec of replay.snapshot.chunks) {
         applyRecord(world, rec); // chunk arrays only (the 2-arg form: no entity restore)
         const c = world.getChunk(rec.cx, rec.cy, rec.cz);
@@ -360,9 +360,12 @@ async function startGame(meta: WorldMeta | null): Promise<void> {
       sim.setViewed(sim.ghostId); // camera follows the live spectator, not the recorded viewed entity
       playback = { replay, paused: false };
       console.log(`[replay] loaded ${replay.intents.length} deltas, playing ${replay.startTick}..${replay.endTick}`);
-    });
-    requestAnimationFrame(frame);
-    return;
+      syncCamera();
+      requestAnimationFrame(frame); // the sim is now populated — the first frame is safe (no race with the async load)
+      return;
+    }
+    console.warn(`[replay] not found: ${replayKey} — starting a fresh world instead`);
+    // fall through to the normal boot path below (a missing replay must not leave a blank screen)
   }
   // T10: only the spawn column is generated up front — here it is either RESTORED (a
   // persisted, edited spawn column: arrays verbatim, settled = true, no settle) or
@@ -1119,7 +1122,8 @@ function frame(now: number): void {
   // skipped rebuilds carry one more frame. A probe-complete mesh is ≤ PROBE_VERTS verts =
   // ≤ 16.7 ms by construction, so it flows through the ordinary budget.
   const profDrainT0 = profMode ? performance.now() : 0; // the rig attributes the drain's share of the frame
-  const vp = sim.viewed()!; const pcx = chunkOf(vp.pos.x), pcy = chunkOf(vp.pos.y), pcz = chunkOf(vp.pos.z); // re-mesh closest to the VIEWED entity first
+  const vp = sim.viewed(); // re-mesh closest to the VIEWED entity first; ?? origin if the sim is (still) empty
+  const pcx = chunkOf(vp?.pos.x ?? 0), pcy = chunkOf(vp?.pos.y ?? 0), pcz = chunkOf(vp?.pos.z ?? 0);
   const inFlight = scheduler.inFlightKey();
   if (inFlight) {
     const [cx, cy, cz] = inFlight.split(',').map(Number) as [number, number, number];
