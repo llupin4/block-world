@@ -2,7 +2,7 @@ import { describe, it, expect } from 'vitest';
 import { Block } from '../blocks';
 import { World } from '../world';
 import { TERRAIN_SEED, TerrainGen } from '../terrain';
-import { update } from '../streaming';
+import { update, inRing } from '../streaming';
 import { InMemoryChunkStore, Persistence, applyRecord, type PersistSource } from '../persistence';
 import { Sim, IdleController, type EntityRecord } from '../entity';
 
@@ -235,5 +235,32 @@ describe('streaming — generated vs remeshed (multiplayer pre-work D2)', () => 
     // main.ts's spawnDeer loop iterates r.generated only → the deer's column is untouched:
     for (const c of r.generated) { /* spawnDeer would run here only */ }
     expect(sim.all().length).toBe(before); // unchanged
+  });
+});
+
+describe('streaming — union ring (multiplayer, T3)', () => {
+  it('a chunk is alive if it is in range of ANY anchor', () => {
+    expect(inRing({ cx: 0, cz: 0 }, [{ cx: 0, cz: 0 }, { cx: 4, cz: 4 }])).toBe(true);
+    expect(inRing({ cx: 4, cz: 4 }, [{ cx: 0, cz: 0 }, { cx: 4, cz: 4 }])).toBe(true);
+    expect(inRing({ cx: 8, cz: 8 }, [{ cx: 0, cz: 0 }, { cx: 4, cz: 4 }])).toBe(false);
+  });
+
+  it('does not unload a dirty chunk that is only in range of a remote anchor', () => {
+    const world = new World();
+    const c = world.ensureChunk(0, 0, 0);
+    c.edited = true;
+    c.dirty = true;
+    // Player stands at (4,4); the remote anchor keeps (0,0,0) alive.
+    const r = update(world, 4, 4, 2, undefined, undefined, [{ cx: 0, cz: 0 }]);
+    expect(r.unloaded).toEqual([]);
+    expect(world.hasChunk(0, 0, 0)).toBe(true);
+  });
+
+  it('with no remote anchors (undefined) the player ring alone governs (single player, unchanged)', () => {
+    const world = new World();
+    world.ensureChunk(0, 0, 0).edited = true;
+    const r = update(world, 4, 4, 2, undefined, undefined); // undefined anchors → player's own ring
+    // (0,0,0) is outside the (4,4) ring and no remote anchor covers it → it unloads.
+    expect(r.unloaded).toContainEqual({ cx: 0, cy: 0, cz: 0 });
   });
 });

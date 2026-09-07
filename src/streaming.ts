@@ -56,6 +56,15 @@ export function inRange(cx: number, cz: number, pcx: number, pcz: number): boole
   return Math.abs(cx - pcx) <= VIEW_RADIUS && Math.abs(cz - pcz) <= VIEW_RADIUS;
 }
 
+/** Union ring (multiplayer): a chunk is meshable/alive if it is in range of ANY anchor
+ *  (the host's own player + every connected client). A null/empty anchor set is the
+ *  single-player degenerate case. Exported for tests. */
+export function inRing(c: { cx: number; cz: number }, anchors: Coord[]): boolean {
+  if (anchors.length === 0) return false;
+  for (const a of anchors) if (inRange(c.cx, c.cz, a.cx, a.cz)) return true;
+  return false;
+}
+
 /** Mark existing in-range neighbors of (cx,cy,cz) dirty: their culling is stale after a load/unload/restore. Exported: main.ts marks after an async (cold) apply. */
 export function markNeighborsDirty(world: World, cx: number, cy: number, cz: number, pcx: number, pcz: number): void {
   const n: [number, number, number][] = [
@@ -86,7 +95,7 @@ export function markNeighborsDirty(world: World, cx: number, cy: number, cz: num
  *      are marked dirty first (newly exposed boundary faces).
  * Pure TS (no three) so vitest can drive it; main.ts turns the result into scene work.
  */
-export function update(world: World, pcx: number, pcz: number, pcy = 2, persist?: PersistSource, sim?: EntitySource): StreamingUpdate {
+export function update(world: World, pcx: number, pcz: number, pcy = 2, persist?: PersistSource, sim?: EntitySource, anchors?: Coord[]): StreamingUpdate {
   const rebuilt: Coord[] = [];
   const generated: Coord[] = [];
   const remeshed: Coord[] = [];
@@ -94,6 +103,7 @@ export function update(world: World, pcx: number, pcz: number, pcy = 2, persist?
   const pending: Coord[] = [];
   const unloaded: Coord[] = [];
   const done = new Set<string>(); // keys handled by this call's load pass; the remesh pass skips them
+  const ring: Coord[] = [{ cx: pcx, cy: pcy, cz: pcz }, ...(anchors ?? [])]; // multiplayer: union ring = the host's own position + every remote anchor
 
   const missed: Coord[] = [];
   for (let dx = -VIEW_RADIUS; dx <= VIEW_RADIUS; dx++) {
@@ -131,7 +141,7 @@ export function update(world: World, pcx: number, pcz: number, pcy = 2, persist?
   const dirty: Coord[] = [];
   for (const c of world.allChunks()) {
     if (!c.dirty || done.has(chunkKey(c.cx, c.cy, c.cz))) continue;
-    if (!inRange(c.cx, c.cz, pcx, pcz)) continue; // goes away with the unload pass below
+    if (!inRing(c, ring)) continue; // meshable = union ring (multiplayer)
     dirty.push({ cx: c.cx, cy: c.cy, cz: c.cz });
   }
   dirty.sort((a, b) => cmp(a, b, pcx, pcz, pcy));
@@ -143,7 +153,7 @@ export function update(world: World, pcx: number, pcz: number, pcy = 2, persist?
 
   const doomed: Chunk[] = []; // Chunk (not Coord): onUnload needs the live arrays
   for (const c of world.allChunks()) {
-    if (!inRange(c.cx, c.cz, pcx, pcz) || c.cy < CY_MIN || c.cy > CY_MAX) doomed.push(c);
+    if (!inRing(c, ring) || c.cy < CY_MIN || c.cy > CY_MAX) doomed.push(c);
   }
   for (const c of doomed) {
     const ents = sim ? sim.entitiesInChunk(c.cx, c.cy, c.cz).map((e) => sim.toRecord(e)) : undefined;
