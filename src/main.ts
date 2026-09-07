@@ -1163,49 +1163,52 @@ function tickStreaming(): void {
   if (!ve) return;
   const pcx = chunkOf(ve.pos.x), pcz = chunkOf(ve.pos.z), pcy = chunkOf(ve.pos.y);
   const r = streaming.update(world, pcx, pcz, pcy, playback ? noopPersist : persist, sim); // sim = EntitySource: entities ride the unload. playback → no-op source (read-only, self-contained)
+  consumeStream(r, playback ? noopPersist : persist, false);
+}
+
+/** The mesh-adjacent work for a streaming result: light load/unload, deferred first mesh, water
+ * settle/restore (host), deer spawn (host), pending fetch. The single-player's tickStreaming and
+ * the B1 frame loop (host/client) both consume a StreamingUpdate via this. `isClient` skips the
+ * water work + the deer spawn/despawn + the save point (the client has no WaterSim — water arrives
+ * via cells; its deer come from the host; it has no save point). `persist` is the session's persist
+ * (the host's Persistence / the client's NetworkPersistSource / the single-player's Persistence). */
+function consumeStream(r: streaming.StreamingUpdate, persist: PersistSource, isClient: boolean): void {
+  const ve = sim.viewed();
+  const pcx = ve ? chunkOf(ve.pos.x) : 0, pcz = ve ? chunkOf(ve.pos.z) : 0;
   for (const c of r.unloaded) {
     removeChunkMesh(c.cx, c.cy, c.cz);
     lightSim.unload(c.cx, c.cy, c.cz); // the worker re-seeds the surviving seams (the darkness wave)
     pendingRebuild.delete(chunkKey(c.cx, c.cy, c.cz)); // don't re-mesh a chunk we just unloaded
     deferredFirstMesh.delete(chunkKey(c.cx, c.cy, c.cz)); // it may still be waiting for its first mesh
-    for (const d of sim.entitiesInChunk(c.cx, c.cy, c.cz)) // the deer leaving with the chunk persist via the entity-ride; restore on walk-back
+    if (!isClient) for (const d of sim.entitiesInChunk(c.cx, c.cy, c.cz)) // the deer leaving with the chunk persist via the entity-ride; restore on walk-back (host)
       if (d.kind.id === 'deer' || d.kind.id === 'dolt') sim.despawn(d.id);
   }
-  if (r.unloaded.length && !playback) persist.saveMeta(metaSnapshot()); // the world just changed durably (a chunk left): refresh the save point. NEVER during playback — a replay is read-only and must not overwrite the real save with the replay's state (player pos / edits).
+  if (r.unloaded.length && !playback && !isClient) (persist as Persistence).saveMeta(metaSnapshot()); // the world just changed durably (a chunk left): refresh the save point (host). NEVER during playback.
   for (const c of r.rebuilt) {
-    waterSim.settle(c.cx, c.cy, c.cz); // POC form of worldgen-fluid settling: settle BEFORE meshing so the new chunk's mesh already shows flooded caves. The settled flag makes re-settling a re-meshed chunk a no-op. settle() never clears waterSim.touched: cross-seam marks from any settle this frame survive here and to the end-of-frame drain below, which re-meshes them.
+    if (!isClient) waterSim.settle(c.cx, c.cy, c.cz); // the host's water settle BEFORE meshing (the client has no WaterSim — water arrives via cells)
     lightSim.load(c.cx, c.cy, c.cz); // the worker settles it; the fields land with the tick reply
-    deferredFirstMesh.add(chunkKey(c.cx, c.cy, c.cz)); // ADR 0012: the first/fresh mesh waits a guaranteed frame (replies are macrotasks — a load-frame drain would mesh from still-zero light); the frame end moves it into pendingRebuild after the first reply has landed
+    deferredFirstMesh.add(chunkKey(c.cx, c.cy, c.cz)); // ADR 0012: the first/fresh mesh waits a guaranteed frame
   }
-  for (const c of r.generated) spawnDeer(world, sim, c.cx, c.cz); // deer into freshly GENERATED columns only: a remesh must not re-top a column whose deer wandered away (pre-work D2); restored chunks already carry their persisted deer
+  if (!isClient) for (const c of r.generated) spawnDeer(world, sim, c.cx, c.cz); // deer into freshly GENERATED columns only (host); the client's deer come from the host
   for (const c of r.restored) {
     const ch = world.getChunk(c.cx, c.cy, c.cz)!;
-    waterSim.restore(ch); // D1: water restored as-is (settled = true) — rebuild springs/waiting/queue, NO settle
+    if (!isClient) waterSim.restore(ch); // the host's water restore (the client has no WaterSim)
     lightSim.load(c.cx, c.cy, c.cz); // light is never persisted: the worker re-settles the chunk
     deferredFirstMesh.add(chunkKey(c.cx, c.cy, c.cz)); // first mesh of the restored chunk, same pacing as a load
   }
   for (const c of r.pending) {
-    // Cold restore: the record is known (key set) but not warm. Fetch async; apply when it
-    // lands. One in-flight fetch per key (restoring): streaming re-pends a key every frame
-    // until the record lands, so re-attaching a .then each frame would re-run the whole apply.
-    // A failed/stale fetch drops the key → the next update() generates the chunk fresh (confirmed
-    // miss); a stale (out-of-range) record is NOT dropped — fetchRecord already cached it warm,
-    // so the next walk-back restores it inline.
     const key = chunkKey(c.cx, c.cy, c.cz);
     if (restoring.has(key)) continue; // a fetch for this key is already in flight
     restoring.add(key);
     void persist.fetchRecord(c.cx, c.cy, c.cz).then((rec) => {
       restoring.delete(key); // free the slot whether we apply or drop
       if (!rec) { persist.dropPersisted(c.cx, c.cy, c.cz); return; }
-      // Stale guard: the player may have moved on since the fetch started — apply only if the
-      // chunk is still in range of the CURRENT viewed position (ve is the live entity, so
-      // ve.pos reads the current position; the record stays warm either way).
-      if (!streaming.inRange(c.cx, c.cz, chunkOf(ve.pos.x), chunkOf(ve.pos.z))) return;
+      if (!ve || !streaming.inRange(c.cx, c.cz, pcx, pcz)) return; // stale guard: the player may have moved on
       if (world.hasChunk(c.cx, c.cy, c.cz)) return; // a duplicate in-flight fetch applied it first
       applyRecord(world, rec, sim, streamControllerFor); // restore frozen entities into the sim (idle)
-      streaming.markNeighborsDirty(world, c.cx, c.cy, c.cz, chunkOf(ve.pos.x), chunkOf(ve.pos.z));
+      streaming.markNeighborsDirty(world, c.cx, c.cy, c.cz, pcx, pcz);
       const ch = world.getChunk(c.cx, c.cy, c.cz)!;
-      waterSim.restore(ch);
+      if (!isClient) waterSim.restore(ch);
       lightSim.load(c.cx, c.cy, c.cz);
       deferredFirstMesh.add(key);
     });
@@ -1289,8 +1292,14 @@ function frame(now: number): void {
   while (acc >= STEP) {
     acc -= STEP;
     if (playback && playback.paused) continue; // a paused replay holds the world (the substep is consumed but nothing advances)
-    sim.tick(STEP, worldTime.tick); // the sim heartbeat: intent -> applyIntent -> stepEntity (ReplayController-driven during playback — deterministic)
-    worldTime.advance(STEP);
+    if (mpSession) {
+      mpSession.tick(worldTime.tick); // the session drives the sim (host) or the intent (client)
+      mpHub?.pump(worldTime.tick); // deliver the in-page loopback messages
+      worldTime.advanceTick(); // the frame loop owns the tick (the host/client sessions don't advance it)
+    } else {
+      sim.tick(STEP, worldTime.tick); // the single-player sim heartbeat: intent -> applyIntent -> stepEntity
+      worldTime.advance(STEP);
+    }
     if (playback) {
       // Follow the user's recorded perspective: switch the viewed entity as they possessed others
       // during recording (viewedAt resolves the current tick's perspective).
@@ -1298,7 +1307,14 @@ function frame(now: number): void {
       if (worldTime.tick >= playback.replay.endTick) playback.paused = true; // reached the end of the session
     }
   }
-  tickStreaming(); // ONCE per frame (was inside the substep loop, where the frame-time clamp multiplied the streaming budget by the substep count, up to ~12 chunks/frame)
+  if (mpSession) {
+    // The session's per-substep streaming supersedes the single-player's tickStreaming; the frame
+    // consumes the last substep's result (light load/unload + deferred first mesh) once per frame.
+    const r = mpSession.lastStream;
+    if (r) consumeStream(r, mpSession.persist, mpSession instanceof ClientSession);
+  } else {
+    tickStreaming(); // ONCE per frame (the single-player's compat-form streaming + consumeStream)
+  }
   if (profRig) {
     // The rig pins the player (segment A: the spawn anchor — the worst chunk (2,·,0) is already
     // in the spawn ring; segment B: the open ocean). worstLoaded is read AFTER this frame's
@@ -1314,8 +1330,10 @@ function frame(now: number): void {
     const vep = sim.viewed(); // the rig pins the VIEWED entity (frame-end write, same as today)
     if (vep) { vep.pos.x = wp.x; vep.pos.y = wp.y; vep.pos.z = wp.z; vep.vel = { x: 0, y: 0, z: 0 }; }
   }
-  lightSim.tick(LIGHT_TICK_BUDGET); // the worker drains once per frame (ADR 0012) — off the renderer's critical path; idle cost = one worker round-trip per frame (a small reply object)
-  if (tickCrossed(tickBefore, worldTime.tick, WATER_STRIDE)) waterSim.tick(WATER_PULSE); // water on the tick heartbeat (ADR 0011): one pulse per 30 substeps = 0.5 sim s (was a wall-clock accumulator); settles are event-driven and stay snappy
+  lightSim.tick(LIGHT_TICK_BUDGET); // the worker drains once per frame (ADR 0012)
+  // The host's + single-player's water heartbeat (ADR 0011). The client has no WaterSim (water
+  // arrives via cells), so skip it — the module waterSim is the single-player's (untouched).
+  if (!(mpSession instanceof ClientSession) && tickCrossed(tickBefore, worldTime.tick, WATER_STRIDE)) waterSim.tick(WATER_PULSE);
   // Merge this frame's water + light touched chunks into the pending re-mesh set (both sims keep
   // their exact sim.touched contract: consumed and cleared exactly once per frame here).
   for (const key of waterSim.touched) pendingRebuild.add(key);

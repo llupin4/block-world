@@ -199,7 +199,6 @@ export class HostSession {
   tick(tick: number): void {
     this.sim.tick(STEP, tick);
     if (tick % WATER_STRIDE === 0) this.waterSim.tick(WATER_PULSE);
-    this.worldTime.tick = tick;
     this.worldTime.advanceClock(STEP); // advance time + phaseTotal (the frame loop owns the tick)
     this.flushCells();
     const anchors = this.anchors();

@@ -58,6 +58,11 @@ export class WorldTime {
     this.phaseTotal = s.phaseTotal;
   }
 
+  /** Advance ONLY the tick (the frame loop owns the tick for the B1 sessions; the client's `time`/`phaseTotal` are sleet from the host's `time` messages). */
+  advanceTick(): void {
+    this.tick++;
+  }
+
   /** Persistence snapshot (ADR 0014): the full clock state, `phaseTotal` included. `restore` is its inverse. */
   snapshot(): { time: number; tick: number; phaseTotal: number } {
     return { time: this.time, tick: this.tick, phaseTotal: this.phaseTotal };
