@@ -18,7 +18,7 @@ import { sampleSky, createSky } from './sky';
 import { createClouds } from './clouds';
 import { LIGHT_AMBIENT, LIGHT_TICK_BUDGET } from './light';
 import { LightClient } from './light-transport';
-import { Persistence, applyRecord, snapshotChunk, type WorldMeta } from './persistence';
+import { Persistence, applyRecord, snapshotChunk, type WorldMeta, type PersistSource } from './persistence';
 import { IndexedDBChunkStore } from './idb-store';
 import { Recorder, ReplayController, parseReplayParam, viewedAt, type Replay, type ReplaySnapshot } from './replay';
 
@@ -243,6 +243,16 @@ const clouds = createClouds(scene);
 const clockEl = document.getElementById('clock')!;
 let clockLabel = '';
 const scrubEl = document.getElementById('scrub')!; // phase 3: the recording/playback scrub HUD (ADR 0017)
+const scrubLabelEl = document.getElementById('scrub-label')!; // the scrub label (recording… / replay t…)
+const scrubQuitEl = document.getElementById('scrub-quit')!; // the "quit replay" button (playback only)
+
+// Quit a replay: reload the page WITHOUT the ?replay param, which boots the normal world from the
+// real save (the replay is read-only, so the real save is untouched — see the playback persist guards).
+scrubQuitEl.addEventListener('click', () => {
+  const url = new URL(location.href);
+  url.searchParams.delete('replay');
+  location.href = url.toString();
+});
 
 // === world-state ===
 
@@ -296,6 +306,18 @@ try {
   persist = new Persistence(null, TERRAIN_SEED); // no IndexedDB in this environment
 }
 window.__persistDebug = persist; // debug surface: key set, warm cache, store counters
+
+// A no-op PersistSource for PLAYBACK: a replay is read-only and self-contained — it regenerates
+// new areas deterministically (never reads the real save) and never writes (no onUnload/saveMeta/
+// saveLoaded). Passing it to streaming.update during playback means the pending list stays empty
+// (hasPersisted is false) so the async fetch path is skipped too.
+const noopPersist: PersistSource = {
+  hasPersisted: () => false,
+  syncRecord: () => undefined,
+  fetchRecord: () => Promise.resolve(undefined),
+  onUnload: () => undefined,
+  dropPersisted: () => undefined,
+};
 
 // === Replay recording + playback (phase 3, ADR 0017) ===
 // The record: the sim's intent/spawn/despawn hooks feed a Recorder (delta-coded), which ends in
@@ -500,9 +522,15 @@ function syncHud(): void {
   kindEl.textContent = ve ? `viewing: ${ve.kind.id}` : '';
   hotbarEl.classList.toggle('hidden', !ve || !ve.kind.canEdit);
   // === replay scrub HUD (phase 3, ADR 0017) ===
-  if (recording) { scrubEl.classList.remove('hidden'); scrubEl.textContent = '● recording… (R to stop)'; }
-  else if (playback) { scrubEl.classList.remove('hidden'); scrubEl.textContent = `replay ${playback.paused ? '⏸ paused' : '▶ playing'}   t ${worldTime.tick} / ${playback.replay.endTick}`; }
-  else scrubEl.classList.add('hidden');
+  if (recording) {
+    scrubEl.classList.remove('hidden');
+    scrubLabelEl.textContent = '● recording… (R to stop)';
+    scrubQuitEl.classList.add('hidden');
+  } else if (playback) {
+    scrubEl.classList.remove('hidden');
+    scrubLabelEl.textContent = `replay ${playback.paused ? '⏸ paused' : '▶ playing'}   t ${worldTime.tick} / ${playback.replay.endTick}`;
+    scrubQuitEl.classList.remove('hidden'); // the "quit replay" button (reload without ?replay)
+  } else scrubEl.classList.add('hidden');
 }
 
 // === chunks-meshing ===
@@ -1060,7 +1088,7 @@ function tickStreaming(): void {
   const ve = sim.viewed(); // the stream is a pure function of the VIEWED entity's position
   if (!ve) return;
   const pcx = chunkOf(ve.pos.x), pcz = chunkOf(ve.pos.z), pcy = chunkOf(ve.pos.y);
-  const r = streaming.update(world, pcx, pcz, pcy, persist, sim); // sim = EntitySource: entities ride the unload
+  const r = streaming.update(world, pcx, pcz, pcy, playback ? noopPersist : persist, sim); // sim = EntitySource: entities ride the unload. playback → no-op source (read-only, self-contained)
   for (const c of r.unloaded) {
     removeChunkMesh(c.cx, c.cy, c.cz);
     lightSim.unload(c.cx, c.cy, c.cz); // the worker re-seeds the surviving seams (the darkness wave)
@@ -1069,7 +1097,7 @@ function tickStreaming(): void {
     for (const d of sim.entitiesInChunk(c.cx, c.cy, c.cz)) // the deer leaving with the chunk persist via the entity-ride; restore on walk-back
       if (d.kind.id === 'deer' || d.kind.id === 'dolt') sim.despawn(d.id);
   }
-  if (r.unloaded.length) persist.saveMeta(metaSnapshot()); // the world just changed durably (a chunk left): refresh the save point
+  if (r.unloaded.length && !playback) persist.saveMeta(metaSnapshot()); // the world just changed durably (a chunk left): refresh the save point. NEVER during playback — a replay is read-only and must not overwrite the real save with the replay's state (player pos / edits).
   for (const c of r.rebuilt) {
     waterSim.settle(c.cx, c.cy, c.cz); // POC form of worldgen-fluid settling: settle BEFORE meshing so the new chunk's mesh already shows flooded caves. The settled flag makes re-settling a re-meshed chunk a no-op. settle() never clears waterSim.touched: cross-seam marks from any settle this frame survive here and to the end-of-frame drain below, which re-meshes them.
     lightSim.load(c.cx, c.cy, c.cz); // the worker settles it; the fields land with the tick reply
@@ -1130,6 +1158,7 @@ function metaSnapshot(): WorldMeta {
 // chunks are otherwise only saved when those chunks unload. Worst case, a hard kill loses
 // ~5 s of edits **[POC shortcut]**.
 const saveAndFlush = (): void => {
+  if (playback) return; // a replay is read-only: never overwrite the real save with the replay's state (player pos / edits)
   persist.saveLoaded(world.allChunks(), metaSnapshot()); // one batched putMany: the DUE chunks + the meta
   void persist.flush();
 };

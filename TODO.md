@@ -73,3 +73,12 @@ Open follow-ups from the dynamic-lighting work (ADR 0007 — Dynamic lighting):
   not edit-origin) — B regenerates and re-settles to the identical water on reload
   (self-correcting; pinned by a round-trip test). Propagate the edit-origin flag across
   seams so B is persisted and skips the regenerate + re-settle.
+
+## Replay (ADR 0017)
+
+- **Seek bar (scrub the replay timeline).** The scrub HUD (`#scrub`) has a placeholder `.bar`
+  style but no seek: jumping to tick `T` requires re-simulating the replay from its snapshot to
+  `T` (deterministic, but a full re-sim of `T − startTick` ticks), which ADR 0017 deferred as
+  expensive for the MVP. Design the seek as a re-simulate-from-snapshot (reset world/sim/PRNG/
+  time to the snapshot, fast-forward the `ReplayController`s to `T` without rendering), then wire
+  the `.bar` as a click/drag target that triggers it and updates the camera.
