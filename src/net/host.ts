@@ -87,13 +87,16 @@ export class HostSession {
 
   private onHello(from: string, name: string, protocol: number): void {
     if (protocol !== PROTOCOL_VERSION) { console.warn(`[host] refusing ${name}: protocol ${protocol} != ${PROTOCOL_VERSION}`); return; } // [POC shortcut] no version-mismatch message yet
-    let pos = this.spawn; let id = 0;
+    let id = 0;
+    const rc = new RemoteController(from);
     const saved = this.persist.meta?.peers?.[name];
-    if (saved) { // rejoin: restore the saved pose + id
-      id = saved.id; pos = { x: saved.x, y: saved.y, z: saved.z };
+    if (saved) {
+      // rejoin: restore the saved entity (id + pose) and take it back under a fresh controller
+      this.sim.restoreEntity(saved, rc);
+      id = saved.id;
+      this.peers.set(from, { name, entityId: id, controller: rc, loaded: new Set() });
     } else {
-      const rc = new RemoteController(from);
-      const e = this.sim.spawn(pos, rc, { yaw: -Math.PI / 2, kindId: 'player', baseController: rc });
+      const e = this.sim.spawn(this.spawn, rc, { yaw: -Math.PI / 2, kindId: 'player', baseController: rc });
       id = e.id;
       this.peers.set(from, { name, entityId: id, controller: rc, loaded: new Set() });
     }

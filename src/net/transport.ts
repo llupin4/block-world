@@ -10,6 +10,8 @@ export interface Transport {
   onMessage(cb: (from: string, msg: Msg) => void): void;
   onPeerJoin(cb: (id: string) => void): void;
   onPeerLeave(cb: (id: string) => void): void;
+  /** Drop the connection: no more messages flow FROM this end (the hub fires onLeave on the peer side). */
+  disconnect(): void;
 }
 
 interface Pending { from: string; at: number; msg: Msg }
@@ -28,6 +30,8 @@ export class LoopbackTransport implements Transport {
   onMessage(cb: (from: string, msg: Msg) => void): void { this.msgCb = cb; }
   onPeerJoin(cb: (id: string) => void): void { this.joinCb = cb; }
   onPeerLeave(cb: (id: string) => void): void { this.leaveCb = cb; }
+  /** Drop this transport: the hub fires onPeerLeave on every other transport and removes it. */
+  disconnect(): void { this.hub.disconnect(this.selfId); }
   // hub-internal:
   fire(from: string, msg: Msg): void { this.msgCb(from, msg); }
   addPeer(id: string): void { this.peerList.push(id); this.joinCb(id); }

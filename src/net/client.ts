@@ -22,7 +22,7 @@ export class ClientSession {
   readonly controller: Controller;
   private readonly transport: Transport;
   private name = '';
-  private entityId = -1;
+  entityId = -1; // the host-assigned id for this client's entity (set on welcome); public for tests/rejoin
   private own = { x: 0, y: 0, z: 0, yaw: 0, pitch: 0 }; // the last state pose for the own entity
   private lastIntent: Intent | undefined;
   private joined = false;
@@ -111,4 +111,7 @@ export class ClientSession {
     for (const c of r.generated) this.transport.send('all', { type: 'chunkLoaded', key: chunkKey(c.cx, c.cy, c.cz) });
     for (const c of r.unloaded) this.transport.send('all', { type: 'chunkUnloaded', key: chunkKey(c.cx, c.cy, c.cz) });
   }
+
+  /** Drop the connection (the host sees the peer leave and persists the pose). */
+  disconnect(): void { this.transport.disconnect(); }
 }
