@@ -284,12 +284,13 @@ export class Persistence implements PersistSource {
    *  through to the store in the background (one put — unload frequency). An unedited chunk
    *  is a no-op. */
   onUnload(c: Chunk, entities?: EntityRecord[]): void {
-    if (!c.edited) return;
+    const hasEntities = !!entities && entities.length > 0;
+    if (!c.edited && !hasEntities) return; // no player edits and nothing to preserve
     const k = this.key(c.cx, c.cy, c.cz);
     const rec = snapshotChunk(c, entities);
     this.cache(k, rec);
     this.persistedKeys.add(k);
-    if (!this.isDue(c)) return; // in sync: the store already holds it
+    if (!this.isDue(c) && !hasEntities) return; // in sync and nothing new: the store already holds it
     c.savedGen = c.editGen;
     if (!this.store) return;
     const p = this.store.put(k, rec).catch(() => undefined);

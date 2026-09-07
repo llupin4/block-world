@@ -371,3 +371,49 @@ describe('persistence v2 — entities', () => {
     expect(sim2.all()).toHaveLength(0);
   });
 });
+
+describe('persistence — entity-ride unload (multiplayer pre-work D1)', () => {
+  const deer: EntityRecord = {
+    id: 3, kindId: 'deer', x: 2, y: 5, z: 9, vx: 0, vy: 0, vz: 0,
+    yaw: 0.3, pitch: 0, fly: false, noclip: false, controllerKind: 'mob',
+  };
+
+  it('an UNEDITED chunk carrying entities snapshots on unload (warm + store)', async () => {
+    const store = new InMemoryChunkStore();
+    const persist = new Persistence(store, 1234);
+    await persist.boot();
+    const world = new World();
+    const c = world.ensureChunk(0, 0, 0);
+    expect(c.edited).toBe(false);
+    persist.onUnload(c, [deer]);
+    expect(store.puts).toBe(1);                              // forced: the entity is new state
+    expect(persist.hasPersisted(0, 0, 0)).toBe(true);
+    expect(persist.syncRecord(0, 0, 0)!.entities).toEqual([deer]); // the entity rode the record
+  });
+
+  it('an unedited chunk with NO entities is still a no-op (unchanged D4/D6 gate)', async () => {
+    const store = new InMemoryChunkStore();
+    const persist = new Persistence(store, 1234);
+    await persist.boot();
+    const world = new World();
+    persist.onUnload(world.ensureChunk(0, 0, 0));            // unedited, no entities
+    expect(store.puts).toBe(0);
+    expect(persist.hasPersisted(0, 0, 0)).toBe(false);
+    expect(persist.syncRecord(0, 0, 0)).toBeUndefined();
+  });
+
+  it('a restored entity-ride chunk is in sync: the next unload rewrites nothing', async () => {
+    const store = new InMemoryChunkStore();
+    const persist = new Persistence(store, 1234);
+    await persist.boot();
+    const world = new World();
+    persist.onUnload(world.ensureChunk(0, 0, 0), [deer]);    // unedited + entities → one write
+    expect(store.puts).toBe(1);
+    // walk away, then back: the warm record restores (applyRecord sets edited + in sync)
+    world.removeChunk(0, 0, 0);
+    applyRecord(world, persist.syncRecord(0, 0, 0)!);
+    expect(world.getChunk(0, 0, 0)!.edited).toBe(true);
+    persist.onUnload(world.getChunk(0, 0, 0)!);              // now edited + in sync → no write
+    expect(store.puts).toBe(1);
+  });
+});
