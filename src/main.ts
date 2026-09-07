@@ -357,7 +357,12 @@ async function startGame(meta: WorldMeta | null): Promise<void> {
         const v = sim.viewed() ?? sim.all()[0]!;
         sim.ghostId = sim.spawn({ x: v.pos.x, y: v.pos.y + 4, z: v.pos.z }, new IdleController(), { kindId: 'spectator', baseController: new IdleController() }).id;
       }
-      sim.setViewed(sim.ghostId); // camera follows the live spectator, not the recorded viewed entity
+      // Follow the recorded PLAYER BODY (the recorded player's perspective): the user sees exactly
+      // what the player saw, and the head-follow (syncCamera) lets them look around from there.
+      // The ghost still exists (derived above) but is not the viewed entity.
+      const body = sim.all().find((e) => e.kind.id === 'player');
+      sim.setViewed(body ? body.id : sim.ghostId); // follow the recorded player body (the recorded player's perspective)
+      { const ve = sim.viewed(); if (ve) human.setLook(ve.yaw, ve.pitch); } // sync the live look to the recorded look (the initial view faces where the player was)
       playback = { replay, paused: false };
       console.log(`[replay] loaded ${replay.intents.length} deltas, playing ${replay.startTick}..${replay.endTick}`);
       syncCamera();
