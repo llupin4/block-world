@@ -50,6 +50,9 @@ export function chunkOf(w: number): number {
 
 export class World {
   private chunks = new Map<string, Chunk>();
+  onCellWrite?: (x: number, y: number, z: number) => void; // multiplayer: a host cell changed (main.ts
+  // assigns an (x,y,z)->chunkKey mapper + net broadcast); a networked host only —
+  // unassigned for the single-player game, so it is a no-op there.
 
   count(): number {
     return this.chunks.size;
@@ -150,6 +153,7 @@ export class World {
     c.blocks[i] = b;
     c.meta[i] = meta;
     c.dirty = true;
+    this.onCellWrite?.(wx, wy, wz); // multiplayer: a host cell changed
     if (markEdited) { c.editGen += 1; c.edited = true; } // editGen: the save-generation the persistence layer diffs against (ADR 0014)
     const n = [
       [c.cx + 1, c.cy, c.cz], [c.cx - 1, c.cy, c.cz],

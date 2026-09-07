@@ -151,6 +151,7 @@ private setState(wx: number, wy: number, wz: number, l: number, s: number, b: nu
     if (c.blocks[i] !== b) {
       if (this.world.setBlock(wx, wy, wz, b, 0, eo)) this.touched.add(chunkKey(c.cx, c.cy, c.cz));
     }
+    this.world.onCellWrite?.(wx, wy, wz); // multiplayer: the host broadcasts the water's cell write
   }
 
   // Write only when state differs, then re-mark the cell + its 6 neighbours: the horizontal
