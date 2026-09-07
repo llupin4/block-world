@@ -21,7 +21,7 @@ export interface WorldTimeSnapshot { time: number; tick: number; phaseTotal: num
 export type CellWrite = [number, number, number, number, number, number, number];
 
 export interface NetEntity {
-  id: number; kindId: string;
+  id: number; kindId: string; name?: string;
   x: number; y: number; z: number;
   yaw: number; pitch: number;
   vx: number; vy: number; vz: number;

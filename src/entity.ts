@@ -59,6 +59,7 @@ export interface Entity {
   fly: boolean; noclip: boolean;
   controller: Controller;
   baseController: Controller;
+  name?: string; // the display name (multiplayer: the remote player's name; the name tag renders it)
 }
 
 // One intent per substep. `forward/strafe/up/down` == today's MoveInput. `yaw`/`pitch`

@@ -566,6 +566,23 @@ void persist.boot().then((meta) => {
 const rigOf: Record<string, THREE.MeshBasicMaterial> = {};
 for (const [id, color] of Object.entries(RIG_COLORS)) rigOf[id] = new THREE.MeshBasicMaterial({ map: buildPartAtlas(color, 0x5eed) });
 const rigs = new Map<number, { rig: Rig; anim: RigAnim }>();
+// Name tags (B1): one THREE.Sprite per entity id (positioned above the rig); the texture (a small
+// canvas with the name) is cached by name (many "Louis"es share one texture) but the sprite is
+// keyed by entity id (two peers who both type "Louis" don't share one tag / position).
+const tagTextureCache = new Map<string, THREE.CanvasTexture>();
+const nameTags = new Map<number, THREE.Sprite>();
+function tagTexture(name: string): THREE.CanvasTexture {
+  let t = tagTextureCache.get(name);
+  if (!t) {
+    const canvas = document.createElement('canvas'); canvas.width = 256; canvas.height = 64;
+    const ctx = canvas.getContext('2d')!; ctx.font = 'bold 40px sans-serif'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.fillStyle = 'rgba(0,0,0,0.55)'; ctx.fillRect(0, 0, 256, 64);
+    ctx.fillStyle = '#fff'; ctx.fillText(name.slice(0, 14), 128, 34);
+    t = new THREE.CanvasTexture(canvas);
+    tagTextureCache.set(name, t);
+  }
+  return t;
+}
 const kindEl = document.getElementById('kind')!;
 
 function syncEntityRigs(dt: number): void {
@@ -585,8 +602,21 @@ function syncEntityRigs(dt: number): void {
     advanceRigAnim(entry.anim, e, dt, LEG_RATE[e.kind.id] ?? 4);
     updateEntityRig(entry.rig, e, entry.anim);
     entry.rig.root.visible = e.id !== sim.viewedId; // hide the viewed entity in first person
+    // Name tag (B1): one sprite per entity id, positioned above the rig; the texture is cached by name.
+    if (e.name) {
+      let tag = nameTags.get(e.id);
+      if (!tag) {
+        tag = new THREE.Sprite(new THREE.SpriteMaterial({ map: tagTexture(e.name), depthTest: false }));
+        tag.scale.set(1.6, 0.4, 1);
+        scene.add(tag);
+        nameTags.set(e.id, tag);
+      }
+      tag.position.set(e.pos.x, e.pos.y + 1.8, e.pos.z); // above the rig
+      tag.visible = e.id !== sim.viewedId; // hide the viewed entity's tag (first person)
+    }
   }
   for (const [id, entry] of rigs) if (!seen.has(id)) { scene.remove(entry.rig.root); rigs.delete(id); }
+  for (const [id, tag] of nameTags) if (!seen.has(id)) { scene.remove(tag); tag.material.map?.dispose(); nameTags.delete(id); }
 }
 
 // The HUD kind label + hotbar visibility: show what you are viewing, and hide the hotbar when

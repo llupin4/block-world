@@ -88,7 +88,7 @@ export class ClientSession {
           if (!ring) { ring = new PoseRing(); this.rings.set(n.id, ring); }
           ring.push({ tick: msg.tick, x: n.x, y: n.y, z: n.z, yaw: n.yaw, pitch: n.pitch }); // host-tick-tagged sample (interpolation)
           const ent = this.sim.entities.get(n.id);
-          if (ent) { ent.pos = { x: n.x, y: n.y, z: n.z }; ent.yaw = n.yaw; ent.pitch = n.pitch; }
+          if (ent) { ent.pos = { x: n.x, y: n.y, z: n.z }; ent.yaw = n.yaw; ent.pitch = n.pitch; if (n.name) ent.name = n.name; }
         }
         break;
       case 'cells': this.applyCells(msg.chunk, msg.writes); break;

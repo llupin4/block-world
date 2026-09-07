@@ -96,9 +96,12 @@ export class HostSession {
       // rejoin: restore the saved entity (id + pose) and take it back under a fresh controller
       this.sim.restoreEntity(saved, rc);
       id = saved.id;
+      const re = this.sim.entities.get(id);
+      if (re) re.name = name; // the display name (the name tag)
       this.peers.set(from, { name, entityId: id, controller: rc, loaded: new Set() });
     } else {
       const e = this.sim.spawn(this.spawn, rc, { yaw: -Math.PI / 2, kindId: 'player', baseController: rc });
+      e.name = name; // the display name (the name tag)
       id = e.id;
       this.peers.set(from, { name, entityId: id, controller: rc, loaded: new Set() });
     }
@@ -187,7 +190,7 @@ export class HostSession {
       const list: NetEntity[] = [];
       for (const ent of this.sim.all()) {
         if (Math.abs(chunkOf(ent.pos.x) - pcx) > SR_VIEW_RADIUS || Math.abs(chunkOf(ent.pos.z) - pcz) > SR_VIEW_RADIUS) continue;
-        list.push({ id: ent.id, kindId: ent.kind.id, x: ent.pos.x, y: ent.pos.y, z: ent.pos.z, yaw: ent.yaw, pitch: ent.pitch, vx: ent.vel.x, vy: ent.vel.y, vz: ent.vel.z, flags: (ent.inWater ? 1 : 0) | (ent.onGround ? 2 : 0) });
+        list.push({ id: ent.id, kindId: ent.kind.id, name: ent.name, x: ent.pos.x, y: ent.pos.y, z: ent.pos.z, yaw: ent.yaw, pitch: ent.pitch, vx: ent.vel.x, vy: ent.vel.y, vz: ent.vel.z, flags: (ent.inWater ? 1 : 0) | (ent.onGround ? 2 : 0) });
       }
       this.transport.send(id, { type: 'state', tick: this.worldTime.tick, entities: list });
     }
