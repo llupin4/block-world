@@ -577,7 +577,7 @@ These are all real and all worth doing eventually. None belong in v1.
 - Biomes beyond a surface-block swap
 - Survival mechanics: health, mining time, item stacks, crafting
 - ~~Entities, mobs~~ — landed as phases 1–3 (ADR 0015/0016/0017: the player entity, the deer + possession + spectator, and deterministic replay).
-- Multiplayer — unblocked by ADR 0017: a shared snapshot + one delta-coded intent log per player is the minimal complete shared state (the replay model is the foundation).
+- ~~Multiplayer~~ — **phase A landed** (2026-09-07, [ADR 0018](docs/adr/0018-multiplayer-session-model.md)): one host runs the only authoritative sim, clients send `Intent`s and hold a view over a loopback `Transport`. Real network / lobby / remote-player rendering is phase B (ADR 0019); own-body prediction is phase C (ADR 0020).
 
 ---
 
@@ -745,3 +745,43 @@ decay), glass 14 below, water −2 per cell, rock 0.
   lineage). Walking stays within the §9 budget (p95 ≈ 7 ms target; the
   light tick is O(0) when idle — the queue only holds cells a recent
   edit/load actually queued).
+
+## 19. Multiplayer (phase A) — host-authoritative over a loopback (2026-09-07, [ADR 0018](docs/adr/0018-multiplayer-session-model.md))
+
+ADR: `docs/adr/0018-multiplayer-session-model.md`.
+
+Because every world change is an `Intent` (ADR 0015) and a session re-derives from a snapshot +
+delta-coded intent log (ADR 0017), multiplayer is that fact lifted to N machines with **one
+authoritative host**:
+
+- **Model.** A `HostSession` (`src/net/host.ts`) owns the only authoritative `Sim` + water sim +
+  world. A `ClientSession` (`src/net/client.ts`) is a **view**: pristine terrain generated *locally*
+  from the shared `TERRAIN_SEED` (unedited chunks are identical everywhere without being sent),
+  with the host's edits/water arriving as `cells` and entity poses as `state`. The client's `Sim`
+  is an **entity container only** — its `tick` is never called, so a client cannot diverge. Only
+  the host spawns/`restoreEntity` authoritative entities.
+- **Wire.** `src/net/messages.ts` (`Msg` union: `hello`/`welcome`/`intent`/`state`/`spawn`/
+  `despawn`/`cells`/`chunkReq`/`chunkRec`/`chunkLoaded`/`chunkUnloaded`/`time`). A client sends its
+  `Intent` **delta-coded** (`intentEqual`, send-on-change); the host drives a `RemoteController`
+  (`src/net/remote-controller.ts`) per client and feeds the sim. The host coalesces per-tick
+  `World.onCellWrite` (fired by `setBlock` + water `setState`) into per-chunk `cells`, batched on a
+  `NET_STATE_STRIDE`/tick stride, escalating to a full `ChunkRecord` past `CELLS_FULL_THRESHOLD`.
+  `NET_REMOTE_RADIUS` caps the host's union-ring cost per remote; `PROTOCOL_VERSION 1`.
+- **Transport.** `src/net/transport.ts`: a `Transport` interface (`send`/`onMessage`/
+  `onPeerJoin`/`onPeerLeave`/`disconnect`) + a pump-driven `LoopbackHub` (in-process, reliable,
+  ordered, zero loss) so the whole model is testable with **no network**. The client's
+  `NetworkPersistSource` (`src/net/network-persist.ts`) makes the streaming load path fetch edited
+  chunks from the host on demand; pristine terrain is never fetched.
+- **Gate + load.** `src/__tests__/net-gate.test.ts` pins the loopback invariants (join+snapshot
+  consistency, a host edit echoes byte-identical to two clients, the union ring sim-loads a far
+  remote's chunks, leave persists the pose and rejoin restores the same id). `npm run net:stress`
+  (a `BotClient` = a `ClientSession` driven by a `ScriptController`) loads a host + 8 bots for
+  1200 ticks and pins the host's per-tick cost and the steady-state bytes/s per client (the
+  one-time `welcome` join is excluded).
+- **Status / follow-ups.** Loopback-only — **no real network, lobby, `?host`/`?join`, or
+  remote-player rendering yet** (phase B, ADR 0019 — a Trystero WebRTC transport behind the same
+  interface). Clients have **no own-body prediction** (the body moves at the host's `state` stride;
+  phase C, ADR 0020). The host runs the sim + water but not the mesher/light worker in the harness
+  (the loopback asserts world/entity state, not pixels) and uses `InMemoryChunkStore` (no IndexedDB
+  in node) — `[POC shortcut]`s. The three pre-work repairs (D1 persist entities in unedited chunks,
+  D2 `generated`/`remeshed` split, D3 deterministic `despawn` fallback) were the enabling fixes.

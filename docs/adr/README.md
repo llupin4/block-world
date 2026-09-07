@@ -24,6 +24,7 @@ recoverable via git history at pre-restructure `main`, `0cf878c`).
 | [0015](0015-entities-controllers.md) | Entities & controllers | the player is an entity driven by a controller; edits flow through the sim (`applyIntent`), not the camera; persistence `v: 2` |
 | [0016](0016-mobs-possession-spectator.md) | Mobs, possession & spectator | a deer kind with sim-owned wander AI, drive-any-entity possession (view + controller swap), and the single spectator ghost; box-part rigs |
 | [0017](0017-replay.md) | Replay | a session is a snapshot + a delta-coded intent log, recorded (`R`) to a `replays` IDB store (browsable via the `#replays` panel) and played back deterministically on a fresh world; the camera follows the recorded perspective |
+| [0018](0018-multiplayer-session-model.md) | Multiplayer session model | one host runs the only authoritative sim; clients send `Intent`s (delta-coded) and hold a view (pristine terrain + host-fed `cells`/`state`) over a reliable, ordered `Transport`; the host streams a union ring and coalesces per-tick cell writes; loopback transport + BotClient stress rig |
 
 ## Conventions
 
