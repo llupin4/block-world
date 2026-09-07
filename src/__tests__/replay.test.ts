@@ -9,7 +9,7 @@ import {
   ScriptController, type Entity, type Intent, type Controller, type EntityRecord, type ApplyHooks,
 } from '../entity';
 import { snapshotChunk, applyRecord } from '../persistence';
-import { Recorder, ReplayController, intentEqual, InMemoryReplayStore, applySpawnAt, parseReplayParam, type Replay, type ReplaySnapshot, type IntentEntry } from '../replay';
+import { Recorder, ReplayController, intentEqual, InMemoryReplayStore, applySpawnAt, parseReplayParam, viewedAt, type Replay, type ReplaySnapshot, type IntentEntry } from '../replay';
 
 const STEP = 1 / 60;
 const WATER_STRIDE = 30;
@@ -67,6 +67,30 @@ describe('replay — delta-coding + ReplayController', () => {
     expect(parseReplayParam('?replay=1234:replay:0')).toBe('1234:replay:0');
     expect(parseReplayParam('?foo=bar')).toBeNull();
     expect(parseReplayParam('')).toBeNull();
+  });
+
+  it('Recorder.onViewed logs the user\'s perspective timeline (possession switches)', () => {
+    const rec = new Recorder(0);
+    expect(rec.viewed).toEqual([]);
+    rec.onViewed(100, 2); // possess entity 2 at tick 100
+    rec.onViewed(200, 1); // return to entity 1 at tick 200
+    expect(rec.viewed).toEqual([{ tick: 100, id: 2 }, { tick: 200, id: 1 }]);
+  });
+
+  it('viewedAt resolves the perspective at each tick (snapshot default, then possession switches)', () => {
+    const replay: Replay = {
+      seed: 1, startTick: 0, endTick: 300, simPrng: 42, events: [], intents: [],
+      viewed: [{ tick: 100, id: 2 }, { tick: 200, id: 3 }],
+      snapshot: { chunks: [], meta: { viewedEntityId: 1 } as never },
+    };
+    expect(viewedAt(replay, 0)).toBe(1);   // before the first switch: the snapshot's viewed entity
+    expect(viewedAt(replay, 99)).toBe(1);
+    expect(viewedAt(replay, 100)).toBe(2); // at the first switch
+    expect(viewedAt(replay, 199)).toBe(2);
+    expect(viewedAt(replay, 200)).toBe(3); // at the second switch
+    expect(viewedAt(replay, 300)).toBe(3);
+    // an old recording (no `viewed`) follows the snapshot's viewedEntityId throughout
+    expect(viewedAt({ ...replay, viewed: undefined }, 250)).toBe(1);
   });
 });
 

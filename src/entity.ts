@@ -651,8 +651,8 @@ export class HumanController implements Controller {
   /** Adopt a look (used at boot to sync the controller with the restored/spawned entity's yaw/pitch). */
   setLook(yaw: number, pitch: number): void { this.yaw = yaw; this.pitch = pitch; }
 
-  /** The controller's current look (the live mouse look). Used by the live-spectator head-follow
-   *  (phase 3): during playback the camera (following the ghost) turns with this look. */
+  /** The controller's current look (the live mouse look). Used when the human possesses an entity
+   *  (the new possession starts facing the live look). */
   getLook(): { yaw: number; pitch: number } { return { yaw: this.yaw, pitch: this.pitch }; }
 
   mouse(dx: number, dy: number): void {

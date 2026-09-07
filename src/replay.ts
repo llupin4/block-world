@@ -11,6 +11,9 @@ export interface Replay {
   simPrng: number;           // the sim PRNG state at record start (restore before replaying)
   events: EntityEvent[];
   intents: IntentEntry[];    // delta-coded: an entity with no entry at a tick REPEATS its previous intent
+  viewed?: { tick: number; id: number }[]; // the user's PERSPECTIVE over time (possession changes), tick-ordered.
+                                            // Optional: old recordings lack it (they follow the snapshot's
+                                            // viewedEntityId for the whole session).
   snapshot: ReplaySnapshot;  // every loaded chunk + the WorldMeta at record start (ADR 0014 shapes)
 }
 
@@ -31,6 +34,7 @@ export function intentEqual(a: Intent | undefined, b: Intent): boolean {
 export class Recorder {
   readonly events: EntityEvent[] = [];
   readonly intents: IntentEntry[] = [];
+  readonly viewed: { tick: number; id: number }[] = []; // the user's perspective over time (possession)
   private last = new Map<number, Intent>();
   private lastTick: number;
   onIntent: (tick: number, e: Entity, it: Intent) => void;
@@ -45,6 +49,9 @@ export class Recorder {
       }
     };
   }
+  /** Log a change in the viewed entity (possession). The replay follows this timeline so the
+   *  viewer sees what the recorder was actually looking at (a possessed deer, not always the body). */
+  onViewed(tick: number, id: number): void { this.viewed.push({ tick, id }); }
   attach(sim: { onIntent?: any; onSpawn?: any; onDespawn?: any; toRecord: (e: Entity) => EntityRecord }): void {
     sim.onIntent = this.onIntent;
     // A spawn event carries the entity's pose (via toRecord) so playback can re-spawn it.
@@ -86,6 +93,18 @@ export function applySpawnAt(
 /** Parse the `?replay=<key>` URL param (pure, node-testable). Returns the key or null. */
 export function parseReplayParam(search: string): string | null {
   return new URLSearchParams(search).get('replay');
+}
+
+/** The viewed entity id at `tick` during playback: the snapshot's viewedEntityId (record start),
+ *  switched to whatever the user possessed at each recorded viewed change. The `viewed` entries
+ *  are tick-ordered (logged as the user presses P), so the last entry with tick <= the given tick
+ *  wins. Old recordings (no `viewed`) follow the snapshot's viewedEntityId for the whole session. */
+export function viewedAt(replay: Replay, tick: number): number {
+  let id = replay.snapshot.meta.viewedEntityId;
+  for (const vc of replay.viewed ?? []) {
+    if (vc.tick <= tick) id = vc.id; else break;
+  }
+  return id;
 }
 
 export interface ReplayStore {

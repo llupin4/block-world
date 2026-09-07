@@ -20,7 +20,7 @@ import { LIGHT_AMBIENT, LIGHT_TICK_BUDGET } from './light';
 import { LightClient } from './light-transport';
 import { Persistence, applyRecord, snapshotChunk, type WorldMeta } from './persistence';
 import { IndexedDBChunkStore } from './idb-store';
-import { Recorder, ReplayController, parseReplayParam, type Replay, type ReplaySnapshot } from './replay';
+import { Recorder, ReplayController, parseReplayParam, viewedAt, type Replay, type ReplaySnapshot } from './replay';
 
 // === boot ===
 
@@ -357,12 +357,12 @@ async function startGame(meta: WorldMeta | null): Promise<void> {
         const v = sim.viewed() ?? sim.all()[0]!;
         sim.ghostId = sim.spawn({ x: v.pos.x, y: v.pos.y + 4, z: v.pos.z }, new IdleController(), { kindId: 'spectator', baseController: new IdleController() }).id;
       }
-      // Follow the recorded PLAYER BODY (the recorded player's perspective): the user sees exactly
-      // what the player saw, and the head-follow (syncCamera) lets them look around from there.
-      // The ghost still exists (derived above) but is not the viewed entity.
-      const body = sim.all().find((e) => e.kind.id === 'player');
-      sim.setViewed(body ? body.id : sim.ghostId); // follow the recorded player body (the recorded player's perspective)
-      { const ve = sim.viewed(); if (ve) human.setLook(ve.yaw, ve.pitch); } // sync the live look to the recorded look (the initial view faces where the player was)
+      // Follow the user's recorded PERSPECTIVE: the viewed entity at record start (the snapshot's
+      // viewedEntityId). The frame loop (viewedAt) switches it as they possessed other entities
+      // during recording — so the viewer sees what the recorder actually saw, not always the body.
+      sim.setViewed(replay.snapshot.meta.viewedEntityId); // no-op if the entity doesn't exist (old recording)
+      if (!sim.viewed()) { const body = sim.all().find((e) => e.kind.id === 'player'); sim.setViewed(body ? body.id : sim.ghostId); }
+      { const ve = sim.viewed(); if (ve) human.setLook(ve.yaw, ve.pitch); } // sync the live look to the recorded look (the initial view faces where they were)
       playback = { replay, paused: false };
       console.log(`[replay] loaded ${replay.intents.length} deltas, playing ${replay.startTick}..${replay.endTick}`);
       syncCamera();
@@ -590,13 +590,10 @@ camera.rotation.order = 'YXZ';
 function syncCamera(): void {
   const ve = sim.viewed();
   if (!ve) return;
-  if (playback) {
-    // Live-spectator head-follow (phase 3): the camera follows the ghost, but its LOOK turns with
-    // the live mouse (independent of the recorded world) — the ghost's recorded look is overridden.
-    const look = human.getLook();
-    ve.yaw = look.yaw;
-    ve.pitch = look.pitch;
-  }
+  // The camera follows the viewed entity's position + look. During playback the viewed entity is
+  // the recorded player body, whose yaw/pitch are driven tick-by-tick by the ReplayController
+  // (stepEntity applies the recorded look) — so the camera plays back the recorded perspective
+  // exactly (position + head rotation). No live-mouse override: the viewer sees what the player saw.
   camera.position.set(ve.pos.x, ve.pos.y + ve.kind.eye, ve.pos.z);
   camera.rotation.set(ve.pitch, ve.yaw, 0);
 }
@@ -737,7 +734,11 @@ function updateHitbox(): void {
 function onPossess(): void {
   const ve = sim.viewed();
   if (!ve) return;
-  const candidates = sim.all().filter((x) => x.id !== ve.id);
+  // Exclude the spectator ghost from being picked: it is a non-colliding spectator (no rig) that can
+  // be flown underground while spectating, so if it sits in the ray it would be picked over the
+  // creature and the camera would jump to wherever the ghost is. The body<->ghost toggle still works
+  // via the else branch (press P when nothing is targeted).
+  const candidates = sim.all().filter((x) => x.id !== ve.id && x.id !== sim.ghostId);
   const hit = pickEntity(eyeOf(ve), lookDir(ve.yaw, ve.pitch), candidates, REACH);
   if (hit) {
     possess(sim, human, candidates[hit.index].id);
@@ -746,6 +747,9 @@ function onPossess(): void {
   } else {
     returnHome(sim, human); // possessing/ghost -> back to the body
   }
+  // Log the new perspective for replay: the user's view switches to whatever is now viewed, so the
+  // playback follows what they actually saw (a possessed deer, not always the player body).
+  if (recording && recorder) recorder.onViewed(worldTime.tick, sim.viewedId);
 }
 
 // === replay recording (phase 3, ADR 0017) ===
@@ -792,6 +796,7 @@ function stopRecording(): void {
     simPrng: recordStartPrng, // the PRNG at record start (restored before replaying)
     events: recorder.events,
     intents: recorder.intents, // delta-coded: an entity with no entry at a tick repeats its previous intent
+    viewed: recorder.viewed,   // the user's perspective over time (possession changes)
     snapshot: recordStartSnapshot, // the initial state (record start)
   };
   const key = `${TERRAIN_SEED}:replay:${replay.startTick}`;
@@ -1089,7 +1094,12 @@ function frame(now: number): void {
     if (playback && playback.paused) continue; // a paused replay holds the world (the substep is consumed but nothing advances)
     sim.tick(STEP, worldTime.tick); // the sim heartbeat: intent -> applyIntent -> stepEntity (ReplayController-driven during playback — deterministic)
     worldTime.advance(STEP);
-    if (playback && worldTime.tick >= playback.replay.endTick) playback.paused = true; // reached the end of the session
+    if (playback) {
+      // Follow the user's recorded perspective: switch the viewed entity as they possessed others
+      // during recording (viewedAt resolves the current tick's perspective).
+      sim.setViewed(viewedAt(playback.replay, worldTime.tick));
+      if (worldTime.tick >= playback.replay.endTick) playback.paused = true; // reached the end of the session
+    }
   }
   tickStreaming(); // ONCE per frame (was inside the substep loop, where the frame-time clamp multiplied the streaming budget by the substep count, up to ~12 chunks/frame)
   if (profRig) {
