@@ -411,6 +411,14 @@ async function startGame(meta: WorldMeta | null): Promise<void> {
       session = new ClientSession(hub.connect('me'), 'me', human); // the client's own body is driven by the page's HumanController (immediate look + movement)
       const client = session as ClientSession;
       client.setLightEdit((x, y, z) => { lightSim?.edit(x, y, z); }); // the client's light tracks the host's edits
+      client.onPeerLeave((id) => { // the headless host leaves → "host left" + stop driving (static view of the last-received world)
+        if (id !== 'headless') return;
+        mpSession = null;
+        const el = document.createElement('div');
+        el.style.cssText = 'position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);color:#fff;font:600 24px sans-serif;z-index:9999;pointer-events:none;text-shadow:0 0 8px #000';
+        el.textContent = 'host left';
+        document.body.appendChild(el);
+      });
       world = client.world; sim = client.sim; worldTime = client.worldTime;
     }
     lightSim = new LightClient(world, worldTime); // the page's light worker runs on the session's world

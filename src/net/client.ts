@@ -58,6 +58,9 @@ export class ClientSession {
   /** The boot wires the page's light worker here: on a `cells` batch the client's light tracks the host's edits. */
   setLightEdit(fn: (x: number, y: number, z: number) => void): void { this.lightEdit = fn; }
 
+  /** The boot registers a leave handler here: when the host disconnects, the client shows "host left" + stops driving. */
+  onPeerLeave(cb: (id: string) => void): void { this.transport.onPeerLeave(cb); }
+
   private parse(key: string): [number, number, number] {
     const [a, b, c] = key.split(',').map(Number);
     return [a, b, c];
