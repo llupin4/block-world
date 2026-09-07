@@ -6,6 +6,7 @@ import { Recorder, type ReplaySnapshot } from '../replay';
 import { update as streamUpdate, type Anchor, VIEW_RADIUS as SR_VIEW_RADIUS, CY_MIN, CY_MAX } from '../streaming';
 import { TERRAIN_SEED, TerrainGen, generateChunkTerrain } from '../terrain';
 import { Block } from '../blocks';
+import { WorldTime } from '../time';
 import { NET_STATE_STRIDE, CELLS_FULL_THRESHOLD, NET_REMOTE_RADIUS, TIME_STRIDE, PROTOCOL_VERSION, type Msg, type NetEntity, type CellWrite } from './messages';
 import { RemoteController } from './remote-controller';
 import { type Transport } from './transport';
@@ -29,7 +30,7 @@ export class HostSession {
   readonly recorder: Recorder;
   readonly spawn: { x: number; y: number; z: number };
   meshable = new Set<string>(); // chunk keys the host meshes (its own anchor's ring)
-  worldTime = { time: 0, tick: 0, phaseTotal: 0 };
+  worldTime = new WorldTime(); // the host's authoritative clock (advanced per tick; the client slews from it)
   private readonly transport: Transport;
   private readonly seed: number;
   private peers = new Map<string, Peer>();
@@ -100,7 +101,7 @@ export class HostSession {
       id = e.id;
       this.peers.set(from, { name, entityId: id, controller: rc, loaded: new Set() });
     }
-    this.transport.send(from, { type: 'welcome', seed: this.seed, tick: this.worldTime.tick, worldTime: this.worldTime.time, yourEntityId: id, snapshot: this.welcomeSnapshot() });
+    this.transport.send(from, { type: 'welcome', seed: this.seed, tick: this.worldTime.tick, worldTime: this.worldTime.snapshot(), yourEntityId: id, snapshot: this.welcomeSnapshot() });
   }
 
   private welcomeSnapshot(): ReplaySnapshot {
@@ -121,7 +122,7 @@ export class HostSession {
       entities: this.sim.all().map((e) => this.sim.toRecord(e)),
       viewedEntityId: this.sim.viewedId,
       simPrng: this.sim.rng.state(),
-      time: { ...this.worldTime },
+      time: this.worldTime.snapshot(),
       hotbar: { slots: [1, 2, 3, 4, 5, 6, 7, 8, 9], selected: 0 },
       peers: this.persist.meta?.peers,
     };
@@ -142,7 +143,7 @@ export class HostSession {
     const e = this.sim.entities.get(p.entityId);
     const rec: EntityRecord | undefined = e ? this.sim.toRecord(e) : undefined;
     if (e) this.sim.despawn(p.entityId); // fires onDespawn → broadcast
-    if (!this.persist.meta) this.persist.meta = { v: 2, seed: this.seed, entities: [], viewedEntityId: this.sim.viewedId, time: { ...this.worldTime }, hotbar: { slots: [1, 2, 3, 4, 5, 6, 7, 8, 9], selected: 0 } };
+    if (!this.persist.meta) this.persist.meta = { v: 2, seed: this.seed, entities: [], viewedEntityId: this.sim.viewedId, time: this.worldTime.snapshot(), hotbar: { slots: [1, 2, 3, 4, 5, 6, 7, 8, 9], selected: 0 } };
     if (rec) this.persist.meta.peers = { ...(this.persist.meta.peers ?? {}), [p.name]: rec };
     this.persist.saveMeta(this.metaSnapshot());
     this.peers.delete(id);
@@ -198,6 +199,7 @@ export class HostSession {
     this.sim.tick(STEP, tick);
     if (tick % WATER_STRIDE === 0) this.waterSim.tick(WATER_PULSE);
     this.worldTime.tick = tick;
+    this.worldTime.advanceClock(STEP); // advance time + phaseTotal (the frame loop owns the tick)
     this.flushCells();
     const anchors = this.anchors();
     if (anchors.length) {
@@ -206,6 +208,6 @@ export class HostSession {
       // [POC shortcut] no meshing/lighting on the host in phase A (the host is a pure sim)
     }
     if (tick % NET_STATE_STRIDE === 0) this.broadcastState();
-    if (tick % TIME_STRIDE === 0) this.broadcast({ type: 'time', tick: this.worldTime.tick, worldTime: this.worldTime.time });
+    if (tick % TIME_STRIDE === 0) this.broadcast({ type: 'time', tick: this.worldTime.tick, worldTime: this.worldTime.snapshot() });
   }
 }

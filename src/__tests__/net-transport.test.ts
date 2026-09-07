@@ -2,7 +2,7 @@ import { describe, it, expect } from 'vitest';
 import { LoopbackHub, type Transport } from '../net/transport';
 import { type Msg } from '../net/messages';
 
-const m = (x: number): Msg => ({ type: 'time', tick: x, worldTime: x });
+const m = (x: number): Msg => ({ type: 'time', tick: x, worldTime: { time: x, tick: x, phaseTotal: 0 } });
 
 describe('LoopbackHub — reliable, ordered, pump-driven', () => {
   it('delivers in send order with zero delay (same-tick pump)', () => {

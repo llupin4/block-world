@@ -46,6 +46,18 @@ export class WorldTime {
     this.tick++;
   }
 
+  /** Advance the simulation clock + daylight cycle WITHOUT the tick (the host sets `tick` from the frame loop; the client keeps its own tick for the `worldTime.tick − NET_INTERP_TICKS` render delay). */
+  advanceClock(dt: number): void {
+    this.time += dt;
+    this.phaseTotal += dt / DAY_LENGTH;
+  }
+
+  /** Slew the clock from a host snapshot (set `time` + `phaseTotal`, keep `tick`). The client keeps its own tick so the render delay stays meaningful. */
+  slew(s: { time: number; phaseTotal: number }): void {
+    this.time = s.time;
+    this.phaseTotal = s.phaseTotal;
+  }
+
   /** Persistence snapshot (ADR 0014): the full clock state, `phaseTotal` included. `restore` is its inverse. */
   snapshot(): { time: number; tick: number; phaseTotal: number } {
     return { time: this.time, tick: this.tick, phaseTotal: this.phaseTotal };

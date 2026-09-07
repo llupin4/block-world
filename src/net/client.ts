@@ -6,6 +6,7 @@ import { type Msg, type CellWrite, PROTOCOL_VERSION } from './messages';
 import { NetworkPersistSource } from './network-persist';
 import { intentEqual } from '../replay';
 import { type Transport } from './transport';
+import { WorldTime } from '../time';
 
 // A frozen container controller: client entities never self-drive (their poses come from `state`),
 // so their controller just reports NULL_INTENT.
@@ -20,6 +21,7 @@ export class ClientSession {
   readonly sim: Sim; // container only
   readonly persist: NetworkPersistSource;
   readonly controller: Controller;
+  readonly worldTime = new WorldTime(); // the client's clock: tick per frame, time+phaseTotal sleet from the host's `time`
   private readonly transport: Transport;
   private name = '';
   entityId = -1; // the host-assigned id for this client's entity (set on welcome); public for tests/rejoin
@@ -59,6 +61,8 @@ export class ClientSession {
       case 'welcome': {
         this.entityId = msg.yourEntityId;
         this.joined = true;
+        this.worldTime.slew(msg.worldTime); // adopt the host's clock (time + phaseTotal)
+        this.worldTime.tick = msg.tick; // the host tick at welcome
         for (const rec of msg.snapshot.chunks) {
           applyRecord(this.world, rec, this.sim, () => NULL_CTRL);
           // the client now HAS these chunks (not just streamed ones): announce them so the
@@ -80,7 +84,7 @@ export class ClientSession {
       case 'cells': this.applyCells(msg.chunk, msg.writes); break;
       case 'spawn': this.sim.restoreEntity(msg.pose, NULL_CTRL); break;
       case 'despawn': this.sim.despawn(msg.id); break;
-      case 'time': break; // [POC shortcut] client slews worldTime here (phase B/C)
+      case 'time': this.worldTime.slew(msg.worldTime); break; // the client keeps its own tick (the frame loop owns it)
       default: break;
     }
   }
