@@ -375,6 +375,16 @@ Highlight box: a `THREE.LineSegments` wireframe cube, repositioned to `hit + 0.5
 > `P` handler). Box-part rigs (`src/entity-mesh.ts`, one deterministic canvas part-atlas per
 > kind, speed-driven leg phase) render every non-spectator entity; the viewed entity's rig is
 > hidden. Deers spawn deterministically per chunk (`src/spawn.ts`) and despawn on unload.
+>
+> **Phase 3 (2026-09-06, [ADR 0017](docs/adr/0017-replay.md)).** Because every world change flows
+> through intents on the tick (ADR 0015) and the sim is deterministic (ADR 0016), a **replay is an
+> initial snapshot + a delta-coded intent log** (`src/replay.ts`). `R` records a session to a
+> `replays` IndexedDB store (key `${seed}:replay:${startTick}`); `?replay=<key>` restores the
+> snapshot on a fresh world and plays the log back deterministically — each entity driven by a
+> pull-model `ReplayController` that reports the last logged intent at the current tick. The
+> spectator ghost watches non-perturbingly (its kind `canEdit: false`) and head-follows the live
+> mouse. The round-trip test (record → replay, byte/`1e-9` identical) + a seek test are the
+> load-bearing determinism gate.
 
 **Camera & input.** Pointer Lock API. `mousemove` deltas accumulate into yaw/pitch; clamp pitch to ±(π/2 − 0.01) so you never gimbal at straight up/down.
 
@@ -507,6 +517,12 @@ load. The original sketch is kept as the design context that ADR 0014 resolves.
 > meta bumped to `v: 2`: the meta now stores `entities`/`viewedEntityId`/`simPrng` (the player
 > is an entity, not a bare pose), and a chunk record can carry its frozen entities. A `v: 1`
 > save still loads (the old player pose migrates to a single viewed entity).
+>
+> **`replays` store (2026-09-06, [ADR 0017](docs/adr/0017-replay.md)).** A second IndexedDB
+> object store (`replays`, added at a DB version bump to 2) holds session replays under
+> `${seed}:replay:${startTick}`; `Persistence.saveReplay`/`loadReplay` are error-tolerant (D7).
+> A replay's chunk arrays reuse the ADR 0014 `ChunkRecord` shape, so a replay restores exactly
+> like a saved world.
 
 `localStorage` for the seed and player position. For block edits, IndexedDB storing **diffs only** — a per-chunk `Map<voxelIndex, blockId>` of player changes. On load, regenerate base terrain from the seed and replay the diff.
 
@@ -558,8 +574,8 @@ These are all real and all worth doing eventually. None belong in v1.
 - `DataArrayTexture` instead of an atlas
 - Biomes beyond a surface-block swap
 - Survival mechanics: health, mining time, item stacks, crafting
-- Entities, mobs
-- Multiplayer
+- ~~Entities, mobs~~ — landed as phases 1–3 (ADR 0015/0016/0017: the player entity, the deer + possession + spectator, and deterministic replay).
+- Multiplayer — unblocked by ADR 0017: a shared snapshot + one delta-coded intent log per player is the minimal complete shared state (the replay model is the foundation).
 
 ---
 
