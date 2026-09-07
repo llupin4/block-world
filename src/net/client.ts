@@ -71,7 +71,11 @@ export class ClientSession {
         break;
       }
       case 'state':
-        for (const n of msg.entities) if (n.id === this.entityId) this.own = { x: n.x, y: n.y, z: n.z, yaw: n.yaw, pitch: n.pitch };
+        for (const n of msg.entities) {
+          if (n.id === this.entityId) this.own = { x: n.x, y: n.y, z: n.z, yaw: n.yaw, pitch: n.pitch };
+          const ent = this.sim.entities.get(n.id);
+          if (ent) { ent.pos = { x: n.x, y: n.y, z: n.z }; ent.yaw = n.yaw; ent.pitch = n.pitch; }
+        }
         break;
       case 'cells': this.applyCells(msg.chunk, msg.writes); break;
       case 'spawn': this.sim.restoreEntity(msg.pose, NULL_CTRL); break;
@@ -101,10 +105,13 @@ export class ClientSession {
 
   /** One 60 Hz substep: send the intent (on change), stream the own ring, announce chunk loads. */
   tick(_tick: number): void {
-    const it = this.controller.intent(this.sim.viewed() ?? ({} as never), _tick);
-    if (!intentEqual(this.lastIntent, it)) {
-      this.lastIntent = { ...it };
-      if (this.joined) this.transport.send('all', { type: 'intent', tick: _tick, intent: it });
+    const e = this.sim.viewed();
+    if (e) {
+      const it = this.controller.intent(e, _tick);
+      if (!intentEqual(this.lastIntent, it)) {
+        this.lastIntent = { ...it };
+        if (this.joined) this.transport.send('all', { type: 'intent', tick: _tick, intent: it });
+      }
     }
     const anchor: Anchor = { cx: chunkOf(this.own.x), cz: chunkOf(this.own.z), cy: 2, radius: VIEW_RADIUS, meshable: true };
     const r = streamUpdate(this.world, [anchor], this.persist, this.sim);

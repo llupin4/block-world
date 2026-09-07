@@ -8,6 +8,7 @@
     "build": "tsc --noEmit && vite build",
     "preview": "vite preview",
     "test": "vitest run",
+    "net:stress": "vitest run src/__tests__/net-stress.test.ts",
     "prof": "playwright test",
     "deploy:gh-pages": "node scripts/deploy-gh-pages.mjs"
   },
