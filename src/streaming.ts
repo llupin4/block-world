@@ -37,16 +37,21 @@ export interface StreamingUpdate {
   pending: Coord[];  // in the persistence key set but not warm: main.ts fetches async (fetchRecord →
                      // applyRecord → sim.restore + lightSim.load + deferredFirstMesh); not loaded or generated this call
   unloaded: Coord[]; // removed from the world inside update(): main.ts only disposes scene meshes
+  meshable: Set<string>; // chunk keys in range of the first (meshable) anchor: the host meshes only these
 }
 
-/** (dx^2+dz^2) dominates x/z; |cy - pcy| orders levels; main.ts passes pcy = chunkOf(player.y). */
-function score(c: Coord, pcx: number, pcz: number, pcy: number): number {
-  const dx = c.cx - pcx, dz = c.cz - pcz;
-  return (dx * dx + dz * dz) * 100 + Math.abs(c.cy - pcy);
-}
+/** One anchor of the union ring: a player (the host's own, meshable) or a remote client. */
+export interface Anchor { cx: number; cz: number; cy: number; radius: number; meshable?: boolean }
 
-function cmp(a: Coord, b: Coord, pcx: number, pcz: number, pcy: number): number {
-  return score(a, pcx, pcz, pcy) - score(b, pcx, pcz, pcy) || a.cx - b.cx || a.cy - b.cy || a.cz - b.cz;
+/** (dx^2+dz^2) dominates x/z; |cy - a.cy| orders levels; the min over every anchor. */
+function minDist(c: Coord, anchors: Anchor[]): number {
+  let best = Infinity;
+  for (const a of anchors) {
+    const dx = c.cx - a.cx, dz = c.cz - a.cz;
+    const d = (dx * dx + dz * dz) * 100 + Math.abs(c.cy - a.cy);
+    if (d < best) best = d;
+  }
+  return best;
 }
 
 /** In-range: within VIEW_RADIUS of the player chunk in both x and z. Exported: main.ts
@@ -54,15 +59,6 @@ function cmp(a: Coord, b: Coord, pcx: number, pcz: number, pcy: number): number 
  *  must not resurrect chunks the player has walked past). */
 export function inRange(cx: number, cz: number, pcx: number, pcz: number): boolean {
   return Math.abs(cx - pcx) <= VIEW_RADIUS && Math.abs(cz - pcz) <= VIEW_RADIUS;
-}
-
-/** Union ring (multiplayer): a chunk is meshable/alive if it is in range of ANY anchor
- *  (the host's own player + every connected client). A null/empty anchor set is the
- *  single-player degenerate case. Exported for tests. */
-export function inRing(c: { cx: number; cz: number }, anchors: { cx: number; cz: number }[]): boolean {
-  if (anchors.length === 0) return false;
-  for (const a of anchors) if (inRange(c.cx, c.cz, a.cx, a.cz)) return true;
-  return false;
 }
 
 /** Mark existing in-range neighbors of (cx,cy,cz) dirty: their culling is stale after a load/unload/restore. Exported: main.ts marks after an async (cold) apply. */
@@ -79,23 +75,18 @@ export function markNeighborsDirty(world: World, cx: number, cy: number, cz: num
 }
 
 /**
- * One streaming step around (pcx, pcy, pcz):
- *   1. loads:  for every missing chunk of the ring, in score order:
- *      a. warm persistence record → applied inline (restored; neighbors marked dirty; does
- *         not consume the generation budget — records are the load, terrain gen is the
- *         fallback);
- *      b. key-set hit without a warm record → pending: main.ts fetches async; the chunk is
- *         NEVER generated while its key is known (D3) — generation happens only after a
- *         dropped/stale record (dropPersisted) makes it a confirmed miss;
- *      c. otherwise → terrain generation (≤ LOAD_BUDGET per call, as before);
- *   2. remesh: closest dirty chunks (≤ REMESH_BUDGET, excluding loads of this call, which
- *      main.ts rebuilds immediately anyway);
- *   3. unload: everything outside the ring (or outside the y band) leaves the world;
- *      persist.onUnload snapshots EDITED chunks only (D4/D6); their in-range neighbors
- *      are marked dirty first (newly exposed boundary faces).
+ * One union-ring streaming step. A chunk stays loaded if it is in range of ANY anchor
+ * (the host's own player + every remote client). Load/remesh budgets are shared across all
+ * anchors; `meshable` = the chunk keys in range of the FIRST anchor (the host's own, so
+ * remote-only chunks are sim-loaded but never meshed).
+ *   1. loads:  every missing candidate, warm → pending → generate (≤ LOAD_BUDGET total);
+ *   2. remesh: the closest dirty in-range chunk (≤ REMESH_BUDGET), excluding this call's loads;
+ *   3. unload: everything outside the union ring (or the y band) leaves; persist.onUnload
+ *      snapshots edited/entity chunks (D1/D4/D6); their in-range neighbors are marked dirty
+ *      (newly exposed boundary faces).
  * Pure TS (no three) so vitest can drive it; main.ts turns the result into scene work.
  */
-export function update(world: World, pcx: number, pcz: number, pcy = 2, persist?: PersistSource, sim?: EntitySource, anchors?: { cx: number; cz: number }[]): StreamingUpdate {
+function _update(world: World, anchors: Anchor[], persist?: PersistSource, sim?: EntitySource): StreamingUpdate {
   const rebuilt: Coord[] = [];
   const generated: Coord[] = [];
   const remeshed: Coord[] = [];
@@ -103,65 +94,90 @@ export function update(world: World, pcx: number, pcz: number, pcy = 2, persist?
   const pending: Coord[] = [];
   const unloaded: Coord[] = [];
   const done = new Set<string>(); // keys handled by this call's load pass; the remesh pass skips them
-  const ring: { cx: number; cz: number }[] = [{ cx: pcx, cz: pcz }, ...(anchors ?? [])]; // multiplayer: union ring = the host's own column + every remote anchor
 
-  const missed: Coord[] = [];
-  for (let dx = -VIEW_RADIUS; dx <= VIEW_RADIUS; dx++) {
-    for (let dz = -VIEW_RADIUS; dz <= VIEW_RADIUS; dz++) {
-      for (let cy = CY_MIN; cy <= CY_MAX; cy++) {
-        const cx = pcx + dx, cz = pcz + dz;
-        if (world.hasChunk(cx, cy, cz)) continue;
-        const rec = persist?.syncRecord(cx, cy, cz);
-        if (rec) {
-          applyRecord(world, rec); // edited chunk: arrays verbatim, settled = true (D1)
-          markNeighborsDirty(world, cx, cy, cz, pcx, pcz);
-          restored.push({ cx, cy, cz });
-          done.add(chunkKey(cx, cy, cz));
-          continue;
+  // Union of every anchor's x/z ring (full generated y band); a key may be claimed by several
+  // anchors but is processed once.
+  const candidates = new Set<string>();
+  const meshable = new Set<string>();
+  for (let ai = 0; ai < anchors.length; ai++) {
+    const a = anchors[ai];
+    for (let dx = -a.radius; dx <= a.radius; dx++) {
+      for (let dz = -a.radius; dz <= a.radius; dz++) {
+        for (let cy = CY_MIN; cy <= CY_MAX; cy++) {
+          const cx = a.cx + dx, cz = a.cz + dz;
+          const k = chunkKey(cx, cy, cz);
+          candidates.add(k);
+          if (ai === 0 && a.meshable !== false) meshable.add(k); // the first anchor is the host's own
         }
-        if (persist?.hasPersisted(cx, cy, cz)) {
-          pending.push({ cx, cy, cz }); // async fetch dedups in-flight; the first mesh is paced by main.ts
-          continue;
-        }
-        missed.push({ cx, cy, cz });
       }
     }
   }
-  missed.sort((a, b) => cmp(a, b, pcx, pcz, pcy));
+
+  // Load pass: every missing candidate, warm → pending → generate (≤ LOAD_BUDGET total).
+  const missed: Coord[] = [];
+  for (const k of candidates) {
+    const [cx, cy, cz] = k.split(',').map(Number);
+    if (world.hasChunk(cx, cy, cz)) continue;
+    const rec = persist?.syncRecord(cx, cy, cz);
+    if (rec) {
+      applyRecord(world, rec); // edited chunk: arrays verbatim, settled = true (D1)
+      markNeighborsDirty(world, cx, cy, cz, anchors[0].cx, anchors[0].cz);
+      restored.push({ cx, cy, cz });
+      done.add(k);
+      continue;
+    }
+    if (persist?.hasPersisted(cx, cy, cz)) { pending.push({ cx, cy, cz }); continue; }
+    missed.push({ cx, cy, cz });
+  }
+  missed.sort((a, b) => minDist(a, anchors) - minDist(b, anchors) || a.cx - b.cx || a.cy - b.cy || a.cz - b.cz);
   for (const c of missed.slice(0, LOAD_BUDGET)) {
     world.ensureChunk(c.cx, c.cy, c.cz);
     generateChunkTerrain(world, GEN, c.cx, c.cy, c.cz); // fills data, sets dirty
-    markNeighborsDirty(world, c.cx, c.cy, c.cz, pcx, pcz);
+    markNeighborsDirty(world, c.cx, c.cy, c.cz, anchors[0].cx, anchors[0].cz);
     rebuilt.push(c);
     generated.push(c);
     done.add(chunkKey(c.cx, c.cy, c.cz));
   }
-  pending.sort((a, b) => cmp(a, b, pcx, pcz, pcy)); // deterministic fetch order (closest first)
+  pending.sort((a, b) => minDist(a, anchors) - minDist(b, anchors) || a.cx - b.cx || a.cy - b.cy || a.cz - b.cz); // deterministic fetch order (closest first)
 
+  // Remesh pass: the closest dirty in-range chunk (≤ REMESH_BUDGET), excluding this call's loads.
   const dirty: Coord[] = [];
   for (const c of world.allChunks()) {
     if (!c.dirty || done.has(chunkKey(c.cx, c.cy, c.cz))) continue;
-    if (!inRing(c, ring)) continue; // meshable = union ring (multiplayer)
+    if (!candidates.has(chunkKey(c.cx, c.cy, c.cz))) continue; // out of the union ring → unloading
     dirty.push({ cx: c.cx, cy: c.cy, cz: c.cz });
   }
-  dirty.sort((a, b) => cmp(a, b, pcx, pcz, pcy));
+  dirty.sort((a, b) => minDist(a, anchors) - minDist(b, anchors) || a.cx - b.cx || a.cy - b.cy || a.cz - b.cz);
   for (const c of dirty.slice(0, REMESH_BUDGET)) {
     rebuilt.push(c);
     remeshed.push(c);
     done.add(chunkKey(c.cx, c.cy, c.cz));
   }
 
+  // Unload pass: everything outside the union ring (or the y band) leaves the world.
   const doomed: Chunk[] = []; // Chunk (not Coord): onUnload needs the live arrays
   for (const c of world.allChunks()) {
-    if (!inRing(c, ring) || c.cy < CY_MIN || c.cy > CY_MAX) doomed.push(c);
+    if (!candidates.has(chunkKey(c.cx, c.cy, c.cz)) || c.cy < CY_MIN || c.cy > CY_MAX) doomed.push(c);
   }
   for (const c of doomed) {
     const ents = sim ? sim.entitiesInChunk(c.cx, c.cy, c.cz).map((e) => sim.toRecord(e)) : undefined;
-    persist?.onUnload(c, ents); // edited-only snapshot (D4/D6); entities ride the chunk
-    markNeighborsDirty(world, c.cx, c.cy, c.cz, pcx, pcz);
+    persist?.onUnload(c, ents); // edited/entity-only snapshot (D1/D4/D6); entities ride the chunk
+    markNeighborsDirty(world, c.cx, c.cy, c.cz, anchors[0].cx, anchors[0].cz);
     world.removeChunk(c.cx, c.cy, c.cz);
     unloaded.push({ cx: c.cx, cy: c.cy, cz: c.cz });
   }
 
-  return { rebuilt, generated, remeshed, restored, pending, unloaded };
+  return { rebuilt, generated, remeshed, restored, pending, unloaded, meshable };
+}
+
+// The public entry point. Two call forms (overloads):
+//   - anchors form:    update(world, anchors, persist?, sim?) — the host and clients pass the
+//     union ring's anchors (the first is the host's own, meshable) directly.
+//   - single-anchor form: update(world, pcx, pcz, pcy?, persist?, sim?) — main.ts (single player)
+//     keeps its today's call; one meshable VIEW_RADIUS anchor == today's behavior.
+export function update(world: World, anchors: Anchor[], persist?: PersistSource, sim?: EntitySource): StreamingUpdate;
+export function update(world: World, pcx: number, pcz: number, pcy?: number, persist?: PersistSource, sim?: EntitySource): StreamingUpdate;
+export function update(world: World, a: Anchor[] | number, b?: number | PersistSource, c?: number | EntitySource, d?: PersistSource, e?: EntitySource): StreamingUpdate {
+  if (Array.isArray(a)) return _update(world, a, b as PersistSource | undefined, c as EntitySource | undefined);
+  return _update(world, [{ cx: a, cz: b as number, cy: typeof c === 'number' ? c : 2, radius: VIEW_RADIUS, meshable: true }], d, e);
 }

@@ -2,7 +2,7 @@ import { describe, it, expect } from 'vitest';
 import { Block } from '../blocks';
 import { World } from '../world';
 import { TERRAIN_SEED, TerrainGen } from '../terrain';
-import { update, inRing } from '../streaming';
+import { update } from '../streaming';
 import { InMemoryChunkStore, Persistence, applyRecord, type PersistSource } from '../persistence';
 import { Sim, IdleController, type EntityRecord } from '../entity';
 
@@ -238,11 +238,27 @@ describe('streaming — generated vs remeshed (multiplayer pre-work D2)', () => 
   });
 });
 
-describe('streaming — union ring (multiplayer, T3)', () => {
-  it('a chunk is alive if it is in range of ANY anchor', () => {
-    expect(inRing({ cx: 0, cz: 0 }, [{ cx: 0, cz: 0 }, { cx: 4, cz: 4 }])).toBe(true);
-    expect(inRing({ cx: 4, cz: 4 }, [{ cx: 0, cz: 0 }, { cx: 4, cz: 4 }])).toBe(true);
-    expect(inRing({ cx: 8, cz: 8 }, [{ cx: 0, cz: 0 }, { cx: 4, cz: 4 }])).toBe(false);
+describe('streaming — union ring (multiplayer phase A)', () => {
+  const anchor = (cx: number, cz: number, cy = 2, radius = 2, meshable = true) => ({ cx, cz, cy, radius, meshable });
+
+  it('loads the union of two anchor rings and marks only the first anchor\'s ring meshable', () => {
+    const world = new World();
+    const A = anchor(0, 0, 2, 2, true); // the host's own ring (meshable)
+    const B = anchor(4, 4, 2, 1, false); // a remote player's ring (non-meshable)
+    // Converge with the union ring:
+    let r: ReturnType<typeof update>;
+    for (;;) {
+      r = update(world, [A, B]);
+      for (const c of r.rebuilt) world.getChunk(c.cx, c.cy, c.cz)!.dirty = false;
+      if (r.rebuilt.length === 0 && r.unloaded.length === 0) break;
+    }
+    // B's ring center chunk is loaded (sim-loaded by the union) ...
+    expect(world.hasChunk(4, 2, 4)).toBe(true);
+    // ... and is in the host's meshable? NO — it is > VIEW_RADIUS from A (only sim-loaded, not meshed).
+    expect(r.meshable.has('4,2,4')).toBe(false);
+    // ... but A's center is meshable.
+    expect(r.meshable.has('0,2,0')).toBe(true);
+    expect(world.hasChunk(0, 2, 0)).toBe(true);
   });
 
   it('does not unload a dirty chunk that is only in range of a remote anchor', () => {
@@ -250,17 +266,17 @@ describe('streaming — union ring (multiplayer, T3)', () => {
     const c = world.ensureChunk(0, 0, 0);
     c.edited = true;
     c.dirty = true;
-    // Player stands at (4,4); the remote anchor keeps (0,0,0) alive.
-    const r = update(world, 4, 4, 2, undefined, undefined, [{ cx: 0, cz: 0 }]);
+    // The host stands at (4,4); the remote anchor (0,0) keeps (0,0,0) alive.
+    const r = update(world, [anchor(4, 4, 2, 2, true), anchor(0, 0, 2, 1, false)]);
     expect(r.unloaded).toEqual([]);
     expect(world.hasChunk(0, 0, 0)).toBe(true);
   });
 
-  it('with no remote anchors (undefined) the player ring alone governs (single player, unchanged)', () => {
+  it('with a single anchor the player ring alone governs (single player, unchanged)', () => {
     const world = new World();
     world.ensureChunk(0, 0, 0).edited = true;
-    const r = update(world, 4, 4, 2, undefined, undefined); // undefined anchors → player's own ring
-    // (0,0,0) is outside the (4,4) ring and no remote anchor covers it → it unloads.
+    const r = update(world, 4, 4, 2); // the backward-compatible overload → one VIEW_RADIUS anchor
+    // (0,0,0) is outside the (4,4) ring → it unloads.
     expect(r.unloaded).toContainEqual({ cx: 0, cy: 0, cz: 0 });
   });
 });
