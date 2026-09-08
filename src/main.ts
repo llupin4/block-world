@@ -26,6 +26,8 @@ import { LoopbackHub } from './net/transport';
 import { HostSession } from './net/host';
 import { ClientSession } from './net/client';
 import { ScriptController, type ScriptStep } from './entity';
+// Multiplayer (B2): the real-network Transport (trystero) + the ?host/?join lobby.
+import { TrysteroTransport } from './net/trystero';
 
 // === boot ===
 
@@ -250,6 +252,14 @@ const mpActive = mpMode === 'host' || mpMode === 'client';
 const mpBots = mpActive
   ? Math.max(1, parseInt(new URLSearchParams(location.search).get('bots') ?? (mpMode === 'host' ? '2' : '1'), 10) || (mpMode === 'host' ? 2 : 1))
   : 0;
+// ?host / ?join=<code> (B2): the real lobby over a TrysteroTransport (a real network, not the ?mp
+// in-page LoopbackHub). ?host starts a session and shows the room code (an optional ?host=<code>
+// fixes it, so the e2e can pass the same code to both tabs); ?join=<code> joins. The lobby wins
+// over ?mp/?replay/?prof (they are mutually exclusive; only one boot branch runs).
+const lobbyHost = new URLSearchParams(location.search).has('host'); // ?host (presence, with or without a code)
+const lobbyJoinCode = new URLSearchParams(location.search).get('join'); // ?join=<code>
+const lobbyActive = lobbyHost || lobbyJoinCode !== null;
+const APP_ID = 'block-world'; // the trystero namespace (a shared constant both sides must match on)
 let worldTime = new WorldTime(startPhase); // let: the B1 boot reassigns it to the session's clock
 const sky = createSky(scene, FOG_AIR, FOG_WATER, BG_WATER);
 const clouds = createClouds(scene);
@@ -366,6 +376,49 @@ let mpLeaveFired = false; // one-shot: the ?mp=client leave check disconnects an
 // a persisted record — the scan must read the current world state, whatever that is).
 let SPAWN: THREE.Vector3;
 
+// === multiplayer lobby (B2) helpers ===
+// A short, unambiguous room code (no l/o/0/1 — they read alike). The host shows it; a peer types
+// it as ?join=<code>. ?host=<code> fixes it (the e2e passes the same code to both tabs).
+function genRoomCode(): string {
+  const A = 'abcdefghijkmnpqrstuvwxyz23456789';
+  let s = '';
+  for (let i = 0; i < 6; i++) s += A[Math.floor(Math.random() * A.length)];
+  return s;
+}
+// The lobby overlay: the room code + a copy button + a live peer list (polled every 500 ms — the
+// HostSession/ClientSession own the transport's onPeerJoin/onPeerLeave, so the lobby reads peers()
+// instead of registering its own callback). `window.__lobby` is the e2e hook.
+function showLobby(code: string, isHost: boolean, tr: { peers(): string[] }, session: HostSession | ClientSession): void {
+  const el = document.createElement('div');
+  el.id = 'lobby';
+  el.style.cssText = 'position:fixed;top:12px;right:12px;z-index:9998;background:rgba(0,0,0,.72);color:#fff;font:13px/1.5 sans-serif;padding:10px 12px;border-radius:8px;max-width:300px';
+  el.innerHTML =
+    `<div style="font-weight:600;margin-bottom:6px">${isHost ? 'Hosting a world' : 'Joined a world'}</div>` +
+    `<div>Room code</div>` +
+    `<div id="lobby-code" style="font:600 20px monospace;letter-spacing:2px;margin:2px 0 6px;user-select:all">${code}</div>` +
+    `<button id="lobby-copy" style="cursor:pointer;font:12px sans-serif;padding:4px 8px;background:#2a2a2a;color:#fff;border:1px solid #555;border-radius:4px">copy code</button>` +
+    `<div id="lobby-peers" style="margin-top:8px;color:#bbb">Peers: ${isHost ? 'waiting for players…' : 'connecting to host…'}</div>`;
+  document.body.appendChild(el);
+  const copyBtn = document.getElementById('lobby-copy')!;
+  copyBtn.addEventListener('click', () => {
+    navigator.clipboard?.writeText(code).then(() => { copyBtn.textContent = 'copied!'; setTimeout(() => { copyBtn.textContent = 'copy code'; }, 1200); }).catch(() => {});
+  });
+  const peersEl = document.getElementById('lobby-peers')!;
+  const render = () => { const p = tr.peers(); peersEl.textContent = p.length ? 'Peers: ' + p.join(', ') : (isHost ? 'Peers: waiting for players…' : 'Peers: connecting to host…'); };
+  const timer = setInterval(render, 500);
+  render();
+  // The e2e hook: the connected peer ids (the transport connection) + the remote players this side
+  // sees in its sim (the "see each other" render sense — the host's clients / the client's host).
+  (window as unknown as Record<string, unknown>).__lobby = {
+    code, isHost,
+    peers: () => tr.peers(),
+    remotePlayers: () => session.sim.all()
+      .filter((e) => e.kind.id === 'player' && e.id !== session.sim.viewedId)
+      .map((e) => ({ id: e.id, name: e.name ?? null, x: Math.round(e.pos.x * 10) / 10, z: Math.round(e.pos.z * 10) / 10 })),
+    _dispose: () => clearInterval(timer),
+  };
+}
+
 // === boot gate (ADR 0014) ===
 // The game starts only once persistence has booted (key set + meta) — capped at 5 s:
 // a stalled IDB must not hold the first frame hostage (the fallback starts a fresh
@@ -375,6 +428,46 @@ let booted = false;
 async function startGame(meta: WorldMeta | null): Promise<void> {
   if (booted) return;
   booted = true;
+  // === multiplayer lobby (B2) ===
+  // ?host/?join win over ?mp/?replay/?prof. The session is wired exactly like the B1 ?mp boot
+  // (reassign the module globals to the session's objects so the render path runs unchanged; the
+  // frame loop ticks the clients -> delivers transport msgs -> ticks the local host -> advanceTick),
+  // differing only in the Transport: a real TrysteroTransport (WebRTC data channels) instead of the
+  // in-page LoopbackHub. A host has no local clients (real peers are remote; their intents arrive
+  // via the transport's onMessage); a client has no in-page headless host (the real host is a
+  // separate tab), so the frame loop's host-tick step is conditional on mpHost (null here).
+  if (lobbyActive) {
+    const code = lobbyHost ? (new URLSearchParams(location.search).get('host') || genRoomCode()) : (lobbyJoinCode as string);
+    const tr = new TrysteroTransport(APP_ID, code);
+    let session: HostSession | ClientSession;
+    if (lobbyHost) {
+      const host = new HostSession(tr, TERRAIN_SEED, { withOwnPlayer: true, persist, hooks: simHooks });
+      session = host; mpHost = host; mpClients = []; // no local clients: real peers are remote
+      world = host.world; sim = host.sim; waterSim = host.waterSim; worldTime = host.worldTime;
+    } else {
+      const client = new ClientSession(tr, 'me', human);
+      session = client; mpHost = null; mpClients = [client]; // the page's own body (tick it to send intents)
+      client.setLightEdit((x, y, z) => { lightSim?.edit(x, y, z); }); // the client's light tracks the host's edits
+      client.onPeerLeave((id) => { // the host (the welcome sender) left -> a static view of the last world
+        if (id === client.hostId && mpSession === client) {
+          mpSession = null;
+          const el = document.createElement('div');
+          el.style.cssText = 'position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);color:#fff;font:600 24px sans-serif;z-index:9999;pointer-events:none;text-shadow:0 0 8px #000';
+          el.textContent = 'host left';
+          document.body.appendChild(el);
+        }
+      });
+      world = client.world; sim = client.sim; worldTime = client.worldTime;
+    }
+    lightSim = new LightClient(world, worldTime); // the page's light worker runs on the session's world
+    window.__lightDebug = lightSim;
+    mpSession = session;
+    mpHub = null; // no in-page hub to pump (a real transport delivers messages asynchronously)
+    showLobby(code, lobbyHost, tr, session);
+    syncCamera();
+    requestAnimationFrame(frame);
+    return;
+  }
   // === multiplayer (B1) ===
   // ?mp wins over ?replay/?prof. The session is created + the module globals are reassigned to the
   // session's objects so the whole render path (light, re-mesh, syncCamera, syncEntityRigs) runs
@@ -1348,11 +1441,13 @@ function frame(now: number): void {
   while (acc >= STEP) {
     acc -= STEP;
     if (playback && playback.paused) continue; // a paused replay holds the world (the substep is consumed but nothing advances)
-    if (mpSession && mpHost) {
-      for (const c of mpClients) c.tick(worldTime.tick); // the clients send intents (host mode: the bots; client mode: the other players + the own body)
-      mpHub?.pump(worldTime.tick); // deliver the in-page loopback messages (the intents reach the host's RemoteControllers)
-      mpHost.worldTime.tick = worldTime.tick; // sync the host's tick to the frame tick (a no-op in host mode, where the host's worldTime IS the page's; in client mode the headless host's own tick would otherwise stay 0 and its `state` ticks would collapse the client's pose rings)
-      mpHost.tick(worldTime.tick); // the authoritative host applies the intents + broadcasts state/time
+    if (mpSession) {
+      for (const c of mpClients) c.tick(worldTime.tick); // the clients send intents (?mp bots; lobby: the own body)
+      mpHub?.pump(worldTime.tick); // deliver the in-page loopback (a no-op for a real transport, mpHub null)
+      if (mpHost) { // a local authoritative host (?mp=host / ?mp=client headless host / ?host lobby)
+        mpHost.worldTime.tick = worldTime.tick; // sync the host's tick to the frame tick (a no-op in host mode, where the host's worldTime IS the page's; in client mode the headless host's own tick would otherwise stay 0 and its `state` ticks would collapse the client's pose rings)
+        mpHost.tick(worldTime.tick); // the authoritative host applies the intents + broadcasts state/time
+      }
       worldTime.advanceTick(); // the frame loop owns the tick (the host/client sessions don't advance it)
     } else {
       sim.tick(STEP, worldTime.tick); // the single-player sim heartbeat: intent -> applyIntent -> stepEntity
