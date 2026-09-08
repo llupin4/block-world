@@ -356,7 +356,11 @@ const restoring = new Set<string>();
 // session's objects at boot so the render path runs unchanged against them.
 let mpSession: HostSession | ClientSession | null = null;
 let mpHub: LoopbackHub | null = null;
+let mpHost: HostSession | null = null; // the authoritative session (host mode: the host; client mode: the in-page headless host)
+let mpClients: ClientSession[] = []; // the intent-sending clients (host mode: the bots; client mode: the other players + the page's own body)
 let mpOtherTransports: { transport: { disconnect(): void }; name: string }[] = []; // the ?mp=client other players' transports (the leave check disconnects one at tick 250)
+let mpFirstPos: Map<number, { x: number; z: number }> | null = null; // the ?mp=host remote players' first-observed positions (the report asserts they moved off it)
+let mpLeaveFired = false; // one-shot: the ?mp=client leave check disconnects an other player once, at the first tick >= 250 (the frame loop can run multiple substeps/frame, so an exact === match would be flaky)
 
 // SPAWN is computed in startGame, after the boot column exists (it may be RESTORED from
 // a persisted record — the scan must read the current world state, whatever that is).
@@ -384,6 +388,7 @@ async function startGame(meta: WorldMeta | null): Promise<void> {
       // appear + move as their intents are applied by the host's sim).
       session = new HostSession(hub.connect('host'), TERRAIN_SEED, { withOwnPlayer: true, persist, hooks: simHooks });
       const host = session as HostSession;
+      mpHost = host; // the authoritative session
       const botSteps: ScriptStep[] = [
         { op: 'walkTo', x: 8, z: 48, timeout: 120 },
         { op: 'walkTo', x: 12, z: 44, timeout: 120 },
@@ -393,6 +398,7 @@ async function startGame(meta: WorldMeta | null): Promise<void> {
       for (let i = 0; i < mpBots; i++) {
         const c = new ClientSession(hub.connect(`bot${i}`), `bot${i}`, new ScriptController(botSteps, true));
         c.setLightEdit(() => { /* the bot clients are remote (no page light); no-op */ });
+        mpClients.push(c); // the bots send intents each substep (the frame loop ticks them)
       }
       world = host.world; sim = host.sim; waterSim = host.waterSim; worldTime = host.worldTime;
     } else {
@@ -401,6 +407,7 @@ async function startGame(meta: WorldMeta | null): Promise<void> {
       // meshed/lit — it is not the frame loop's world). waterSim stays the page's (the frame loop
       // + consumeStream skip water work for the client via the mode check — it has no WaterSim).
       const headless = new HostSession(hub.connect('headless'), TERRAIN_SEED, { withOwnPlayer: false });
+      mpHost = headless; // the authoritative session (simulation-only — never meshed/lit)
       const otherSteps: ScriptStep[] = [
         { op: 'walkTo', x: 8, z: 48, timeout: 120 },
         { op: 'walkTo', x: 12, z: 44, timeout: 120 },
@@ -408,11 +415,14 @@ async function startGame(meta: WorldMeta | null): Promise<void> {
       ];
       for (let i = 0; i < mpBots; i++) {
         const t = hub.connect(`other${i}`);
-        new ClientSession(t, `other${i}`, new ScriptController(otherSteps, true));
+        const c = new ClientSession(t, `other${i}`, new ScriptController(otherSteps, true));
+        c.setLightEdit(() => { /* the other players are remote (no page light); no-op */ });
+        mpClients.push(c); // the other players send intents each substep (the frame loop ticks them)
         mpOtherTransports.push({ transport: t, name: `other${i}` });
       }
       session = new ClientSession(hub.connect('me'), 'me', human); // the client's own body is driven by the page's HumanController (immediate look + movement)
       const client = session as ClientSession;
+      mpClients.push(client); // the page's own body sends intents too
       client.setLightEdit((x, y, z) => { lightSim?.edit(x, y, z); }); // the client's light tracks the host's edits
       client.onPeerLeave((id) => { // the headless host leaves → "host left" + stop driving (static view of the last-received world)
         if (id !== 'headless') return;
@@ -1338,9 +1348,11 @@ function frame(now: number): void {
   while (acc >= STEP) {
     acc -= STEP;
     if (playback && playback.paused) continue; // a paused replay holds the world (the substep is consumed but nothing advances)
-    if (mpSession) {
-      mpSession.tick(worldTime.tick); // the session drives the sim (host) or the intent (client)
-      mpHub?.pump(worldTime.tick); // deliver the in-page loopback messages
+    if (mpSession && mpHost) {
+      for (const c of mpClients) c.tick(worldTime.tick); // the clients send intents (host mode: the bots; client mode: the other players + the own body)
+      mpHub?.pump(worldTime.tick); // deliver the in-page loopback messages (the intents reach the host's RemoteControllers)
+      mpHost.worldTime.tick = worldTime.tick; // sync the host's tick to the frame tick (a no-op in host mode, where the host's worldTime IS the page's; in client mode the headless host's own tick would otherwise stay 0 and its `state` ticks would collapse the client's pose rings)
+      mpHost.tick(worldTime.tick); // the authoritative host applies the intents + broadcasts state/time
       worldTime.advanceTick(); // the frame loop owns the tick (the host/client sessions don't advance it)
     } else {
       sim.tick(STEP, worldTime.tick); // the single-player sim heartbeat: intent -> applyIntent -> stepEntity
@@ -1479,14 +1491,28 @@ function frame(now: number): void {
   // Multiplayer (B1) scenario report: ?mp=host / ?mp=client, mirrored by the Playwright e2e
   // (tests/e2e/mp-{host,client}.spec.ts). The leave check disconnects an other player at tick 250
   // (the rig + tag are removed by syncEntityRigs); the report at tick 300 asserts the removal.
-  if (mpActive && mpMode === 'client' && worldTime.tick === 250 && mpOtherTransports.length > 1) {
+  if (mpActive && mpMode === 'client' && !mpLeaveFired && worldTime.tick >= 250 && mpOtherTransports.length > 1) {
+    mpLeaveFired = true; // fire once (the tick can jump past 250 when a frame runs multiple substeps)
     mpOtherTransports[1]!.transport.disconnect(); // disconnect an other player (its rig + tag are removed)
+  }
+  // ?mp=host: record each remote player's first-observed position (the report asserts they moved off it —
+  // catches the "host never applies the bots' intents" regression, where the bots stay frozen at spawn).
+  if (mpActive && mpMode === 'host') {
+    if (!mpFirstPos) mpFirstPos = new Map();
+    for (const e of sim.all()) {
+      if (e.kind.id !== 'player' || e.id === sim.viewedId) continue;
+      if (!mpFirstPos.has(e.id)) mpFirstPos.set(e.id, { x: e.pos.x, z: e.pos.z });
+    }
   }
   if (mpActive && worldTime.tick >= 300 && (window as unknown as Record<string, unknown>).__mpResult === undefined) {
     const rep: Record<string, unknown> = { mode: mpMode, tick: worldTime.tick, bots: mpBots };
     if (mpMode === 'host') {
       rep.rigCount = rigs.size;
-      rep.remotePlayers = sim.all().filter((e) => e.kind.id === 'player' && e.id !== sim.viewedId).map((e) => ({ id: e.id, x: Math.round(e.pos.x * 10) / 10, y: Math.round(e.pos.y * 10) / 10, z: Math.round(e.pos.z * 10) / 10, name: e.name ?? null }));
+      rep.remotePlayers = sim.all().filter((e) => e.kind.id === 'player' && e.id !== sim.viewedId).map((e) => {
+        const first = mpFirstPos?.get(e.id);
+        const moved = first ? Math.hypot(e.pos.x - first.x, e.pos.z - first.z) > 0.25 : false;
+        return { id: e.id, x: Math.round(e.pos.x * 10) / 10, y: Math.round(e.pos.y * 10) / 10, z: Math.round(e.pos.z * 10) / 10, name: e.name ?? null, moved };
+      });
       const tx = 10, ty = 40, tz = 10; // a cell in the host's spawn ring (edited → reflected)
       world.setBlock(tx, ty, tz, Block.Planks);
       rep.editReflected = world.getBlock(tx, ty, tz) === Block.Planks;
