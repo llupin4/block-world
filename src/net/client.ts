@@ -32,6 +32,7 @@ export class ClientSession {
   private own = { x: 0, y: 0, z: 0, yaw: 0, pitch: 0 }; // the last state pose for the own entity
   private lastIntent: Intent | undefined;
   private joined = false;
+  hostId = ''; // the host's peer id (the `welcome` sender) — the boot's "host left" handler keys off it
   private handlers = new Map<string, (() => void)[]>();
 
   constructor(transport: Transport, name: string, controller: Controller) {
@@ -41,12 +42,20 @@ export class ClientSession {
     this.sim = new Sim(this.world, {}, 1234); // seed is irrelevant: no sim randomness on the client
     this.persist = new NetworkPersistSource(transport);
     // One message handler: route the chunkRec side channel to the persist source; the rest to onMessage.
-    transport.onMessage((_from, msg) => {
+    transport.onMessage((from, msg) => {
       if (msg.type === 'chunkRec') { this.persist.resolveChunk(msg.key, msg.rec); return; }
+      if (msg.type === 'welcome' && !this.hostId) this.hostId = from; // the host is the welcome sender
       this.onMessage(msg);
     });
     // Join: the host spawns the remote player and replies with a welcome (snapshot).
     transport.send('all', { type: 'hello', name, protocol: PROTOCOL_VERSION });
+    // A real transport's data channel opens seconds after construction (the loopback is already
+    // connected), so the construction-time hello is dropped when no peer is connected yet. Re-send
+    // it when a peer joins, until the welcome arrives (then it is a no-op). The loopback is
+    // unaffected: the host peer is added before the constructor registers this callback.
+    transport.onPeerJoin((_id) => {
+      if (!this.joined) transport.send('all', { type: 'hello', name: this.name, protocol: PROTOCOL_VERSION });
+    });
   }
 
   on(ev: 'welcome', cb: () => void): void {

@@ -89,6 +89,13 @@ export class HostSession {
 
   private onHello(from: string, name: string, protocol: number): void {
     if (protocol !== PROTOCOL_VERSION) { console.warn(`[host] refusing ${name}: protocol ${protocol} != ${PROTOCOL_VERSION}`); return; } // [POC shortcut] no version-mismatch message yet
+    const existing = this.peers.get(from);
+    if (existing) {
+      // A real network can deliver the join more than once (the client re-sends `hello` on peer
+      // join). The entity already exists — just re-send the welcome (don't spawn a duplicate).
+      this.transport.send(from, { type: 'welcome', seed: this.seed, tick: this.worldTime.tick, worldTime: this.worldTime.snapshot(), yourEntityId: existing.entityId, snapshot: this.welcomeSnapshot() });
+      return;
+    }
     let id = 0;
     const rc = new RemoteController(from);
     const saved = this.persist.meta?.peers?.[name];
