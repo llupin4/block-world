@@ -83,23 +83,22 @@ Open follow-ups from the dynamic-lighting work (ADR 0007 — Dynamic lighting):
   time to the snapshot, fast-forward the `ReplayController`s to `T` without rendering), then wire
   the `.bar` as a click/drag target that triggers it and updates the camera.
 
-## Multiplayer (ADR 0018, 0019)
+## Multiplayer (ADR 0018, 0019, 0020)
 
 Phase A (the session model over a node loopback), **B1** (the deterministic core in the
 browser: `?mp` loopback-in-page, full-snapshot `WorldTime` wire, `NET_INTERP_TICKS 6` pose-ring
-interpolation, biped + name-tag remote rendering, leave handling), and **B2** (the real transport
-+ lobby: a thin `TrysteroTransport` over `trystero`/Nostr, the `?host`/`?join` lobby overlay, the
-wire codec, the async-join `hello` re-send + idempotent `onHello`, and the two-tab Gate B e2e) are
-implemented and green (ADR 0019). The remaining decisions, in order:
+interpolation, biped + name-tag remote rendering, leave handling), **B2** (the real transport +
+lobby: a thin `TrysteroTransport` over `trystero`/Nostr, the `?host`/`?join` lobby overlay, the wire
+codec, the async-join `hello` re-send + idempotent `onHello`, and the two-tab Gate B e2e, ADR 0019),
+and **Phase C** (own-body prediction + reconciliation, ADR 0020: the client runs `stepEntity` on its
+own entity locally each substep and, on each host `state`, snaps the full authoritative state —
+pose + vel + `inWater`/`onGround` — then re-applies the buffered intents after `state.tick`;
+actions stay host-applied) are implemented and green. The remaining work:
 
-- **Phase C — own-body prediction + reconciliation (ADR 0020).** The client runs `stepEntity` on
-  its own entity locally each substep against its local world, keeping a ring of
-  `{tick, intent, resultingPose}`; on each host `state` it snaps to the host pose at
-  `lastIntentTick` and re-applies the buffered intents after it, smoothing a correction over a few
-  frames if the error exceeds `NET_SNAP_EPS`. Actions stay host-applied (optional: predict a
-  *break* visually and revert on disagreement within `NET_EDIT_TIMEOUT`). Test on loopback with a
-  delayed link: a predicted path matches the host within `1e-6` on an unchanged world, and
-  reconciliation corrects within K ticks when the host disagrees.
+- **Phase C follow-ups (ADR 0020, not blockers).** Wire the display-lerp smoothing of a large
+  reconciliation snap (`NET_SNAP_EPS 0.05` / `SNAP_SMOOTH_FRAMES 4` are pinned in `messages.ts` but
+  unwired — it needs a display pose separate from the sim pose); and the optional visual
+  **break-predict** (predict a block *break*, revert on host disagreement within `NET_EDIT_TIMEOUT`).
 - **B2 pre-work (deferred follow-up, not a blocker).** The `LocalSession` unification (single-player
   as a `HostSession` with a null transport — collapsing B1's additive frame-loop mode-branch) + the
   `Persistence` light-worker refactor (light-edit worker wiring out of the constructor). B2 reuses
