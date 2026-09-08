@@ -85,23 +85,13 @@ Open follow-ups from the dynamic-lighting work (ADR 0007 — Dynamic lighting):
 
 ## Multiplayer (ADR 0018, 0019)
 
-Phase A (the session model over a node loopback) and **B1** (the deterministic core in the
+Phase A (the session model over a node loopback), **B1** (the deterministic core in the
 browser: `?mp` loopback-in-page, full-snapshot `WorldTime` wire, `NET_INTERP_TICKS 6` pose-ring
-interpolation, biped + name-tag remote rendering, leave handling) are implemented and green. The
-remaining decisions, in order:
+interpolation, biped + name-tag remote rendering, leave handling), and **B2** (the real transport
++ lobby: a thin `TrysteroTransport` over `trystero`/Nostr, the `?host`/`?join` lobby overlay, the
+wire codec, the async-join `hello` re-send + idempotent `onHello`, and the two-tab Gate B e2e) are
+implemented and green (ADR 0019). The remaining decisions, in order:
 
-- **B2 — real transport + lobby (ADR 0019).** Finalize the draft transport/lobby spec against the
-  actual B1 `src/net/` code + the measured `NET_INTERP_TICKS`, then: a thin `TrysteroTransport`
-  (Nostr strategy, room = a short code; the only new dependency — `makeAction` per type vs one
-  `type`-discriminant action, **measure and pick**), the `?host`/`?join` lobby overlay (code, peer
-  list, copy; main menu stays single-player by default), and the **B2 pre-work**: the
-  `LocalSession` unification (single-player as a `HostSession` with a null transport, collapsing
-  B1's additive frame-loop mode-branch) + the `Persistence` refactor (light-edit worker wiring out
-  of the constructor so a saved world restores under a session). Gate: two browser tabs on one
-  machine over the real transport — join, see each other, edit, water, walk apart past the host
-  ring, leave/rejoin. STUN only; **TURN is the one place infrastructure could enter — do not add
-  it.** Verify a client's IDB stays untouched (the `visibilitychange` flush must not fire on
-  clients).
 - **Phase C — own-body prediction + reconciliation (ADR 0020).** The client runs `stepEntity` on
   its own entity locally each substep against its local world, keeping a ring of
   `{tick, intent, resultingPose}`; on each host `state` it snaps to the host pose at
@@ -110,6 +100,12 @@ remaining decisions, in order:
   *break* visually and revert on disagreement within `NET_EDIT_TIMEOUT`). Test on loopback with a
   delayed link: a predicted path matches the host within `1e-6` on an unchanged world, and
   reconciliation corrects within K ticks when the host disagrees.
+- **B2 pre-work (deferred follow-up, not a blocker).** The `LocalSession` unification (single-player
+  as a `HostSession` with a null transport — collapsing B1's additive frame-loop mode-branch) + the
+  `Persistence` light-worker refactor (light-edit worker wiring out of the constructor). B2 reuses
+  B1's global-reassignment session-wiring for the lobby, so single-player is untouched (the pin
+  holds). Also: verify a client's `visibilitychange` flush does not fire (the two-tab e2e does not
+  trigger it).
 - **Deferred (non-goals for the MVP, revisit later):** host migration (host leaves → session over),
   client-side mob possession (host path stays), an **unreliable** channel for `state` (a candidate
   optimization), per-peer chunk caching across sessions, and any hosted infrastructure (relay/

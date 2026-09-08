@@ -4,7 +4,8 @@
 - **Last updated:** 2026-09-07
 - **Sources:** `docs/superpowers/specs/2026-09-07-multiplayer-b1-deterministic-core-design.md`
   (B1, implemented), `docs/superpowers/specs/2026-09-07-multiplayer-transport-lobby-design.md`
-  (B2, the transport/lobby design of record), `docs/superpowers/plans/2026-09-07-multiplayer-b1-deterministic-core.md`
+  (B2, the transport/lobby design of record), `docs/superpowers/plans/2026-09-07-multiplayer-b1-deterministic-core.md`,
+  and `docs/superpowers/plans/2026-09-07-multiplayer-b2-transport-lobby.md` (B2, implemented)
 - **Extends:** ADR 0018 (the session model over a reliable, ordered `Transport` — this ADR is the
   *transport/lobby/rendering* half it deferred), ADR 0016 (the biped rig a remote player renders
   with), ADR 0014 (persistence — a client's IDB stays untouched by a session), and ADR 0012 (the
@@ -98,26 +99,48 @@ actually applied), `editReflected` (a host `setBlock` then `getBlock`). Client: 
 tick ≥ 250 must remove its rig). The disconnect is one-shot (`mpLeaveFired`): the frame loop can run
 multiple substeps per frame, so an exact `=== 250` tick match would be flaky.
 
-**B2 — real transport + lobby (design of record; implementation pending).**
-- **`TrysteroTransport`** implements the same `Transport` contract over `trystero` — the **only new
-  dependency**. Strategy: Nostr by default; a "room" is a short code. It stays thin: `makeAction`
-  per message type *or* one action carrying the `type` discriminant — **measure and pick** (the
-  loopback already proves the session layer is transport-agnostic, so this is isolated to one file).
-  It must preserve the loopback guarantees the session layer relies on: reliable + ordered
-  delivery, `onPeerJoin`/`onPeerLeave`.
-- **Lobby:** `?host` starts a session and shows the room code; `?join=<code>` joins. A minimal
-  overlay (the code, the peer list, a copy button); the main menu stays single-player by default.
-  Boot reuses B1's `?mp` mode-branch (parse `?host`/`?join`, wire the `HostSession`/`ClientSession`
-  into the existing frame loop) and must coexist with `?replay`/`?phase`/`?prof`.
-- **B2 pre-work:** a `LocalSession` **unification** (single-player becomes a `HostSession` with a
-  null transport, so there is one loop path instead of the B1 additive branch) and a `Persistence`
-  refactor (the light-edit worker wiring moves out of the constructor so a saved world restores
-  cleanly under a session).
-- **NAT:** STUN only, via Trystero's defaults. The ADR documents that some peer pairs will not
-  connect without TURN, and that **TURN is the one place infrastructure could enter — do not add
-  it** (non-goal: any hosted infrastructure).
+**B2 — real transport + lobby (implemented).**
+- **`TrysteroTransport`** (`src/net/trystero.ts`) implements the same `Transport` contract over
+  `trystero` — the **only new dependency** (`trystero@0.25.4`). Strategy: Nostr (the default); a
+  "room" is a short code. It is thin: **one** message action (namespace `msg`) carrying the
+  JSON-encoded `Msg` (the `type` discriminant inside the JSON) — not one action per message type.
+  It preserves the loopback guarantees (reliable + ordered — a data-channel guarantee) and
+  `onPeerJoin`/`onPeerLeave`. The `trystero` surface is a structural `TrysteroLike`, injectable so a
+  node test wires two fake rooms together (no RTC in node).
+- **Wire codec** (`src/net/messages.ts`): `RTCDataChannel.send` takes a `DOMString`, so a `Msg` is
+  JSON-serialized; the only non-JSON-safe fields are the six `Uint8Array` chunk arrays in
+  `ChunkRecord` (in `welcome.snapshot.chunks` + `chunkRec.rec`), base64-encoded
+  (`encodeMsg`/`decodeMsg`). Everything else is already plain JSON.
+- **Lobby:** `?host` starts a session + shows the room code (an optional `?host=<code>` fixes it);
+  `?join=<code>` joins. A minimal overlay (the code, a copy button, a peer list polled every 500 ms
+  — the sessions own the transport's `onPeerJoin`/`onPeerLeave`, so the lobby reads `peers()`); the
+  main menu stays single-player by default. A new `startGame` branch (before `?mp`) reuses B1's
+  session-wiring (reassign the module globals to the session's objects) + the frame loop, differing
+  only in the `Transport` (a `TrysteroTransport`, `mpHub = null` so `pump` is a no-op). A host has no
+  local clients (`mpClients = []`); a client has no in-page headless host (`mpHost = null`), so the
+  frame loop's host-tick step is conditional on `mpHost`. Coexists with `?replay`/`?phase`/`?prof`.
+- **Real-network join is async** (the data channel opens seconds after construction), so two
+  session-layer behaviors are **required**, not just nice: the `ClientSession` **re-sends `hello` on
+  `onPeerJoin`** (until the welcome arrives) — the construction-time hello is dropped when no peer is
+  connected yet — and `HostSession.onHello` is **idempotent** (a re-hello re-sends the `welcome` for
+  the existing entity instead of spawning a duplicate). Both are harmless for the loopback (the host
+  peer is added before the client's constructor registers the `onPeerJoin` callback).
+- **B2 pre-work (deferred).** The `LocalSession` **unification** (single-player as a `HostSession`
+  with a null transport) + the `Persistence` light-worker refactor are **not** done: B2 reuses B1's
+  global-reassignment session-wiring for the lobby, so single-player is untouched (the single-player
+  pin holds). They remain a `[POC shortcut]` follow-up (the additive frame-loop mode-branch stays).
+- **NAT:** STUN only, via Trystero's defaults. Some peer pairs will not connect without TURN, and
+  **TURN is the one place infrastructure could enter — do not add it** (non-goal: any hosted
+  infrastructure).
 - **Persistence:** the host saves as today (IndexedDB); a client's IDB is untouched by the session
-  (verify with the real transport that the `visibilitychange` flush does not fire on clients).
+  (the `visibilitychange` flush on clients is unverified — a follow-up; the two-tab e2e does not
+  trigger it).
+- **Gate B (two tabs, real transport).** `tests/e2e/mp-lobby.spec.ts` (single page: the lobby
+  renders + the code shows, robust with/without relay reachability) + `tests/e2e/mp-2tab.spec.ts`
+  (two tabs over the real transport: each lists the other as a connected peer **and** renders the
+  other's player — the host spawns the joiner's remote player on `hello`; the joiner restores the
+  host's entities from the `welcome` snapshot). A fresh random room code per run avoids relay
+  cross-talk.
 
 **Pinned numbers stay verbatim.** ADR 0018's net constants hold: `NET_STATE_STRIDE 3`,
 `CELLS_FULL_THRESHOLD 512`, `NET_REMOTE_RADIUS 1`, `PROTOCOL_VERSION 1`. B1 adds the render
@@ -163,14 +186,17 @@ constants `NET_INTERP_TICKS 6` and `INTERP_RING 8`; `TERRAIN_SEED 1234`, `VIEW_R
   clock). They share `tick` (the frame loop's) but the host's continuous clock is the authority the
   client slews toward. The headless host's `state` ticks *must* track the frame tick or the
   client's pose rings collapse (the bug B1's e2e caught: remote players frozen at spawn).
-- **The loopback is still the node deliverable; the browser loop is the B1 deliverable.** ADR 0018's
-  node `net-gate`/`net-stress` are unchanged and still green; B1 adds the in-browser e2e on top.
-  **No real network, lobby, `?host`/`?join`, or cross-browser play yet** — that is B2 (this ADR's
-  B2 section), then ADR 0020 (prediction).
+- **The loopback is the node deliverable; the browser loop (B1) + the real transport (B2) are the
+  in-browser deliverables.** ADR 0018's node `net-gate`/`net-stress` are unchanged and still green;
+  B1 adds the in-browser `?mp` e2e; B2 adds the real-network `?host`/`?join` lobby + the two-tab
+  e2e (`net-trystero.test.ts` pins the transport against a fake trystero). **Cross-browser play over
+  a real network is now implemented** — the next decision is ADR 0020 (prediction).
 - **`[POC shortcut]`s, not design.** The additive frame-loop mode-branch (unified in B2 pre-work),
   the headless in-page host (B2 runs a real remote host), the `lastStream`-only consumption with
   lagging-frame deferral, and the `?mp` bot-driven scenario (B2 replaces it with a real lobby +
   real peers) are all deliberate puns tagged in the code.
-- **Follow-ups.** B2 (real `TrysteroTransport` + lobby + `?host`/`?join` + two-tab e2e) and ADR 0020
-  (own-body prediction + reconciliation) are the next decisions this unblocks; the specific items
-  are tracked in [`TODO.md`](../TODO.md) → **Multiplayer**.
+- **Follow-ups.** ADR 0020 (own-body prediction + reconciliation) is the next decision this
+  unblocks. Deferred B2 pre-work (a follow-up, not a blocker): the `LocalSession` unification
+  (single-player as a `HostSession` with a null transport — collapsing the additive frame-loop
+  mode-branch) + the `Persistence` light-worker refactor; and verifying a client's `visibilitychange`
+  flush does not fire. The specific items are tracked in [`TODO.md`](../TODO.md) → **Multiplayer**.
