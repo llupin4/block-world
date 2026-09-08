@@ -25,6 +25,7 @@ recoverable via git history at pre-restructure `main`, `0cf878c`).
 | [0016](0016-mobs-possession-spectator.md) | Mobs, possession & spectator | a deer kind with sim-owned wander AI, drive-any-entity possession (view + controller swap), and the single spectator ghost; box-part rigs |
 | [0017](0017-replay.md) | Replay | a session is a snapshot + a delta-coded intent log, recorded (`R`) to a `replays` IDB store (browsable via the `#replays` panel) and played back deterministically on a fresh world; the camera follows the recorded perspective |
 | [0018](0018-multiplayer-session-model.md) | Multiplayer session model | one host runs the only authoritative sim; clients send `Intent`s (delta-coded) and hold a view (pristine terrain + host-fed `cells`/`state`) over a reliable, ordered `Transport`; the host streams a union ring and coalesces per-tick cell writes; loopback transport + BotClient stress rig |
+| [0019](0019-multiplayer-transport-lobby.md) | Multiplayer transport & lobby | the session model runs in the browser over a swappable `Transport` — B1 lands the deterministic core in-browser (`?mp` loopback-in-page, full-snapshot `WorldTime` wire, `NET_INTERP_TICKS` pose-ring interpolation, rig + name-tag remote rendering, leave handling); B2 swaps in a real `TrysteroTransport` (Nostr, room code) + a minimal `?host`/`?join` lobby (STUN only, no TURN) |
 
 ## Conventions
 
