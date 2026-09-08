@@ -14,6 +14,13 @@ export const NET_REMOTE_RADIUS = 1; // the host keeps each remote's ring at this
 export const TIME_STRIDE = 60; // broadcast `time` every 60 substeps (once per sim second)
 export const NET_INTERP_TICKS = 6; // the client's render reads the pose 6 substeps (100 ms) behind the host tick
 
+// Phase C (own-body prediction + reconciliation): the capped buffer of the client's recent intents
+// (keyed by tick), the snap distance below which a reconciliation correction is applied instantly,
+// and the frames over which a larger snap is lerped out on the own body's display pose.
+export const PREDICT_BUFFER = 120; // ~2 s of intents at 60 Hz
+export const NET_SNAP_EPS = 0.05; // 5 cm — below this, a reconciliation snap is instant
+export const SNAP_SMOOTH_FRAMES = 4; // the display-pose lerp-out frames for a larger snap
+
 /** A host world-time snapshot on the wire (a `WorldTime.snapshot()`): `time` (s) + `tick` + `phaseTotal` (cycles). The client slews `time`+`phaseTotal` from it (keeping its own tick). */
 export interface WorldTimeSnapshot { time: number; tick: number; phaseTotal: number }
 
