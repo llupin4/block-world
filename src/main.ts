@@ -906,8 +906,15 @@ const keys = new Set<string>(); // shared with the human controller (it reads th
 const human = new HumanController(keys, 0, 0); // the player's controller: hardware state -> one Intent per substep
 
 window.addEventListener('keydown', (e) => {
+  // Typing in a text input (the MP menu's name/code fields) must not drive the game: the letters
+  // would land in `keys` (the typed characters move the player) and fire the toggle keys (typing
+  // "m" in the name would close the very menu being typed in; digits would pick hotbar slots).
+  if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) return;
   keys.add(e.code);
   if (e.repeat) return;
+  // The MP menu is a menu, not a game state: while it is open (and focus has left the inputs)
+  // only the overlay keys switch overlays — movement/entity toggles stay inert.
+  if (mpMenuOpen && !(e.code === 'KeyE' || e.code === 'KeyH' || e.code === 'KeyM' || e.code === 'KeyR')) return;
   if (e.code === 'KeyF') human.toggleFly(); // fly toggle (a one-tick edge the sim consumes)
   if (e.code === 'KeyN') human.toggleNoclip(); // noclip toggle
   if (e.code === 'KeyR') {
@@ -1211,6 +1218,10 @@ function openPalette(): void {
     replaysOpen = false;
     replaysEl.classList.add('hidden');
   }
+  if (mpMenuOpen) {
+    mpMenuOpen = false;
+    mpMenuEl.classList.add('hidden');
+  }
   paletteOpen = true;
   paletteEl.classList.remove('hidden');
   syncOverlays();
@@ -1232,6 +1243,10 @@ function openHelp(): void {
   if (replaysOpen) {
     replaysOpen = false;
     replaysEl.classList.add('hidden');
+  }
+  if (mpMenuOpen) {
+    mpMenuOpen = false;
+    mpMenuEl.classList.add('hidden');
   }
   helpOpen = true;
   helpEl.classList.remove('hidden');
@@ -1299,6 +1314,10 @@ function openReplays(): void {
   if (helpOpen) {
     helpOpen = false;
     helpEl.classList.add('hidden');
+  }
+  if (mpMenuOpen) {
+    mpMenuOpen = false;
+    mpMenuEl.classList.add('hidden');
   }
   replaysOpen = true;
   replaysEl.classList.remove('hidden');
