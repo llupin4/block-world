@@ -8,7 +8,7 @@ import { meshChunk, meshChunkRange, probeMeshChunk, type ChunkMesh, type LightSa
 import { SliceScheduler, decideBands, PROBE_VERTS, SLICE_COUNT } from './mesh-slices';
 import { ProfRig, meshVerts, PROF_WORST_KEY } from './prof-rig';
 import { toGeometry } from './geometry';
-import { Sim, HumanController, IdleController, MobController, eyeOf, lookDir, breakRayTarget, possessToggle, type ApplyHooks, type Controller, type EntityRecord } from './entity';
+import { Sim, HumanController, IdleController, MobController, eyeOf, lookDir, breakRayTarget, possessToggle, possessableCandidates, type ApplyHooks, type Controller, type EntityRecord } from './entity';
 import { raycastVoxel, pickEntity, REACH, type RayHit } from './raycast';
 import { spawnDeer } from './spawn';
 import { buildEntityRig, updateEntityRig, advanceRigAnim, newRigAnim, RIG_COLORS, LEG_RATE, buildPartAtlas, type Rig, type RigAnim } from './entity-mesh';
@@ -999,11 +999,9 @@ function updateHitbox(): void {
 function onPossess(): void {
   const ve = sim.viewed();
   if (!ve) return;
-  // Exclude the spectator ghost from being picked: it is a non-colliding spectator (no rig) that can
-  // be flown underground while spectating, so if it sits in the ray it would be picked over the
-  // creature and the camera would jump to wherever the ghost is. The body<->ghost toggle still works
-  // via the else branch (press P when nothing is targeted).
-  const candidates = sim.all().filter((x) => x.id !== ve.id && x.id !== sim.ghostId);
+  // Possession candidates are owned by the entity layer (spec 2026-09-08): no ghost, no other
+  // player entities, and no entity already driven by this page's human controller.
+  const candidates = possessableCandidates(sim, human);
   const hit = pickEntity(eyeOf(ve), lookDir(ve.yaw, ve.pitch), candidates, REACH);
   // P exits possession first when the human is already out of its home body; otherwise it
   // possesses the targeted entity (or toggles body<->ghost when nothing is targeted).
