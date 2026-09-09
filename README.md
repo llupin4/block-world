@@ -108,6 +108,21 @@ Use `http://localhost:5173` for multiplayer. Remove it with:
 netsh interface portproxy delete v4tov4 listenaddress=127.0.0.1 listenport=5173
 ```
 
+**Known limitation — players on incompatible networks.** Signaling (the lobby) and the game data use
+different paths: the lobby finds peers through public Nostr relays, then the two browsers open a
+direct WebRTC data channel (STUN only, no TURN — a deliberate non-goal, ADR 0019). If one or both
+players sit behind a NAT that cannot be hole-punched (common with symmetric-NAT carriers, some
+corporate firewalls, and mobile networks), the lobby connects but the data channel never does, and
+the browser console prints `WebRTC: ICE failed, add a TURN server and see about:webrtc`. The game
+stays playable when both players are on the same LAN or on permissive NATs; otherwise open
+`about:webrtc` (Chrome/Edge) on both machines while the two tabs are running to inspect the ICE
+states, and play from networks that can see each other.
+
+**Relay maintenance.** If the console shows `Trystero: relay failure from wss://...`, one of the
+pinned relays in `src/net/trystero.ts` (`RELAY_URLS`) is rejecting or unreachable — the room still
+works on the remaining relays, but re-run `node scripts/probe-relays.mjs` and swap the failing
+relay for one that answers `ok`.
+
 ### Build
 
 ```bash

@@ -3,7 +3,7 @@ import type { ChunkRecord, WorldMeta } from '../persistence';
 import type { ReplaySnapshot } from '../replay';
 import { encodeMsg, decodeMsg } from '../net/messages';
 import type { Msg } from '../net/messages';
-import { TrysteroTransport, webCryptoUnavailableMessage } from '../net/trystero';
+import { TrysteroTransport, webCryptoUnavailableMessage, RELAY_URLS } from '../net/trystero';
 import type { TrysteroLike, TrysteroRoomLike, TrysteroActionLike } from '../net/trystero';
 
 // --- An in-process fake trystero: two fake rooms wired to each other, so the TrysteroTransport's
@@ -51,8 +51,10 @@ class FakeRoom {
 class FakeTrystero implements TrysteroLike {
   readonly selfId: string;
   readonly room: FakeRoom;
+  lastConfig: { appId: string; relayConfig?: { urls: string[] } } | null = null;
   constructor(selfId: string) { this.selfId = selfId; this.room = new FakeRoom(selfId); }
-  joinRoom(_config: { appId: string }, _roomId: string): TrysteroRoomLike {
+  joinRoom(config: { appId: string; relayConfig?: { urls: string[] } }, _roomId: string): TrysteroRoomLike {
+    this.lastConfig = config;
     return this.room;
   }
 }
@@ -141,5 +143,31 @@ describe('webCryptoUnavailableMessage', () => {
   });
   it('returns null when crypto.subtle is available', () => {
     expect(webCryptoUnavailableMessage()).toBeNull();
+  });
+});
+
+describe('Nostr relay set (RELAY_URLS)', () => {
+  // trystero's default relay list is rotated per appId (5 of ~28 public relays) and the list rots:
+  // operators start rejecting anonymous (unauthenticated) clients with NIP-42 "blocked: not
+  // authorized" closes (upstream dmotz/trystero #192, #148). 2026-09-08 audit (scripts/probe-relays.mjs):
+  // 9 of 28 defaults failed — incl. the two our appId resolves to. We pin a verified set instead.
+  const KNOWN_DEAD_2026_09_08 = [
+    'wss://basspistol.org', 'wss://chorus.pjv.me', 'wss://koru.bitcointxoko.org',
+    'wss://nostr-01.uid.ovh', 'wss://relay-can.zombi.cloudrodion.com',
+    'wss://relay.artio.inf.unibe.ch', 'wss://relay-rpi.edufeed.org',
+    'wss://social.amanah.eblessing.co', 'wss://relay.agorist.space',
+  ];
+  it('pins a non-empty set of wss:// public relays', () => {
+    expect(RELAY_URLS.length).toBeGreaterThanOrEqual(3);
+    for (const url of RELAY_URLS) expect(url, url).toMatch(/^wss:\/\//);
+  });
+  it('excludes every relay that failed the 2026-09-08 audit', () => {
+    for (const dead of KNOWN_DEAD_2026_09_08) expect(RELAY_URLS, dead).not.toContain(dead);
+  });
+  it('TrysteroTransport pins the curated set via relayConfig (appId unchanged)', () => {
+    const tr = new FakeTrystero('A');
+    new TrysteroTransport('block-world', 'room', tr);
+    expect(tr.lastConfig?.appId).toBe('block-world');
+    expect(tr.lastConfig?.relayConfig?.urls).toEqual([...RELAY_URLS]);
   });
 });

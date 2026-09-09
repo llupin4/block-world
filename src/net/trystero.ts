@@ -20,8 +20,26 @@ export interface TrysteroRoomLike {
 }
 export interface TrysteroLike {
   readonly selfId: string;
-  joinRoom: (config: { appId: string }, roomId: string) => TrysteroRoomLike;
+  joinRoom: (config: { appId: string; relayConfig?: { urls: string[] } }, roomId: string) => TrysteroRoomLike;
 }
+
+// Nostr relays, pinned. trystero's default strategy rotates its public-relay list per appId (5 of
+// ~28, seeded by the appId string) and that list rots in the wild: relay operators start rejecting
+// anonymous (unauthenticated) event publishers with NIP-42 — the socket closes with
+// "blocked: not authorized" — or block trystero's ephemeral kinds outright under load (upstream
+// dmotz/trystero #192 / #148; the default list is unchanged as of 0.25.4). 2026-09-08 audit of the
+// whole default list (scripts/probe-relays.mjs): 9 of 28 failed, including two of the five our appId
+// `block-world` resolves to (basspistol.org, nostr-01.uid.ovh) — every lobby logged the failure and
+// ran on 3 relays instead of 5. So we pin a curated set that was verified accepting anonymous
+// trystero-format events on 2026-09-08. Re-run the probe when relays die again; swap names here.
+// (Public relays stay — pinning them is config, not hosted infrastructure; ADR 0019 holds.)
+export const RELAY_URLS: readonly string[] = [
+  'wss://nos.lol',
+  'wss://nostr.data.haus',
+  'wss://nostr.vulpem.com',
+  'wss://relay.mostr.pub',
+  'wss://schnorr.me',
+];
 
 const defaultTrystero: TrysteroLike = {
   selfId,
@@ -55,7 +73,7 @@ export class TrysteroTransport implements Transport {
 
   constructor(appId: string, roomId: string, trystero: TrysteroLike = defaultTrystero) {
     this.selfId = trystero.selfId;
-    this.room = trystero.joinRoom({ appId }, roomId);
+    this.room = trystero.joinRoom({ appId, relayConfig: { urls: [...RELAY_URLS] } }, roomId);
     this.action = this.room.makeAction('msg');
     this.action.onMessage = (data, { peerId }) => {
       if (data == null) return;
