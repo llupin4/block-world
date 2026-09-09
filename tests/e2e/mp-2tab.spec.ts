@@ -9,13 +9,13 @@ import { mkdirSync, writeFileSync } from 'node:fs';
 
 const BASE = 'http://localhost:4173/';
 type RemotePlayer = { id: number; name: string | null; x: number; z: number };
-type LobbySnap = { code: string; isHost: boolean; peers: string[]; remote: RemotePlayer[] };
+type LobbySnap = { code: string; isHost: boolean; peers: string[]; remote: RemotePlayer[]; ownPos: { x: number; y: number; z: number } | null };
 
 // Snapshot the serializable __lobby fields (the object carries function properties).
 const snap = (page: Page) =>
   page.evaluate(() => {
-    const l = (window as { __lobby?: { code: string; isHost: boolean; peers: () => string[]; remotePlayers: () => RemotePlayer[] } }).__lobby;
-    return l ? { code: l.code, isHost: l.isHost, peers: l.peers(), remote: l.remotePlayers() } : null;
+    const l = (window as { __lobby?: { code: string; isHost: boolean; peers: () => string[]; remotePlayers: () => RemotePlayer[]; ownPos: () => { x: number; y: number; z: number } | null } }).__lobby;
+    return l ? { code: l.code, isHost: l.isHost, peers: l.peers(), remote: l.remotePlayers(), ownPos: l.ownPos() } : null;
   });
 
 test('Gate B: two tabs over the real transport see each other', async ({ browser }) => {
@@ -29,8 +29,8 @@ test('Gate B: two tabs over the real transport see each other', async ({ browser
   const clientReady = client.waitForFunction(() => (window as { __lobby?: unknown }).__lobby, undefined, { timeout: 30_000 });
 
   // Kick both tabs in parallel (the host must be reachable on the relay before the client's hello lands).
-  const hostNav = host.goto(`${BASE}?host=${code}`);
-  const clientNav = client.goto(`${BASE}?join=${code}`);
+  const hostNav = host.goto(`${BASE}?host=${code}&name=Blue4402`);
+  const clientNav = client.goto(`${BASE}?join=${code}&name=Red777`);
   await Promise.all([hostNav, clientNav, hostReady, clientReady]);
 
   // The full handshake: the client's sim holds the host's player (implies connect + hello + welcome).
@@ -53,6 +53,36 @@ test('Gate B: two tabs over the real transport see each other', async ({ browser
   expect(c!.peers.length, 'client lists the host as a connected peer').toBeGreaterThanOrEqual(1);
   expect(h!.remote.length, 'host renders the client\'s player').toBeGreaterThanOrEqual(1);
   expect(c!.remote.length, 'client renders the host\'s player').toBeGreaterThanOrEqual(1);
+
+  // Names over the wire: the host sees the client's `hello` name immediately; the client sees the
+  // host's body name on the first `state` after the welcome (the welcome snapshot's records carry
+  // no name — the host's own entity name is broadcast in `state` only). (Before the fix: null / 'me'.)
+  const h0 = await snap(host);
+  expect(h0!.remote.some((p) => p.name === 'Red777'), 'host sees the client named').toBe(true);
+  await client.waitForFunction(
+    () => {
+      const l = (window as { __lobby?: { remotePlayers: () => RemotePlayer[] } }).__lobby;
+      return !!l && l.remotePlayers().some((p) => p.name === 'Blue4402');
+    },
+    undefined,
+    { timeout: 15_000 },
+  );
+  const c0 = await snap(client);
+  expect(c0!.remote.some((p) => p.name === 'Blue4402'), 'client sees the host named').toBe(true);
+
+  // The host's own body moves (the lobby-host movement fix): hold W a moment, the own body drifts.
+  const start = h0!.ownPos!;
+  await host.keyboard.down('w');
+  await host.waitForTimeout(1200);
+  await host.keyboard.up('w');
+  await host.waitForFunction(
+    ({ sx, sz }) => {
+      const p = (window as { __lobby?: { ownPos: () => { x: number; y: number; z: number } | null } }).__lobby?.ownPos();
+      return !!p && Math.abs(p.x - sx) + Math.abs(p.z - sz) > 0.05;
+    },
+    { sx: start.x, sz: start.z },
+    { timeout: 15_000 },
+  );
 
   await clientCtx.close(); await hostCtx.close();
 }, 180_000);

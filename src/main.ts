@@ -25,6 +25,7 @@ import { Recorder, ReplayController, parseReplayParam, viewedAt, type Replay, ty
 import { LoopbackHub } from './net/transport';
 import { HostSession } from './net/host';
 import { ClientSession } from './net/client';
+import { sanitizeName } from './net/name';
 import { ScriptController, type ScriptStep } from './entity';
 // Multiplayer (B2): the real-network Transport (trystero) + the ?host/?join lobby.
 import { TrysteroTransport, webCryptoUnavailableMessage } from './net/trystero';
@@ -411,7 +412,7 @@ function genRoomCode(): string {
 // The lobby overlay: the room code + a copy button + a live peer list (polled every 500 ms — the
 // HostSession/ClientSession own the transport's onPeerJoin/onPeerLeave, so the lobby reads peers()
 // instead of registering its own callback). `window.__lobby` is the e2e hook.
-function showLobby(code: string, isHost: boolean, tr: { peers(): string[] }, session: HostSession | ClientSession): void {
+function showLobby(code: string, isHost: boolean, tr: { peers(): string[] }, session: HostSession | ClientSession, name: string): void {
   const el = document.createElement('div');
   el.id = 'lobby';
   el.style.cssText = 'position:fixed;top:12px;right:12px;z-index:9998;background:rgba(0,0,0,.72);color:#fff;font:13px/1.5 sans-serif;padding:10px 12px;border-radius:8px;max-width:300px';
@@ -422,6 +423,11 @@ function showLobby(code: string, isHost: boolean, tr: { peers(): string[] }, ses
     `<button id="lobby-copy" style="cursor:pointer;font:12px sans-serif;padding:4px 8px;background:#2a2a2a;color:#fff;border:1px solid #555;border-radius:4px">copy code</button>` +
     `<div id="lobby-peers" style="margin-top:8px;color:#bbb">Peers: ${isHost ? 'waiting for players…' : 'connecting to host…'}</div>`;
   document.body.appendChild(el);
+  // The display name (textContent, so a pasted `<script>`-ish name cannot inject HTML) — under the header.
+  const nameEl = document.createElement('div');
+  nameEl.style.cssText = 'color:#bbb;margin-bottom:6px';
+  nameEl.textContent = `name: ${name}`;
+  el.firstElementChild?.after(nameEl);
   const copyBtn = document.getElementById('lobby-copy')!;
   copyBtn.addEventListener('click', () => {
     navigator.clipboard?.writeText(code).then(() => { copyBtn.textContent = 'copied!'; setTimeout(() => { copyBtn.textContent = 'copy code'; }, 1200); }).catch(() => {});
@@ -438,6 +444,7 @@ function showLobby(code: string, isHost: boolean, tr: { peers(): string[] }, ses
     remotePlayers: () => session.sim.all()
       .filter((e) => e.kind.id === 'player' && e.id !== session.sim.viewedId)
       .map((e) => ({ id: e.id, name: e.name ?? null, x: Math.round(e.pos.x * 10) / 10, z: Math.round(e.pos.z * 10) / 10 })),
+    ownPos: () => { const e = session.sim.viewed(); return e ? { x: e.pos.x, y: e.pos.y, z: e.pos.z } : null; },
     _dispose: () => clearInterval(timer),
   };
 }
@@ -465,15 +472,21 @@ async function startGame(meta: WorldMeta | null): Promise<void> {
       showFatalOverlay('Multiplayer unavailable', webCryptoError);
       return;
     }
+    // The display name (?host&name= / ?join=code&name=): typed (non-empty param) names are
+    // remembered for the M menu; an empty param gets a random name (not remembered).
+    const nameParam = new URLSearchParams(location.search).get('name') ?? '';
+    const name = sanitizeName(nameParam);
+    if (nameParam.trim() !== '') localStorage.setItem('bw.name', name);
     const code = lobbyHost ? (new URLSearchParams(location.search).get('host') || genRoomCode()) : (lobbyJoinCode as string);
     const tr = new TrysteroTransport(APP_ID, code);
     let session: HostSession | ClientSession;
     if (lobbyHost) {
-      const host = new HostSession(tr, TERRAIN_SEED, { withOwnPlayer: true, persist, hooks: simHooks });
+      const host = new HostSession(tr, TERRAIN_SEED, { withOwnPlayer: true, ownController: human, ownName: name, persist, hooks: simHooks });
       session = host; mpHost = host; mpClients = []; // no local clients: real peers are remote
       world = host.world; sim = host.sim; waterSim = host.waterSim; worldTime = host.worldTime;
+      { const ve = host.sim.viewed(); if (ve) human.setLook(ve.yaw, ve.pitch); } // sync the look to the own body's spawn look (mirrors the single-player boot sync)
     } else {
-      const client = new ClientSession(tr, 'me', human);
+      const client = new ClientSession(tr, name, human);
       session = client; mpHost = null; mpClients = [client]; // the page's own body (tick it to send intents)
       client.setLightEdit((x, y, z) => { lightSim?.edit(x, y, z); }); // the client's light tracks the host's edits
       client.onPeerLeave((id) => { // the host (the welcome sender) left -> a static view of the last world
@@ -491,7 +504,7 @@ async function startGame(meta: WorldMeta | null): Promise<void> {
     window.__lightDebug = lightSim;
     mpSession = session;
     mpHub = null; // no in-page hub to pump (a real transport delivers messages asynchronously)
-    showLobby(code, lobbyHost, tr, session);
+    showLobby(code, lobbyHost, tr, session, name);
     syncCamera();
     requestAnimationFrame(frame);
     return;
