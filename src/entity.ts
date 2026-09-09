@@ -824,3 +824,14 @@ export function possessToggle(sim: Sim, human: Controller, targetId: number | nu
   else if (sim.viewedId === sim.homeId) spectate(sim, human);
   else returnHome(sim, human);
 }
+
+/** Entities that the local human may possess with P: not the viewed entity, not the ghost, not
+ * another player entity (the home body is the only player exception), and not an entity already
+ * driven by this page's human controller. Creature possession (deer, future mobs) remains. */
+export function possessableCandidates(sim: Sim, human: Controller): Entity[] {
+  return sim.all().filter((e) =>
+    e.id !== sim.viewedId &&
+    e.id !== sim.ghostId &&
+    (e.kind.id !== 'player' || e.id === sim.homeId) &&
+    e.controller !== human);
+}

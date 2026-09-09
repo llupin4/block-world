@@ -2,7 +2,7 @@ import { describe, it, expect } from 'vitest';
 import { Block, isDoor, doorOpen } from '../blocks';
 import { World, localIndex } from '../world';
 import { Player, WALK_SPEED, SWIM_SPEED, FLY_SPEED, FLY_V_SPEED, JUMP_VEL, HALF, HEIGHT, EYE } from '../player';
-import { KINDS, NULL_INTENT, stepEntity, lookDir, eyeOf, applyIntent, Sim, SimRng, deriveSimSeed, controllerKindOf, IdleController, HumanController, ScriptController, MobController, mobRefuseStep, possess, returnHome, spectate, possessToggle, type Entity, type Intent, type ApplyHooks, type ScriptStep } from '../entity';
+import { KINDS, NULL_INTENT, stepEntity, lookDir, eyeOf, applyIntent, Sim, SimRng, deriveSimSeed, controllerKindOf, IdleController, HumanController, ScriptController, MobController, mobRefuseStep, possess, returnHome, spectate, possessToggle, possessableCandidates, type Entity, type Intent, type ApplyHooks, type ScriptStep } from '../entity';
 import { TERRAIN_SEED } from '../terrain';
 
 const STEP = 1 / 60;
@@ -469,6 +469,34 @@ describe('entity — possession', () => {
     expect(sim.viewedId).toBe(deer.id);
     possessToggle(sim, human, other.id);
     expect(sim.viewedId).toBe(body.id);
+  });
+
+  it('possessableCandidates excludes other players, human-controlled entities, viewed, and ghost', () => {
+    const { sim, human, body, deer, ghost } = simWithBodyAndDeer();
+    const bot = sim.spawn({ x: 2, y: 5, z: 0 }, new IdleController(), { kindId: 'player' });
+    const otherDeer = sim.spawn({ x: 3, y: 5, z: 0 }, new IdleController(), { kindId: 'deer', baseController: new IdleController() });
+
+    // At the body: the body (viewed), ghost, and another player are excluded; deer are allowed.
+    sim.setViewed(body.id);
+    let ids = possessableCandidates(sim, human).map((e) => e.id);
+    expect(ids).not.toContain(body.id);
+    expect(ids).not.toContain(ghost.id);
+    expect(ids).not.toContain(bot.id);
+    expect(ids).toContain(deer.id);
+    expect(ids).toContain(otherDeer.id);
+
+    // A deer currently controlled by the human is excluded even when it is not the viewed entity.
+    possess(sim, human, otherDeer.id);
+    sim.setViewed(body.id);
+    ids = possessableCandidates(sim, human).map((e) => e.id);
+    expect(ids).not.toContain(otherDeer.id);
+
+    // From the ghost, the home body is still possessable (player-kind exception).
+    possess(sim, human, body.id); // release otherDeer back to its base controller
+    spectate(sim, human);
+    ids = possessableCandidates(sim, human).map((e) => e.id);
+    expect(ids).toContain(body.id);
+    expect(ids).not.toContain(ghost.id);
   });
 });
 
