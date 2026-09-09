@@ -27,9 +27,25 @@ import { HostSession } from './net/host';
 import { ClientSession } from './net/client';
 import { ScriptController, type ScriptStep } from './entity';
 // Multiplayer (B2): the real-network Transport (trystero) + the ?host/?join lobby.
-import { TrysteroTransport } from './net/trystero';
+import { TrysteroTransport, webCryptoUnavailableMessage } from './net/trystero';
 
 // === boot ===
+
+function showFatalOverlay(title: string, body: string): void {
+  const el = document.createElement('div');
+  el.style.cssText = 'position:fixed;inset:0;display:flex;align-items:center;justify-content:center;color:#fff;background:rgba(0,0,0,0.78);z-index:10000';
+  const box = document.createElement('div');
+  box.style.cssText = 'max-width:680px;margin:24px;padding:24px;border:1px solid #666;border-radius:8px;background:#111';
+  const h = document.createElement('h2');
+  h.style.margin = '0 0 8px';
+  h.textContent = title;
+  const p = document.createElement('p');
+  p.style.cssText = 'margin:0;white-space:pre-wrap;line-height:1.5';
+  p.textContent = body;
+  box.append(h, p);
+  el.appendChild(box);
+  document.body.appendChild(el);
+}
 
 const app = document.getElementById('app')!;
 const renderer = new THREE.WebGLRenderer({ antialias: true });
@@ -444,6 +460,11 @@ async function startGame(meta: WorldMeta | null): Promise<void> {
   // via the transport's onMessage); a client has no in-page headless host (the real host is a
   // separate tab), so the frame loop's host-tick step is conditional on mpHost (null here).
   if (lobbyActive) {
+    const webCryptoError = webCryptoUnavailableMessage();
+    if (webCryptoError) {
+      showFatalOverlay('Multiplayer unavailable', webCryptoError);
+      return;
+    }
     const code = lobbyHost ? (new URLSearchParams(location.search).get('host') || genRoomCode()) : (lobbyJoinCode as string);
     const tr = new TrysteroTransport(APP_ID, code);
     let session: HostSession | ClientSession;
@@ -677,10 +698,11 @@ async function startGame(meta: WorldMeta | null): Promise<void> {
   syncCamera();
   requestAnimationFrame(frame);
 }
-const bootGate = window.setTimeout(() => { console.log('[persistence] boot gate: IDB stalled past 5 s — starting a fresh world (any late meta is dropped)'); void startGame(null); }, 5000); // fallback: a stalled boot still starts (fresh world)
+const startFatal = (err: unknown): void => { console.error(err); showFatalOverlay('Boot failed', String(err instanceof Error ? err.message : err)); };
+const bootGate = window.setTimeout(() => { console.log('[persistence] boot gate: IDB stalled past 5 s — starting a fresh world (any late meta is dropped)'); void startGame(null).catch(startFatal); }, 5000); // fallback: a stalled boot still starts (fresh world)
 void persist.boot().then((meta) => {
   window.clearTimeout(bootGate);
-  void startGame(meta);
+  void startGame(meta).catch(startFatal);
 });
 
 // === entity rigs ===

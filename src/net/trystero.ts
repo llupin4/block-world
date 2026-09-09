@@ -30,6 +30,14 @@ const defaultTrystero: TrysteroLike = {
   joinRoom: (config, roomId) => joinRoom(config, roomId) as unknown as TrysteroRoomLike,
 };
 
+// Browsers expose `crypto.subtle` only in a secure context (`https` or `localhost`). A raw WSL/LAN
+// IP over `http` is not a secure context, so Trystero's key derivation fails with "crypto.subtle is
+// undefined". This guard turns that environment failure into a readable lobby overlay.
+export function webCryptoUnavailableMessage(): string | null {
+  if (globalThis.crypto?.subtle) return null;
+  return 'Multiplayer needs WebCrypto (crypto.subtle), which browsers expose only in a secure context. Use http://localhost:5173 (or HTTPS), not a raw WSL/LAN IP over http.';
+}
+
 // A real-network `Transport` (B2): trystero (Nostr strategy) over WebRTC data channels. The session
 // layer (transport-agnostic — proven by the loopback) runs unchanged: it sends/receives `Msg`s and
 // tracks peers by id. `send` serializes a `Msg` to a JSON string (binary chunk arrays base64,

@@ -1,9 +1,9 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import type { ChunkRecord, WorldMeta } from '../persistence';
 import type { ReplaySnapshot } from '../replay';
 import { encodeMsg, decodeMsg } from '../net/messages';
 import type { Msg } from '../net/messages';
-import { TrysteroTransport } from '../net/trystero';
+import { TrysteroTransport, webCryptoUnavailableMessage } from '../net/trystero';
 import type { TrysteroLike, TrysteroRoomLike, TrysteroActionLike } from '../net/trystero';
 
 // --- An in-process fake trystero: two fake rooms wired to each other, so the TrysteroTransport's
@@ -126,5 +126,20 @@ describe('TrysteroTransport (over a fake trystero)', () => {
     expect(leftB).toEqual(['A']);
     expect(a.peers()).toEqual([]);
     expect(b.peers()).toEqual([]);
+  });
+});
+
+describe('webCryptoUnavailableMessage', () => {
+  it('returns a secure-context explanation when crypto.subtle is absent', () => {
+    vi.stubGlobal('crypto', {});
+    try {
+      expect(webCryptoUnavailableMessage()).toMatch(/secure context/i);
+      expect(webCryptoUnavailableMessage()).toMatch(/localhost/i);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+  it('returns null when crypto.subtle is available', () => {
+    expect(webCryptoUnavailableMessage()).toBeNull();
   });
 });
