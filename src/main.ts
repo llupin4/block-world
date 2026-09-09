@@ -8,7 +8,7 @@ import { meshChunk, meshChunkRange, probeMeshChunk, type ChunkMesh, type LightSa
 import { SliceScheduler, decideBands, PROBE_VERTS, SLICE_COUNT } from './mesh-slices';
 import { ProfRig, meshVerts, PROF_WORST_KEY } from './prof-rig';
 import { toGeometry } from './geometry';
-import { Sim, HumanController, IdleController, MobController, eyeOf, lookDir, breakRayTarget, possess, returnHome, spectate, type ApplyHooks, type Controller, type EntityRecord } from './entity';
+import { Sim, HumanController, IdleController, MobController, eyeOf, lookDir, breakRayTarget, possessToggle, type ApplyHooks, type Controller, type EntityRecord } from './entity';
 import { raycastVoxel, pickEntity, REACH, type RayHit } from './raycast';
 import { spawnDeer } from './spawn';
 import { buildEntityRig, updateEntityRig, advanceRigAnim, newRigAnim, RIG_COLORS, LEG_RATE, buildPartAtlas, type Rig, type RigAnim } from './entity-mesh';
@@ -252,6 +252,13 @@ const mpActive = mpMode === 'host' || mpMode === 'client';
 const mpBots = mpActive
   ? Math.max(1, parseInt(new URLSearchParams(location.search).get('bots') ?? (mpMode === 'host' ? '2' : '1'), 10) || (mpMode === 'host' ? 2 : 1))
   : 0;
+// ?mp=client&delay=N (dev): delay the in-page host→client links by N ticks, so Phase C's own-body
+// prediction is VISIBLE (the body moves immediately on your intent, then snaps to the host's pose
+// once the delayed `state`/`cells` arrive). No real network — it exercises the full predict/reconcile
+// loop in-page. 0 (the default) is the immediate in-page loopback.
+const mpDelay = mpActive
+  ? Math.max(0, parseInt(new URLSearchParams(location.search).get('delay') ?? '0', 10) || 0)
+  : 0;
 // ?host / ?join=<code> (B2): the real lobby over a TrysteroTransport (a real network, not the ?mp
 // in-page LoopbackHub). ?host starts a session and shows the room code (an optional ?host=<code>
 // fixes it, so the e2e can pass the same code to both tabs); ?join=<code> joins. The lobby wins
@@ -474,7 +481,10 @@ async function startGame(meta: WorldMeta | null): Promise<void> {
   // unchanged against the session's world/sim. The light worker is recreated for the session's
   // world + worldTime. The in-page LoopbackHub is pumped per substep (the frame loop).
   if (mpActive) {
-    const hub = new LoopbackHub();
+    // ?mp=client&delay=N: delay the authoritative host's outgoing links (host→client `state`/`cells`)
+    // so the client's own-body prediction is visible (it moves on your intent, then reconciles when
+    // the delayed host word arrives). The host's id is 'host' (?mp=host) or 'headless' (?mp=client).
+    const hub = new LoopbackHub({ delay: (from) => (from === 'host' || from === 'headless') ? mpDelay : 0 });
     let session: HostSession | ClientSession;
     if (mpMode === 'host') {
       // The host renders its authoritative world + the bot clients' remote players (their rigs
@@ -995,13 +1005,9 @@ function onPossess(): void {
   // via the else branch (press P when nothing is targeted).
   const candidates = sim.all().filter((x) => x.id !== ve.id && x.id !== sim.ghostId);
   const hit = pickEntity(eyeOf(ve), lookDir(ve.yaw, ve.pitch), candidates, REACH);
-  if (hit) {
-    possess(sim, human, candidates[hit.index].id);
-  } else if (sim.viewedId === sim.homeId) {
-    spectate(sim, human);   // at the body -> the ghost
-  } else {
-    returnHome(sim, human); // possessing/ghost -> back to the body
-  }
+  // P exits possession first when the human is already out of its home body; otherwise it
+  // possesses the targeted entity (or toggles body<->ghost when nothing is targeted).
+  possessToggle(sim, human, hit ? candidates[hit.index].id : null);
   // Log the new perspective for replay: the user's view switches to whatever is now viewed, so the
   // playback follows what they actually saw (a possessed deer, not always the player body).
   if (recording && recorder) recorder.onViewed(worldTime.tick, sim.viewedId);

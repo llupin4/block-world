@@ -56,7 +56,7 @@ export class ClientSession {
     this.persist = new NetworkPersistSource(transport);
     // One message handler: route the chunkRec side channel to the persist source; the rest to onMessage.
     transport.onMessage((from, msg) => {
-      if (msg.type === 'chunkRec') { this.persist.resolveChunk(msg.key, msg.rec); return; }
+      if (msg.type === 'chunkRec') { this.applyChunkRec(msg.key, msg.rec); return; }
       if (msg.type === 'welcome' && !this.hostId) this.hostId = from; // the host is the welcome sender
       this.onMessage(msg);
     });
@@ -103,6 +103,7 @@ export class ClientSession {
         }
         for (const er of msg.snapshot.meta.entities) this.sim.restoreEntity(er, NULL_CTRL);
         this.sim.setViewed(this.entityId);
+        if (this.sim.entities.has(this.entityId)) this.sim.homeId = this.entityId; // possession's return-to-body target
         this.fire('welcome');
         break;
       }
@@ -173,6 +174,8 @@ export class ClientSession {
     const [cx, cy, cz] = this.parse(key);
     if (!this.world.hasChunk(cx, cy, cz)) return;
     applyRecord(this.world, rec, this.sim, () => NULL_CTRL);
+    const ch = this.world.getChunk(cx, cy, cz);
+    if (ch) ch.dirty = true; // force the client's streaming remesh pass to rebuild the host-corrected chunk
     this.persist.resolveChunk(key, rec);
   }
 

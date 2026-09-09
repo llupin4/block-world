@@ -3,6 +3,7 @@ import { LoopbackHub } from '../net/transport';
 import { HostSession } from '../net/host';
 import { type Msg } from '../net/messages';
 import { Block } from '../blocks';
+import { HumanController, NULL_INTENT, possess, returnHome } from '../entity';
 import { Persistence, InMemoryChunkStore } from '../persistence';
 
 const tick = (hub: LoopbackHub, host: HostSession, clients: { tick: (t: number) => void }[], n: number) => {
@@ -89,5 +90,18 @@ describe('HostSession', () => {
     expect(host.worldTime.time).toBeGreaterThan(0); // the clock advanced (advanceClock)
     expect(host.lastStream).not.toBeNull(); // the host streams (the spawn column ring)
     expect(host.lastStream!.meshable.size).toBeGreaterThan(0); // the own anchor's ring is meshable
+  });
+
+  it('possession on a host can return to the own body (homeId is set for withOwnPlayer)', () => {
+    const host = new HostSession(new LoopbackHub().connect('host'), 1234, { withOwnPlayer: true });
+    const human = new HumanController(new Set());
+    const ownId = host.sim.viewedId;
+    expect(ownId).not.toBe(0);
+    const NULL_CTRL = { intent: () => ({ ...NULL_INTENT }) };
+    const remote = host.sim.spawn({ x: 0, y: 0, z: 0 }, NULL_CTRL, { kindId: 'player' });
+    possess(host.sim, human, remote.id);
+    expect(host.sim.viewedId).toBe(remote.id);
+    returnHome(host.sim, human);
+    expect(host.sim.viewedId).toBe(ownId);
   });
 });

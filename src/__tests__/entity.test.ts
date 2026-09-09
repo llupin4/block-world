@@ -2,7 +2,7 @@ import { describe, it, expect } from 'vitest';
 import { Block, isDoor, doorOpen } from '../blocks';
 import { World, localIndex } from '../world';
 import { Player, WALK_SPEED, SWIM_SPEED, FLY_SPEED, FLY_V_SPEED, JUMP_VEL, HALF, HEIGHT, EYE } from '../player';
-import { KINDS, NULL_INTENT, stepEntity, lookDir, eyeOf, applyIntent, Sim, SimRng, deriveSimSeed, controllerKindOf, IdleController, HumanController, ScriptController, MobController, mobRefuseStep, possess, returnHome, spectate, type Entity, type Intent, type ApplyHooks, type ScriptStep } from '../entity';
+import { KINDS, NULL_INTENT, stepEntity, lookDir, eyeOf, applyIntent, Sim, SimRng, deriveSimSeed, controllerKindOf, IdleController, HumanController, ScriptController, MobController, mobRefuseStep, possess, returnHome, spectate, possessToggle, type Entity, type Intent, type ApplyHooks, type ScriptStep } from '../entity';
 import { TERRAIN_SEED } from '../terrain';
 
 const STEP = 1 / 60;
@@ -460,6 +460,15 @@ describe('entity — possession', () => {
     const script = new IdleController(); // stand-in for a ScriptController instance
     const bot = sim.spawn({ x: 2, y: 5, z: 0 }, script, { kindId: 'player' });
     expect(bot.baseController).toBe(script); // not re-bound to a fresh IdleController
+  });
+
+  it('possessToggle exits possession first when not home/ghost, even if another entity is targeted', () => {
+    const { sim, human, body, deer } = simWithBodyAndDeer();
+    const other = sim.spawn({ x: 2, y: 5, z: 0 }, new IdleController(), { kindId: 'deer', baseController: new IdleController() });
+    possess(sim, human, deer.id);
+    expect(sim.viewedId).toBe(deer.id);
+    possessToggle(sim, human, other.id);
+    expect(sim.viewedId).toBe(body.id);
   });
 });
 

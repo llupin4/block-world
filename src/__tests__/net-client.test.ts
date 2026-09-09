@@ -2,7 +2,7 @@ import { describe, it, expect } from 'vitest';
 import { LoopbackHub } from '../net/transport';
 import { HostSession } from '../net/host';
 import { ClientSession } from '../net/client';
-import { HumanController, NULL_INTENT } from '../entity';
+import { HumanController, NULL_INTENT, possess, returnHome } from '../entity';
 import { Block } from '../blocks';
 
 const NULL_CTRL = { intent: () => ({ ...NULL_INTENT }) };
@@ -60,5 +60,20 @@ describe('ClientSession', () => {
     const client = new ClientSession(new LoopbackHub().connect('client'), 'me', new HumanController(new Set()));
     client.tick(0);
     expect(client.lastStream).not.toBeNull();
+  });
+
+  it('possession on a client can return to the own body (homeId is set on welcome)', async () => {
+    const hub = new LoopbackHub();
+    const host = new HostSession(hub.connect('host'), 1234, { withOwnPlayer: false });
+    const human = new HumanController(new Set());
+    const client = new ClientSession(hub.connect('client'), 'me', human);
+    const welcomed = new Promise<void>((res) => { client.on('welcome', () => res()); });
+    for (let t = 0; t < 40; t++) { host.tick(t); client.tick(t); hub.pump(t); }
+    await welcomed;
+    const remote = client.sim.spawn({ x: 0, y: 0, z: 0 }, NULL_CTRL, { kindId: 'player' });
+    possess(client.sim, human, remote.id);
+    expect(client.sim.viewedId).toBe(remote.id);
+    returnHome(client.sim, human);
+    expect(client.sim.viewedId).toBe(client.entityId);
   });
 });

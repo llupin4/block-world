@@ -36,6 +36,7 @@ export class HostSession {
   private readonly seed: number;
   private peers = new Map<string, Peer>();
   private pendingCells = new Map<string, Map<number, CellWrite>>();
+  private syncedSettled = new Set<string>(); // chunk keys whose settled record has been pushed to loaded peers
 
   constructor(transport: Transport, seed: number, opts: HostOpts = {}) {
     this.transport = transport;
@@ -49,12 +50,17 @@ export class HostSession {
     // non-air block for the SPAWN point (the host mirrors main.ts's spawn scan).
     const gen = new TerrainGen(TERRAIN_SEED);
     for (let cy = CY_MIN; cy <= CY_MAX; cy++) generateChunkTerrain(this.world, gen, 0, cy, 2);
+    // Settle the spawn column's water (mirror main.ts:1347's per-chunk settle). Without this
+    // the worldgen ocean water stays at wlevel 0 (unseeded), which waterSurfaceHeight maps to
+    // a 0-height quad per cell — the visible "stack of flat ocean surfaces".
+    this.waterSim.settle(0, CY_MIN, 2);
     let sy = 79; while (sy > 0 && !this.isOpaque(this.world.getBlock(6, sy, 46))) sy--;
     this.spawn = { x: 6.5, y: sy + 1, z: 46.5 };
     this.sim.respawn = { ...this.spawn };
     if (opts.withOwnPlayer !== false) {
       const own = this.sim.spawn(this.spawn, new IdleController(), { yaw: -Math.PI / 2, kindId: 'player', baseController: new IdleController() });
       this.sim.setViewed(own.id);
+      this.sim.homeId = own.id; // possession's return-to-body target
     }
     // Cell-write collection (the `cells` source): read the FINAL state, coalesce by chunk.
     this.world.onCellWrite = (x, y, z) => {
@@ -81,7 +87,17 @@ export class HostSession {
       case 'hello': this.onHello(from, msg.name, msg.protocol); break;
       case 'intent': { const p = this.peers.get(from); if (p) p.controller.setIntent(msg.intent); break; }
       case 'chunkReq': this.onChunkReq(from, msg.key); break;
-      case 'chunkLoaded': this.peers.get(from)?.loaded.add(msg.key); break;
+      case 'chunkLoaded': {
+        const p = this.peers.get(from);
+        if (!p) break;
+        p.loaded.add(msg.key);
+        // The client generated this chunk locally (shared seed, unseeded water wlevel 0). Send
+        // the full chunk record so the client's water is corrected to the host's settled state.
+        const [cx, cy, cz] = msg.key.split(',').map(Number);
+        const c = this.world.getChunk(cx, cy, cz);
+        if (c) this.transport.send(from, { type: 'chunkRec', key: msg.key, rec: snapshotChunk(c, this.sim.entitiesInChunk(cx, cy, cz).map((e) => this.sim.toRecord(e))) });
+        break;
+      }
       case 'chunkUnloaded': this.peers.get(from)?.loaded.delete(msg.key); break;
       default: break; // state/cells/chunkRec/time are host→client
     }
@@ -216,10 +232,36 @@ export class HostSession {
       const r = streamUpdate(this.world, anchors, this.persist, this.sim);
       this.meshable = r.meshable;
       this.lastStream = r; // [B1] the frame consumes it once per frame (consumeStream)
+      // The host's water settle (mirrors main.ts:1347): the client has no WaterSim — its water
+      // arrives via `cells` — so the host must seed EVERY streamed chunk's water (not just the
+      // spawn column). Unsettled streamed chunks stay wlevel 0 while the spawn column is 7, and
+      // the client's mesher then emits internal top faces at the 7→0 height seam ("extra faces
+      // in sections") instead of one continuous block.
+      for (const c of r.rebuilt) this.waterSim.settle(c.cx, c.cy, c.cz);
+      for (const c of r.unloaded) this.syncedSettled.delete(chunkKey(c.cx, c.cy, c.cz));
     } else {
       this.lastStream = null;
     }
     if (tick % NET_STATE_STRIDE === 0) this.broadcastState();
     if (tick % TIME_STRIDE === 0) this.broadcast({ type: 'time', tick: this.worldTime.tick, worldTime: this.worldTime.snapshot() });
+    this.pushSettledChunks();
+  }
+
+  /** Push a full chunk record to every peer that has the chunk loaded whenever the host's water
+   * settle flips a chunk to `settled` (including a band's settle cascading into the band above).
+   * The per-cell `cells` broadcast only covers writes that fire `world.onCellWrite`; the
+   * settle's bulk seed writes the interior ocean water directly into the chunk arrays, so a
+   * chunk that settles after a client already generated it must be re-sent as a whole. */
+  private pushSettledChunks(): void {
+    for (const c of this.world.allChunks()) {
+      const key = chunkKey(c.cx, c.cy, c.cz);
+      if (!c.settled || this.syncedSettled.has(key)) continue;
+      this.syncedSettled.add(key);
+      let any = false;
+      for (const [, p] of this.peers) if (p.loaded.has(key)) { any = true; break; }
+      if (!any) continue;
+      const rec = snapshotChunk(c, this.sim.entitiesInChunk(c.cx, c.cy, c.cz).map((e) => this.sim.toRecord(e)));
+      for (const [id, p] of this.peers) if (p.loaded.has(key)) this.transport.send(id, { type: 'chunkRec', key, rec });
+    }
   }
 }

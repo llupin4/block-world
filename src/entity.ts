@@ -811,3 +811,16 @@ export function spectate(sim: Sim, human: Controller): void {
   const ghost = sim.entities.get(sim.ghostId);
   if (ghost) { ghost.controller = human; sim.setViewed(sim.ghostId); }
 }
+
+/** The P-key possession toggle. Once the human is out of its home body (and not in the ghost),
+ * P exits possession FIRST instead of chain-possessing whatever is currently targeted. From
+ * home/ghost, P possesses `targetId` (or, with no target, toggles home<->ghost). */
+export function possessToggle(sim: Sim, human: Controller, targetId: number | null): void {
+  if (sim.viewedId !== sim.homeId && sim.viewedId !== sim.ghostId) {
+    returnHome(sim, human);
+    return;
+  }
+  if (targetId !== null) possess(sim, human, targetId);
+  else if (sim.viewedId === sim.homeId) spectate(sim, human);
+  else returnHome(sim, human);
+}
