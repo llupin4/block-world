@@ -60,6 +60,7 @@ Single-player rendering works from another machine at `http://<your-ip>:5173`. *
 | `R` | Open/close recordings (stop + open list while recording) |
 | `E` | Open/close the block palette |
 | `H` | Open/close the help overlay |
+| `M` | Multiplayer menu (host a world / join by room code) |
 | `1`–`9` (or numpad) | Select hotbar slot |
 | Scroll wheel | Cycle hotbar slots |
 | Esc | Release pointer lock |
@@ -85,6 +86,13 @@ http://localhost:5173/?host
 # Join
 http://localhost:5173/?join=<code>
 ```
+
+Or from the game itself: press <kbd>M</kbd> for the multiplayer menu — type a name (blank = a
+random one like `Blue4402`), click **host world**, or paste a room code and click **join**. The
+menu reloads into `?host&name=…` / `?join=<code>&name=…`; the URL form above still works (e.g.
+for deep links and the e2e). A typed name is remembered between visits. Every player body —
+including the host's — shows a name tag to the other players; the host drives their own body
+like in single-player.
 
 Use `localhost` or HTTPS for the real lobby. From Windows with the repo in WSL2, the easiest setup is WSL mirrored networking:
 
