@@ -421,6 +421,7 @@ function showLobby(code: string, isHost: boolean, tr: { peers(): string[] }, ses
     `<div>Room code</div>` +
     `<div id="lobby-code" style="font:600 20px monospace;letter-spacing:2px;margin:2px 0 6px;user-select:all">${code}</div>` +
     `<button id="lobby-copy" style="cursor:pointer;font:12px sans-serif;padding:4px 8px;background:#2a2a2a;color:#fff;border:1px solid #555;border-radius:4px">copy code</button>` +
+    `<button id="lobby-leave" style="display:block;width:100%;margin-top:6px;cursor:pointer;font:12px sans-serif;padding:4px 8px;background:#2a2a2a;color:#fff;border:1px solid #555;border-radius:4px">${isHost ? 'stop hosting' : 'leave lobby'}</button>` +
     `<div id="lobby-peers" style="margin-top:8px;color:#bbb">Peers: ${isHost ? 'waiting for players…' : 'connecting to host…'}</div>`;
   document.body.appendChild(el);
   // The display name (textContent, so a pasted `<script>`-ish name cannot inject HTML) — under the header.
@@ -431,6 +432,16 @@ function showLobby(code: string, isHost: boolean, tr: { peers(): string[] }, ses
   const copyBtn = document.getElementById('lobby-copy')!;
   copyBtn.addEventListener('click', () => {
     navigator.clipboard?.writeText(code).then(() => { copyBtn.textContent = 'copied!'; setTimeout(() => { copyBtn.textContent = 'copy code'; }, 1200); }).catch(() => {});
+  });
+  // Leave the lobby → the normal single-player game: navigate to the base URL (the whole query is
+  // dropped, so the URL-driven boot gate re-runs the single-player boot; the lobby session runs on
+  // the same `persist`, so lobby edits are kept). The host's click drops every connected player
+  // (they see the static "host left" screen) — confirm; a joiner's leave only affects them.
+  // Page unload tears down the transport (WebRTC + Nostr) — no explicit dispose.
+  const leaveBtn = document.getElementById('lobby-leave')!;
+  leaveBtn.addEventListener('click', () => {
+    if (isHost && !confirm('Leave? Connected players will be dropped.')) return;
+    location.href = location.pathname;
   });
   const peersEl = document.getElementById('lobby-peers')!;
   const render = () => { const p = tr.peers(); peersEl.textContent = p.length ? 'Peers: ' + p.join(', ') : (isHost ? 'Peers: waiting for players…' : 'Peers: connecting to host…'); };
