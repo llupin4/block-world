@@ -916,6 +916,7 @@ window.addEventListener('keydown', (e) => {
   }
   if (e.code === 'KeyE') togglePalette(); // creative palette: open (unlock) / close (re-lock)
   if (e.code === 'KeyH') toggleHelp(); // help overlay: same open (unlock) / close (re-lock)
+  if (e.code === 'KeyM') toggleMpMenu(); // multiplayer menu: host / join (single-player screen only)
   if (e.code === 'KeyC') setWireframe(!wireframeOn); // wireframe (PROJECT.md §14: chunk-edge bugs)
   if (e.code === 'KeyP') onPossess(); // possess the targeted entity, or toggle body<->ghost
   const d = e.code.startsWith('Digit') ? e.code.slice(5) : e.code.startsWith('Numpad') ? e.code.slice(6) : '';
@@ -928,6 +929,7 @@ renderer.domElement.addEventListener('click', () => {
   if (paletteOpen) closePalette();
   else if (helpOpen) closeHelp();
   else if (replaysOpen) closeReplays();
+  else if (mpMenuOpen) closeMpMenu();
   else lockPointer();
 });
 
@@ -1167,11 +1169,16 @@ hotbar.onSlotChange = (i) => {
 let paletteOpen = false;
 let helpOpen = false;
 let replaysOpen = false;
+let mpMenuOpen = false;
 const helpEl = document.getElementById('help')!;
 const helpHintEl = document.getElementById('help-hint')!;
 const replaysEl = document.getElementById('replays')!;
 const replaysListEl = document.getElementById('replays-list')!;
 const replaysRecordEl = document.getElementById('replays-record')!;
+const mpMenuEl = document.getElementById('mp-menu')!;
+const mpNameEl = document.getElementById('mp-name') as HTMLInputElement;
+const mpCodeEl = document.getElementById('mp-code') as HTMLInputElement;
+const mpErrorEl = document.getElementById('mp-error')!;
 
 // Browsers enforce a ~1 s re-lock cooldown after ESC; a rejected request is benign
 // (the cooldown is the only realistic failure), so swallow it rather than throw.
@@ -1180,10 +1187,10 @@ function lockPointer(): void {
   if (r instanceof Promise) r.catch(() => {}); // Safari rejects without a user gesture
 }
 
-// Invariant: at most one overlay (palette/help/replays) is open. The badge advertises help and is
+// Invariant: at most one overlay (palette/help/replays/mp-menu) is open. The badge advertises help and is
 // visible only when nothing is open.
 function syncOverlays(): void {
-  helpHintEl.classList.toggle('hidden', paletteOpen || helpOpen || replaysOpen);
+  helpHintEl.classList.toggle('hidden', paletteOpen || helpOpen || replaysOpen || mpMenuOpen);
 }
 
 function closePalette(): void {
@@ -1241,6 +1248,45 @@ function toggleHelp(): void {
   if (helpOpen) closeHelp();
   else openHelp();
 }
+
+function closeMpMenu(): void {
+  mpMenuEl.classList.add('hidden');
+  mpMenuOpen = false;
+  syncOverlays();
+  lockPointer();
+}
+
+function openMpMenu(): void {
+  if (paletteOpen) { paletteOpen = false; paletteEl.classList.add('hidden'); }
+  if (helpOpen) { helpOpen = false; helpEl.classList.add('hidden'); }
+  if (replaysOpen) { replaysOpen = false; replaysEl.classList.add('hidden'); }
+  mpMenuOpen = true;
+  mpMenuEl.classList.remove('hidden');
+  mpNameEl.value = localStorage.getItem('bw.name') ?? ''; // remember the typed name across visits
+  mpErrorEl.classList.add('hidden');
+  syncOverlays();
+  document.exitPointerLock();
+  mpNameEl.focus();
+}
+
+// The M menu is a single-player-screen affordance: while a session (?mp / ?host / ?join) or a
+// replay is running the boot branch already ran — no-op.
+function toggleMpMenu(): void {
+  if (mpMenuOpen) { closeMpMenu(); return; }
+  if (mpSession || playback) return;
+  openMpMenu();
+}
+
+// Host/Join reload into ?host&name=… / ?join=<code>&name=… (the code is normalized to the code
+// alphabet's lowercase; the name goes in the URL — sanitizeName at boot handles blank → random).
+document.getElementById('mp-host')!.addEventListener('click', () => {
+  location.href = `?host&name=${encodeURIComponent(mpNameEl.value)}`;
+});
+document.getElementById('mp-join')!.addEventListener('click', () => {
+  const code = mpCodeEl.value.trim().toLowerCase();
+  if (code === '') { mpErrorEl.textContent = 'paste the room code the host shows'; mpErrorEl.classList.remove('hidden'); return; }
+  location.href = `?join=${encodeURIComponent(code)}&name=${encodeURIComponent(mpNameEl.value)}`;
+});
 
 // The recordings list (R): a centered panel of the saved recordings (newest first) + a
 // "record new" button. Opening it fetches the list from the replay store and closes the
