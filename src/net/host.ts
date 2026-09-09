@@ -16,7 +16,13 @@ const STEP = 1 / 60, WATER_STRIDE = 30, WATER_PULSE = 1000;
 
 interface Peer { name: string; entityId: number; controller: RemoteController; loaded: Set<string> }
 
-export interface HostOpts { withOwnPlayer?: boolean; persist?: Persistence; hooks?: ApplyHooks }
+export interface HostOpts {
+  withOwnPlayer?: boolean;
+  ownController?: Controller; // drives the own player (the lobby host passes the page's HumanController; default IdleController)
+  ownName?: string;           // the own player's display name (the name tag joiners see)
+  persist?: Persistence;
+  hooks?: ApplyHooks;
+}
 
 // The authoritative host: owns the ONLY sim. Clients send intents; the host applies them
 // through each peer's RemoteController. One tick(tick) = one 60 Hz substep, in order:
@@ -58,7 +64,8 @@ export class HostSession {
     this.spawn = { x: 6.5, y: sy + 1, z: 46.5 };
     this.sim.respawn = { ...this.spawn };
     if (opts.withOwnPlayer !== false) {
-      const own = this.sim.spawn(this.spawn, new IdleController(), { yaw: -Math.PI / 2, kindId: 'player', baseController: new IdleController() });
+      const own = this.sim.spawn(this.spawn, opts.ownController ?? new IdleController(), { yaw: -Math.PI / 2, kindId: 'player', baseController: new IdleController() });
+      if (opts.ownName) own.name = opts.ownName; // the display name (the name tag)
       this.sim.setViewed(own.id);
       this.sim.homeId = own.id; // possession's return-to-body target
     }

@@ -104,4 +104,53 @@ describe('HostSession', () => {
     returnHome(host.sim, human);
     expect(host.sim.viewedId).toBe(ownId);
   });
+
+  it("ownController drives the host's own body (the lobby-host movement fix)", () => {
+    const hub = new LoopbackHub();
+    const human = new HumanController(new Set(['KeyW']), 0, 0);
+    const host = new HostSession(hub.connect('host'), 1234, { withOwnPlayer: true, ownController: human });
+    const ownId = host.sim.viewedId;
+    // copy the pos — the entity's `pos` object is mutated in place
+    const pos = () => { const p = host.sim.entities.get(ownId)!.pos; return { x: p.x, y: p.y, z: p.z }; };
+    // settle (fall to the ground) before measuring
+    tick(hub, host, [], 20);
+    const b = pos();
+    tick(hub, host, [], 30);
+    const a = pos();
+    expect(Math.abs(a.x - b.x) + Math.abs(a.z - b.z)).toBeGreaterThan(0.05); // W moved the own body
+  });
+
+  it("ownName lands on the own entity and in the `state` broadcast to a hello'd peer", async () => {
+    const hub = new LoopbackHub();
+    const host = new HostSession(hub.connect('host'), 1234, { withOwnPlayer: true, ownName: 'Hosty' });
+    const ownId = host.sim.viewedId;
+    expect(host.sim.entities.get(ownId)!.name).toBe('Hosty');
+    const client = hub.connect('client');
+    // one combined handler — the loopback transport has a single onMessage slot
+    const states: Msg[] = [];
+    let resolveWelcome = () => {};
+    const welcomed = new Promise<void>((res) => { resolveWelcome = res; });
+    client.onMessage((_f, m: Msg) => {
+      if (m.type === 'welcome') resolveWelcome();
+      else if (m.type === 'state') states.push(m);
+    });
+    client.send('host', { type: 'hello', name: 'alice', protocol: 1 });
+    hub.pump(0);
+    await welcomed;
+    tick(hub, host, [], 6); // state broadcasts on the NET_STATE_STRIDE (3) lattice
+    const list = (states.at(-1) as Extract<Msg, { type: 'state' }>).entities;
+    expect(list.some((e) => e.id === ownId && e.name === 'Hosty')).toBe(true);
+  });
+
+  it('without ownController the own body stays idle (B1 ?mp=host behavior unchanged)', () => {
+    const hub = new LoopbackHub();
+    const host = new HostSession(hub.connect('host'), 1234, { withOwnPlayer: true });
+    const ownId = host.sim.viewedId;
+    const pos = () => { const p = host.sim.entities.get(ownId)!.pos; return { x: p.x, y: p.y, z: p.z }; };
+    tick(hub, host, [], 20);
+    const b = pos();
+    tick(hub, host, [], 30);
+    const a = pos();
+    expect(a.x).toBe(b.x); expect(a.z).toBe(b.z); // no input, idle controller — no drift
+  });
 });
