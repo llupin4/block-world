@@ -892,11 +892,15 @@ camera.rotation.order = 'YXZ';
 function syncCamera(): void {
   const ve = sim.viewed();
   if (!ve) return;
-  // The camera follows the viewed entity's position + look. The client's own body: the position is
-  // interpolated (syncPoses wrote it at renderTick); the look is immediate (the page's
-  // HumanController's live mouse look, not the interpolated pose) — so the look never feels 100 ms
-  // behind, even though the body's position lags by NET_INTERP_TICKS.
-  camera.position.set(ve.pos.x, ve.pos.y + ve.kind.eye, ve.pos.z);
+  // The client's own body reads the display pose (a smoothed follower of the sim pose that eases
+  // out a large reconciliation snap). A possessed remote entity — or the host/single-player —
+  // reads the sim pose directly. The inline `instanceof` narrows `mpSession` (a
+  // `HostSession | ClientSession | null`) so `displayPos`/`entityId` typecheck. The look is
+  // client-owned (immediate) for a ClientSession.
+  const ownDisplay = mpSession instanceof ClientSession && ve.id === mpSession.entityId
+    ? mpSession.displayPos : null;
+  const p = ownDisplay ?? ve.pos;
+  camera.position.set(p.x, p.y + ve.kind.eye, p.z);
   if (mpSession instanceof ClientSession) {
     const look = human.getLook();
     camera.rotation.set(look.pitch, look.yaw, 0);
