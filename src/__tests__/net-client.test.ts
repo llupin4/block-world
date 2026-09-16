@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest';
 import { LoopbackHub } from '../net/transport';
 import { HostSession } from '../net/host';
 import { ClientSession } from '../net/client';
+import { SNAP_SMOOTH_FRAMES, NET_SNAP_EPS } from '../net/messages';
 import { HumanController, NULL_INTENT, possess, returnHome } from '../entity';
 import { Block } from '../blocks';
 
@@ -75,5 +76,50 @@ describe('ClientSession', () => {
     expect(client.sim.viewedId).toBe(remote.id);
     returnHome(client.sim, human);
     expect(client.sim.viewedId).toBe(client.entityId);
+  });
+
+  it('Phase C follow-up: a large reconciliation snap lerps the display pose out over SNAP_SMOOTH_FRAMES frames', () => {
+    const client = new ClientSession(new LoopbackHub().connect('client'), 'me', new HumanController(new Set()));
+    client.entityId = 7;
+    client.sim.restoreEntity(entityRec(7), NULL_CTRL); // the own body at (0,0,0)
+    client.tick(0); // sets the client tick (no buffered intents)
+    // A state that snaps the own body far away (x 0 -> 10, >> NET_SNAP_EPS).
+    client.onMessage({ type: 'state', tick: 0, entities: [netEnt(7, 10)] });
+    // the sim pose is correct immediately (the Phase C gate — unchanged by the display lerp)
+    expect(client.sim.entities.get(7)!.pos.x).toBeCloseTo(10);
+    // the display pose has NOT jumped (a large snap starts a lerp from the pre-snap position)
+    expect(client.displayPos.x).toBeCloseTo(0);
+    // over exactly SNAP_SMOOTH_FRAMES frames the display pose converges to the sim pose
+    for (let f = 0; f < SNAP_SMOOTH_FRAMES; f++) client.syncPoses();
+    expect(client.displayPos.x).toBeCloseTo(10);
+    // the frame after, the display pose tracks the sim pose exactly
+    client.syncPoses();
+    expect(client.displayPos.x).toBeCloseTo(client.sim.entities.get(7)!.pos.x);
+  });
+
+  it('Phase C follow-up: a small reconciliation snap (<= NET_SNAP_EPS) is instant', () => {
+    const client = new ClientSession(new LoopbackHub().connect('client'), 'me', new HumanController(new Set()));
+    client.entityId = 7;
+    client.sim.restoreEntity(entityRec(7), NULL_CTRL);
+    client.tick(0);
+    // a small snap: x 0 -> 0.03 (<= NET_SNAP_EPS = 0.05)
+    expect(0.03).toBeLessThan(NET_SNAP_EPS); // sanity: the test's snap is genuinely "small"
+    client.onMessage({ type: 'state', tick: 0, entities: [netEnt(7, 0.03)] });
+    expect(client.sim.entities.get(7)!.pos.x).toBeCloseTo(0.03);
+    // instant: the display pose jumps to the sim pose on the same message (no lerp)
+    expect(client.displayPos.x).toBeCloseTo(0.03);
+  });
+
+  it('Phase C follow-up: with no snap pending, the display pose tracks the sim pose exactly (no lag)', () => {
+    const client = new ClientSession(new LoopbackHub().connect('client'), 'me', new HumanController(new Set()));
+    client.entityId = 7;
+    client.sim.restoreEntity(entityRec(7), NULL_CTRL);
+    client.tick(0);
+    client.sim.entities.get(7)!.pos.x = 5;
+    client.syncPoses();
+    expect(client.displayPos.x).toBeCloseTo(5);
+    client.sim.entities.get(7)!.pos.x = 9;
+    client.syncPoses();
+    expect(client.displayPos.x).toBeCloseTo(9);
   });
 });

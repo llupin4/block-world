@@ -1,8 +1,8 @@
 import { World, chunkKey, chunkOf } from '../world';
-import { Sim, NULL_INTENT, stepEntity, type Controller, type Intent } from '../entity';
+import { Sim, NULL_INTENT, stepEntity, type Controller, type Intent, type Vec3 } from '../entity';
 import { applyRecord, type ChunkRecord } from '../persistence';
 import { update as streamUpdate, VIEW_RADIUS, type Anchor, type StreamingUpdate } from '../streaming';
-import { type Msg, type CellWrite, PROTOCOL_VERSION, NET_INTERP_TICKS, PREDICT_BUFFER, NET_SNAP_EPS } from './messages';
+import { type Msg, type CellWrite, PROTOCOL_VERSION, NET_INTERP_TICKS, PREDICT_BUFFER, NET_SNAP_EPS, SNAP_SMOOTH_FRAMES } from './messages';
 import { NetworkPersistSource } from './network-persist';
 import { intentEqual } from '../replay';
 import { type Transport } from './transport';
@@ -45,6 +45,14 @@ export class ClientSession {
   private tick_ = 0; // renamed to avoid clashing with the `tick(t)` method
   private predicted = new Map<number, Intent>();
   private lastSnap = 0;
+  // Phase C follow-up: the own body's DISPLAY pose (what the camera reads) — a smoothed follower
+  // of the sim pose that eases out a large reconciliation snap over SNAP_SMOOTH_FRAMES frames.
+  // `lerpFrom`/`lerpTo` bracket the snap; `lerpT` counts frames consumed (== SNAP_SMOOTH_FRAMES
+  // means no lerp pending, so the display pose tracks the sim pose exactly — no steady-state lag).
+  displayPos: Vec3 = { x: 0, y: 0, z: 0 };
+  private lerpFrom: Vec3 = { x: 0, y: 0, z: 0 };
+  private lerpTo: Vec3 = { x: 0, y: 0, z: 0 };
+  private lerpT = SNAP_SMOOTH_FRAMES;
   hostId = ''; // the host's peer id (the `welcome` sender) — the boot's "host left" handler keys off it
   private handlers = new Map<string, (() => void)[]>();
 
@@ -153,6 +161,15 @@ export class ClientSession {
       if (it) stepEntity(this.world, e, it, STEP);
     }
     this.lastSnap = Math.hypot(e.pos.x - pre.x, e.pos.y - pre.y, e.pos.z - pre.z);
+    // Display-lerp (Phase C follow-up): a large snap eases out on the display pose over
+    // SNAP_SMOOTH_FRAMES frames; a small one is instant. The sim pose is set above (the gate).
+    if (this.lastSnap > NET_SNAP_EPS) {
+      this.lerpFrom = { ...pre };
+      this.lerpTo = { x: e.pos.x, y: e.pos.y, z: e.pos.z };
+      this.lerpT = 0;
+    } else {
+      this.displayPos = { x: e.pos.x, y: e.pos.y, z: e.pos.z };
+    }
   }
 
   private applyCells(key: string, writes: CellWrite[]): void {
@@ -220,6 +237,22 @@ export class ClientSession {
       if (!ent) continue;
       const p = interpose(ring.samples, renderTick);
       ent.pos = { x: p.x, y: p.y, z: p.z }; ent.yaw = p.yaw; ent.pitch = p.pitch;
+    }
+    // The own body's display pose (Phase C follow-up): ease out a large reconciliation snap over
+    // SNAP_SMOOTH_FRAMES frames; otherwise track the sim pose exactly (no steady-state lag).
+    const own = this.sim.entities.get(this.entityId);
+    if (own) {
+      if (this.lerpT < SNAP_SMOOTH_FRAMES) {
+        this.lerpT++;
+        const f = this.lerpT / SNAP_SMOOTH_FRAMES;
+        this.displayPos = {
+          x: this.lerpFrom.x + (this.lerpTo.x - this.lerpFrom.x) * f,
+          y: this.lerpFrom.y + (this.lerpTo.y - this.lerpFrom.y) * f,
+          z: this.lerpFrom.z + (this.lerpTo.z - this.lerpFrom.z) * f,
+        };
+      } else {
+        this.displayPos = { x: own.pos.x, y: own.pos.y, z: own.pos.z };
+      }
     }
   }
 
