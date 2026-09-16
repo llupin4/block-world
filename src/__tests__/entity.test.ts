@@ -519,3 +519,31 @@ describe('entity — Sim.despawn viewed fallback (deterministic, D3)', () => {
     expect(sim.viewedId).not.toBe(b.id);
   });
 });
+
+describe('entity — Sim.ensureViewed (boot guard)', () => {
+  it('falls back to the player body when viewedId is not a restored entity (the boot-crash precondition)', () => {
+    const world = new World();
+    const sim = new Sim(world, {}, 1);
+    // Restore a meta whose viewedEntityId (99) is NOT among the restored entities — the exact
+    // precondition that crashed boot at main.ts:694 (`const v = sim.viewed()!`).
+    sim.restoreEntity({ id: 5, kindId: 'deer', x: 0, y: 0, z: 0, vx: 0, vy: 0, vz: 0, yaw: 0, pitch: 0, fly: false, noclip: false, controllerKind: 'idle' }, new IdleController());
+    const body = sim.restoreEntity({ id: 1, kindId: 'player', x: 0, y: 0, z: 0, vx: 0, vy: 0, vz: 0, yaw: 0, pitch: 0, fly: false, noclip: false, controllerKind: 'human' }, new IdleController())!;
+    sim.setViewed(99); // invalid → no-op, so viewed() is undefined
+    expect(sim.viewed()).toBeUndefined();
+    expect(sim.ensureViewed()?.id).toBe(body.id); // falls back to the player body
+  });
+
+  it('is a no-op when viewedId already points to a live entity', () => {
+    const world = new World();
+    const sim = new Sim(world, {}, 1);
+    const a = sim.spawn({ x: 0, y: 0, z: 0 }, new IdleController());
+    sim.setViewed(a.id);
+    expect(sim.ensureViewed()?.id).toBe(a.id);
+  });
+
+  it('returns undefined on an empty sim (nothing to view)', () => {
+    const world = new World();
+    const sim = new Sim(world, {}, 1);
+    expect(sim.ensureViewed()).toBeUndefined();
+  });
+});

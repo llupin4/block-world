@@ -535,6 +535,19 @@ export class Sim {
 
   setViewed(id: number): void { if (this.entities.has(id)) this.viewedId = id; }
 
+  /** Ensure viewedId points to a live entity. After restoring a meta, viewedEntityId may not
+   *  match a restored entity (an older save persisted only loaded entities, or the viewed
+   *  entity's chunk wasn't loaded at save time) — setViewed is then a no-op and viewed() is
+   *  undefined. Fall back to the player body, then the lowest id (deterministic, like despawn).
+   *  Returns the viewed entity, or undefined when the sim is empty. */
+  ensureViewed(): Entity | undefined {
+    if (this.entities.has(this.viewedId)) return this.entities.get(this.viewedId);
+    const all = this.all();
+    const target = all.find((e) => e.kind.id === 'player') ?? all[0];
+    if (target) this.viewedId = target.id;
+    return this.entities.get(this.viewedId);
+  }
+
   spawn(pos: Vec3, controller: Controller, opts: { yaw?: number; pitch?: number; kindId?: string; baseController?: Controller } = {}): Entity {
     const kind = KINDS[opts.kindId ?? 'player'] ?? KINDS.player;
     const e: Entity = {

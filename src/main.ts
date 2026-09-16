@@ -626,7 +626,7 @@ async function startGame(meta: WorldMeta | null): Promise<void> {
       // viewedEntityId). The frame loop (viewedAt) switches it as they possessed other entities
       // during recording — so the viewer sees what the recorder actually saw, not always the body.
       sim.setViewed(replay.snapshot.meta.viewedEntityId); // no-op if the entity doesn't exist (old recording)
-      if (!sim.viewed()) { const body = sim.all().find((e) => e.kind.id === 'player'); sim.setViewed(body ? body.id : sim.ghostId); }
+      sim.ensureViewed(); // ensure a valid viewed entity (a recording's viewedEntityId may not match a restored entity)
       { const ve = sim.viewed(); if (ve) human.setLook(ve.yaw, ve.pitch); } // sync the live look to the recorded look (the initial view faces where they were)
       playback = { replay, paused: false };
       console.log(`[replay] loaded ${replay.intents.length} deltas, playing ${replay.startTick}..${replay.endTick}`);
@@ -683,6 +683,10 @@ async function startGame(meta: WorldMeta | null): Promise<void> {
             : new IdleController());
     sim.restoreEntities(meta.entities, controllerFor);
     sim.setViewed(meta.viewedEntityId);
+    // The restored viewedEntityId may not match a restored entity (an older save persisted only
+    // loaded entities, or the viewed entity's chunk wasn't loaded) — setViewed is then a no-op and
+    // viewed() is undefined. Ensure a valid viewed entity before the ghost-spawn below reads it.
+    sim.ensureViewed();
     // The home body idles when left (not the human it was restored with); derive home/ghost from
     // the restored entities, and spawn the single ghost only if none was restored (it is a normal
     // entity and restores like any other — never spawn a second one).
@@ -691,8 +695,8 @@ async function startGame(meta: WorldMeta | null): Promise<void> {
     sim.homeId = sim.all().find((e) => e.kind.id === 'player')?.id ?? 0;
     sim.ghostId = sim.all().find((e) => e.kind.id === 'spectator')?.id ?? 0;
     if (sim.ghostId === 0) {
-      const v = sim.viewed()!;
-      sim.ghostId = sim.spawn({ x: v.pos.x, y: v.pos.y + 4, z: v.pos.z }, new IdleController(), { kindId: 'spectator', baseController: new IdleController() }).id;
+      const v = sim.viewed() ?? sim.all()[0];
+      if (v) sim.ghostId = sim.spawn({ x: v.pos.x, y: v.pos.y + 4, z: v.pos.z }, new IdleController(), { kindId: 'spectator', baseController: new IdleController() }).id;
     }
     if (meta.simPrng !== undefined) sim.rng.restore(meta.simPrng);
     if (meta.hotbar?.slots?.length === 9) {
@@ -716,9 +720,7 @@ async function startGame(meta: WorldMeta | null): Promise<void> {
   // to the entity's current look so the first tick does not clobber the spawn/restore facing.
   { const ve = sim.viewed(); if (ve) human.setLook(ve.yaw, ve.pitch); }
   if (profMode) { human.frozen = true; const ve = sim.viewed(); if (ve) ve.noclip = true; } // the rig owns the viewed entity
-  profRig = profMode
-    ? new ProfRig({ seed: TERRAIN_SEED, phase: meta ? worldTime.dayPhase : startPhase, render: !profNoRender, anchor: { x: sim.viewed()!.pos.x, y: sim.viewed()!.pos.y, z: sim.viewed()!.pos.z } })
-    : null;
+  { const ve = sim.viewed(); profRig = profMode ? new ProfRig({ seed: TERRAIN_SEED, phase: meta ? worldTime.dayPhase : startPhase, render: !profNoRender, anchor: { x: ve?.pos.x ?? 0, y: ve?.pos.y ?? 0, z: ve?.pos.z ?? 0 } }) : null; }
   syncCamera();
   requestAnimationFrame(frame);
 }
