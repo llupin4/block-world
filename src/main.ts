@@ -687,6 +687,12 @@ async function startGame(meta: WorldMeta | null): Promise<void> {
     // loaded entities, or the viewed entity's chunk wasn't loaded) — setViewed is then a no-op and
     // viewed() is undefined. Ensure a valid viewed entity before the ghost-spawn below reads it.
     sim.ensureViewed();
+    // A corrupt/empty save (no entities) leaves the sim empty — the camera stays at (0,0,0) and the
+    // world renders as sky only. Spawn a fresh body at SPAWN so the sim is never empty.
+    if (!sim.all().some((e) => e.kind.id === 'player')) {
+      const p = sim.spawn(SPAWN, human, { yaw: -Math.PI / 2, kindId: 'player', baseController: new IdleController() });
+      sim.setViewed(p.id);
+    }
     // The home body idles when left (not the human it was restored with); derive home/ghost from
     // the restored entities, and spawn the single ghost only if none was restored (it is a normal
     // entity and restores like any other — never spawn a second one).
