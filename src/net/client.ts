@@ -99,6 +99,18 @@ export class ClientSession {
     return [a, b, c];
   }
 
+  /** The client's own anchor (chunk coords) for the local cull: the own body's chunk, or the spawn
+   *  chunk before the first state. */
+  private ownAnchor(): { cx: number; cz: number } {
+    const v = this.sim.viewed();
+    return v ? { cx: chunkOf(v.pos.x), cz: chunkOf(v.pos.z) } : { cx: chunkOf(this.own.x), cz: chunkOf(this.own.z) };
+  }
+
+  /** Build an EntityRecord from a wire pose, for re-adding an entity that came back in range. */
+  private toRecord(n: NetEntity): EntityRecord {
+    return { id: n.id, kindId: n.kindId, x: n.x, y: n.y, z: n.z, vx: n.vx, vy: n.vy, vz: n.vz, yaw: n.yaw, pitch: n.pitch, fly: false, noclip: false, controllerKind: 'script' };
+  }
+
   onMessage(msg: Msg): void {
     switch (msg.type) {
       case 'welcome': {
@@ -119,22 +131,34 @@ export class ClientSession {
         this.fire('welcome');
         break;
       }
-      case 'state':
+      case 'state': {
+        const a = this.ownAnchor();
         for (const n of msg.entities) {
           if (n.id === this.entityId) {
             this.own = { x: n.x, y: n.y, z: n.z, yaw: n.yaw, pitch: n.pitch };
             this.reconcile(n, msg.tick); // the own body: snap to the host pose + re-apply the buffered intents
             continue; // not ring-interpolated (predicted + reconciled instead)
           }
+          if (Math.abs(chunkOf(n.x) - a.cx) > this.activeRadius || Math.abs(chunkOf(n.z) - a.cz) > this.activeRadius) {
+            if (this.sim.entities.has(n.id)) { this.sim.despawn(n.id); this.rings.delete(n.id); } // out of range: drop it
+            continue;
+          }
           let ring = this.rings.get(n.id);
           if (!ring) { ring = new PoseRing(); this.rings.set(n.id, ring); }
           ring.push({ tick: msg.tick, x: n.x, y: n.y, z: n.z, yaw: n.yaw, pitch: n.pitch }); // host-tick-tagged sample (interpolation)
           const ent = this.sim.entities.get(n.id);
           if (ent) { ent.pos = { x: n.x, y: n.y, z: n.z }; ent.yaw = n.yaw; ent.pitch = n.pitch; if (n.name) ent.name = n.name; }
+          else this.sim.restoreEntity(this.toRecord(n), NULL_CTRL); // came back in range: re-add it
         }
         break;
+      }
       case 'cells': this.applyCells(msg.chunk, msg.writes); break;
-      case 'spawn': this.sim.restoreEntity(msg.pose, NULL_CTRL); break;
+      case 'spawn': {
+        const a = this.ownAnchor();
+        if (Math.abs(chunkOf(msg.pose.x) - a.cx) > this.activeRadius || Math.abs(chunkOf(msg.pose.z) - a.cz) > this.activeRadius) break; // out of range: ignore
+        this.sim.restoreEntity(msg.pose, NULL_CTRL);
+        break;
+      }
       case 'despawn': this.sim.despawn(msg.id); this.rings.delete(msg.id); break;
       case 'time': this.worldTime.slew(msg.worldTime); break; // the client keeps its own tick (the frame loop owns it)
       default: break;

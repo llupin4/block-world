@@ -141,4 +141,25 @@ describe('ClientSession', () => {
     const peer = host.anchors().find((a) => !a.meshable);
     expect(peer!.radius).toBe(r); // the host's data ring uses the client's reported radius
   });
+
+  it('the client culls entity poses to its own activeRadius (discards out-of-range)', () => {
+    const client = new ClientSession(new LoopbackHub().connect('client'), 'me', new HumanController(new Set()));
+    client.entityId = 7;
+    client.sim.restoreEntity(entityRec(7), NULL_CTRL); // the own body at (0,0,0) → anchor (0,0)
+    client.tick(0);
+    client.onMessage({ type: 'state', tick: 0, entities: [netEnt(10, 16), netEnt(11, 48)] });
+    expect(client.sim.entities.has(10), 'the in-range entity (chunk 1,0) is kept').toBe(true);
+    expect(client.sim.entities.has(11), 'the out-of-range entity (chunk 3,0) is discarded').toBe(false);
+  });
+
+  it('the client despawns an entity that moves out of its own activeRadius', () => {
+    const client = new ClientSession(new LoopbackHub().connect('client'), 'me', new HumanController(new Set()));
+    client.entityId = 7;
+    client.sim.restoreEntity(entityRec(7), NULL_CTRL); // the own body at (0,0,0) → anchor (0,0)
+    client.tick(0);
+    client.onMessage({ type: 'state', tick: 0, entities: [netEnt(10, 16)] }); // in range (chunk 1,0)
+    expect(client.sim.entities.has(10)).toBe(true);
+    client.onMessage({ type: 'state', tick: 3, entities: [netEnt(10, 48)] }); // moves out of range (chunk 3,0)
+    expect(client.sim.entities.has(10), 'the entity is despawned when it moves out of range').toBe(false);
+  });
 });
