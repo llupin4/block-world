@@ -832,6 +832,7 @@ const chunkObjs = new Map<string, { opaque: THREE.Mesh | null; trans: THREE.Mesh
 const REBUILD_BUDGET = 3; // light/water-touched chunks re-meshed per frame
 const pendingRebuild = new Set<string>(); // chunk keys awaiting a rebuildChunkMesh (carries across frames)
 const deferredFirstMesh = new Set<string>(); // streamed-chunk keys whose FIRST/fresh mesh waits one frame for the worker's light fields (ADR 0012: replies are macrotasks — a load-frame drain would mesh from still-zero light) — moved into pendingRebuild at the frame end
+const deerPendingMesh = new Set<string>(); // generated-column keys whose deer spawn is deferred until the column's mesh is built (swapChunkMesh): a deer runs its wander AI from spawn, so spawning at generation put it in a not-yet-meshed column (visible with no ground)
 
 const scheduler = new SliceScheduler(); // heavy-chunk slice plans (ADR 0013): at most one in flight
 const lightSampler: LightSampler = (x, y, z) => world.getLight(x, y, z);
@@ -861,6 +862,10 @@ function swapChunkMesh(cx: number, cy: number, cz: number, mesh: ChunkMesh): voi
   chunkObjs.set(key, entry);
   const ch = world.getChunk(cx, cy, cz);
   if (ch) ch.dirty = false; // a rebuilt mesh is up to date; streaming only reschedules stale chunks
+  if (deerPendingMesh.has(key)) { // the column's ground is now visible: spawn its deer (idempotent per column)
+    deerPendingMesh.delete(key);
+    spawnDeer(world, sim, cx, cz);
+  }
 }
 
 /** Synchronous edit-remesh (setBlock / door toggle path). Still one-shot for heavy chunks —
@@ -884,6 +889,7 @@ function removeChunkMesh(cx: number, cy: number, cz: number): void {
     }
   }
   chunkObjs.delete(key);
+  deerPendingMesh.delete(key); // the column is gone before its mesh was built: don't spawn its deer
 }
 
 // T10: no static build — the streaming section keeps a 5x5 chunk ring (cy 0..4) around the
@@ -1466,7 +1472,7 @@ function consumeStream(r: streaming.StreamingUpdate, persist: PersistSource, isC
     lightSim.load(c.cx, c.cy, c.cz); // the worker settles it; the fields land with the tick reply
     deferredFirstMesh.add(chunkKey(c.cx, c.cy, c.cz)); // ADR 0012: the first/fresh mesh waits a guaranteed frame
   }
-  if (!isClient) for (const c of r.generated) spawnDeer(world, sim, c.cx, c.cz); // deer into freshly GENERATED columns only (host); the client's deer come from the host
+  if (!isClient) for (const c of r.generated) deerPendingMesh.add(chunkKey(c.cx, c.cy, c.cz)); // deer into freshly GENERATED columns only (host); the client's deer come from the host — deferred until the column's mesh is built (swapChunkMesh) so a wandering deer never appears in a not-yet-meshed column
   for (const c of r.restored) {
     const ch = world.getChunk(c.cx, c.cy, c.cz)!;
     if (!isClient) waterSim.restore(ch); // the host's water restore (the client has no WaterSim)
