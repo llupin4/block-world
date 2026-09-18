@@ -196,4 +196,16 @@ describe('HostSession', () => {
     hub.pump(0);
     expect(union()).toBe(before); // the union ring shrank back (the peer's ring is radius 2 again)
   });
+
+  it('noteFrame drives the host activeRadius (grows with headroom + a full own ring)', () => {
+    const host = new HostSession(new LoopbackHub().connect('host'), 1234, { withOwnPlayer: true });
+    host.tick(0); // populate meshable (the host's own ring)
+    for (const k of host.meshable) { // load the whole own ring so ownRingFull() is true
+      const [cx, cy, cz] = k.split(',').map(Number);
+      if (!host.world.hasChunk(cx, cy, cz)) host.world.ensureChunk(cx, cy, cz);
+    }
+    let r = 2;
+    for (let i = 0; i < 200; i++) r = host.noteFrame(1); // light frames + full ring → grow
+    expect(r).toBeGreaterThan(2); // the governor grew the host's own radius
+  });
 });

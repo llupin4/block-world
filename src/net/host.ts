@@ -7,6 +7,7 @@ import { update as streamUpdate, type Anchor, type StreamingUpdate, VIEW_RADIUS,
 import { TERRAIN_SEED, TerrainGen, generateChunkTerrain } from '../terrain';
 import { Block } from '../blocks';
 import { WorldTime } from '../time';
+import { ViewRadiusGovernor } from '../view-radius';
 import { NET_STATE_STRIDE, CELLS_FULL_THRESHOLD, TIME_STRIDE, PROTOCOL_VERSION, type Msg, type NetEntity, type CellWrite } from './messages';
 import { RemoteController } from './remote-controller';
 import { type Transport } from './transport';
@@ -37,6 +38,7 @@ export class HostSession {
   readonly spawn: { x: number; y: number; z: number };
   meshable = new Set<string>(); // chunk keys the host meshes (its own anchor's ring)
   activeRadius = VIEW_RADIUS; // the host's own governed view radius (the governor drives it; mirrors single-player)
+  private governor = new ViewRadiusGovernor(); // the host's own view radius governor (driven by the frame loop)
   lastStream: StreamingUpdate | null = null; // the last substep's streaming result (the frame consumes it once per frame)
   worldTime = new WorldTime(); // the host's authoritative clock (advanced per tick; the client slews from it)
   private readonly transport: Transport;
@@ -194,6 +196,24 @@ export class HostSession {
       if (e) out.push({ cx: chunkOf(e.pos.x), cz: chunkOf(e.pos.z), cy: chunkOf(e.pos.y), radius: p.radius, meshable: false });
     }
     return out;
+  }
+
+  /** The frame loop feeds the host's own governor once per frame (mirrors single-player). The host's
+   *  "ring full" is its OWN (meshable) ring being fully loaded — not the union data ring (which is
+   *  larger, serving the peers). Returns the (possibly changed) radius. */
+  noteFrame(workMs: number): number {
+    this.activeRadius = this.governor.noteFrame(workMs, this.ownRingFull());
+    return this.activeRadius;
+  }
+
+  private ownRingFull(): boolean {
+    if (this.meshable.size === 0) return false; // before the first tick, the ring is unknown
+    let n = 0;
+    for (const k of this.meshable) {
+      const [cx, cy, cz] = k.split(',').map(Number);
+      if (this.world.hasChunk(cx, cy, cz)) n++;
+    }
+    return n === this.meshable.size;
   }
 
   private flushCells(): void {
