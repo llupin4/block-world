@@ -1,8 +1,9 @@
 import { World, chunkKey, chunkOf } from '../world';
-import { Sim, NULL_INTENT, stepEntity, type Controller, type Intent, type Vec3 } from '../entity';
+import { Sim, NULL_INTENT, stepEntity, type Controller, type Intent, type Vec3, type EntityRecord } from '../entity';
 import { applyRecord, type ChunkRecord } from '../persistence';
 import { update as streamUpdate, VIEW_RADIUS, type Anchor, type StreamingUpdate } from '../streaming';
-import { type Msg, type CellWrite, PROTOCOL_VERSION, NET_INTERP_TICKS, PREDICT_BUFFER, NET_SNAP_EPS, SNAP_SMOOTH_FRAMES } from './messages';
+import { ViewRadiusGovernor, targetChunks } from '../view-radius';
+import { type Msg, type CellWrite, type NetEntity, PROTOCOL_VERSION, NET_INTERP_TICKS, PREDICT_BUFFER, NET_SNAP_EPS, SNAP_SMOOTH_FRAMES } from './messages';
 import { NetworkPersistSource } from './network-persist';
 import { intentEqual } from '../replay';
 import { type Transport } from './transport';
@@ -31,6 +32,8 @@ export class ClientSession {
   private name = '';
   entityId = -1; // the host-assigned id for this client's entity (set on welcome); public for tests/rejoin
   lastStream: StreamingUpdate | null = null; // the last substep's own-ring streaming result (the frame consumes it)
+  private governor = new ViewRadiusGovernor(); // the client's own view radius governor (driven by the frame loop)
+  activeRadius = VIEW_RADIUS; // the client's own governed view radius (drives the local streaming ring + the local cull)
   private rings = new Map<number, PoseRing>(); // per-entity jitter buffer (host-tick-tagged poses)
   private lightEdit: ((x: number, y: number, z: number) => void) | null = null; // set by the boot (the page's lightSim.edit)
   private own = { x: 0, y: 0, z: 0, yaw: 0, pitch: 0 }; // the last state pose for the own entity
@@ -101,6 +104,7 @@ export class ClientSession {
       case 'welcome': {
         this.entityId = msg.yourEntityId;
         this.joined = true;
+        this.transport.send('all', { type: 'radius', radius: this.activeRadius }); // report the initial radius to the host
         this.worldTime.slew(msg.worldTime); // adopt the host's clock (time + phaseTotal)
         this.worldTime.tick = msg.tick; // the host tick at welcome
         for (const rec of msg.snapshot.chunks) {
@@ -218,11 +222,20 @@ export class ClientSession {
       if (this.joined) stepEntity(this.world, e, it, STEP);
     }
     // the streaming anchor follows the predicted own-body pos (not the last host state pose).
-    const anchor: Anchor = { cx: chunkOf(e ? e.pos.x : this.own.x), cz: chunkOf(e ? e.pos.z : this.own.z), cy: 2, radius: VIEW_RADIUS, meshable: true };
+    const anchor: Anchor = { cx: chunkOf(e ? e.pos.x : this.own.x), cz: chunkOf(e ? e.pos.z : this.own.z), cy: 2, radius: this.activeRadius, meshable: true };
     const r = streamUpdate(this.world, [anchor], this.persist, this.sim);
     this.lastStream = r; // [B1] the frame consumes it once per frame (consumeStream)
     for (const c of r.generated) this.transport.send('all', { type: 'chunkLoaded', key: chunkKey(c.cx, c.cy, c.cz) });
     for (const c of r.unloaded) this.transport.send('all', { type: 'chunkUnloaded', key: chunkKey(c.cx, c.cy, c.cz) });
+  }
+
+  /** The frame loop feeds the client's own governor once per frame. The client's "ring full" is its
+   *  own streaming ring being fully loaded. On a radius change, reports it to the host so the host's
+   *  data ring (and broadcast) can grow to serve it. Returns the (possibly changed) radius. */
+  noteFrame(workMs: number): number {
+    const r = this.governor.noteFrame(workMs, this.world.count() >= targetChunks(this.activeRadius));
+    if (r !== this.activeRadius) { this.activeRadius = r; this.transport.send('all', { type: 'radius', radius: r }); }
+    return this.activeRadius;
   }
 
   /** The frame calls this once per frame (after the substep): interpolate each entity's pose at

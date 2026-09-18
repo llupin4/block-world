@@ -122,4 +122,23 @@ describe('ClientSession', () => {
     client.syncPoses();
     expect(client.displayPos.x).toBeCloseTo(9);
   });
+
+  it('noteFrame drives the client activeRadius and reports it to the host', async () => {
+    const hub = new LoopbackHub();
+    const host = new HostSession(hub.connect('host'), 1234, { withOwnPlayer: false });
+    const client = new ClientSession(hub.connect('client'), 'me', new HumanController(new Set()));
+    const welcomed = new Promise<void>((res) => { client.on('welcome', () => res()); });
+    for (let t = 0; t < 10; t++) { host.tick(t); client.tick(t); hub.pump(t); }
+    await welcomed;
+    // load the client's full radius-2 ring (125 chunks) so ringFull is true
+    for (let dx = -2; dx <= 2; dx++)
+      for (let dz = -2; dz <= 2; dz++)
+        for (let cy = 0; cy <= 4; cy++)
+          client.world.ensureChunk(dx, cy, 2 + dz);
+    let r = 2;
+    for (let i = 0; i < 100; i++) { r = client.noteFrame(1); hub.pump(0); } // light frames + full ring → grow
+    expect(r).toBeGreaterThan(2); // the governor grew the client's radius
+    const peer = host.anchors().find((a) => !a.meshable);
+    expect(peer!.radius).toBe(r); // the host's data ring uses the client's reported radius
+  });
 });
