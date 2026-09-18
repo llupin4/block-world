@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { LoopbackHub } from '../net/transport';
 import { HostSession } from '../net/host';
-import { type Msg } from '../net/messages';
+import { type Msg, PROTOCOL_VERSION } from '../net/messages';
 import { Block } from '../blocks';
 import { HumanController, NULL_INTENT, possess, returnHome } from '../entity';
 import { Persistence, InMemoryChunkStore } from '../persistence';
@@ -20,7 +20,7 @@ describe('HostSession', () => {
     const client = hub.connect('client');
     let welcome: Msg | undefined;
     client.onMessage((_f, m: Msg) => { if (m.type === 'welcome') welcome = m; });
-    client.send('host', { type: 'hello', name: 'alice', protocol: 1 });
+    client.send('host', { type: 'hello', name: 'alice', protocol: PROTOCOL_VERSION });
     hub.pump(0);
     expect(welcome).toBeDefined();
     expect((welcome as Extract<Msg, { type: 'welcome' }>).snapshot.meta.seed).toBe(1234);
@@ -35,7 +35,7 @@ describe('HostSession', () => {
     const host = new HostSession(hub.connect('host'), 1234, { withOwnPlayer: false });
     const client = hub.connect('client');
     const welcomed = welcomeOf(client);
-    client.send('host', { type: 'hello', name: 'bob', protocol: 1 });
+    client.send('host', { type: 'hello', name: 'bob', protocol: PROTOCOL_VERSION });
     hub.pump(0);
     const w = (await welcomed) as Extract<Msg, { type: 'welcome' }>;
     const id = w.yourEntityId;
@@ -55,7 +55,7 @@ describe('HostSession', () => {
     const host = new HostSession(hub.connect('host'), 1234, { withOwnPlayer: false });
     const client = hub.connect('client');
     const welcomed = welcomeOf(client);
-    client.send('host', { type: 'hello', name: 'carol', protocol: 1 });
+    client.send('host', { type: 'hello', name: 'carol', protocol: PROTOCOL_VERSION });
     hub.pump(0);
     const w = (await welcomed) as Extract<Msg, { type: 'welcome' }>;
     const id = w.yourEntityId;
@@ -71,7 +71,7 @@ describe('HostSession', () => {
     const host = new HostSession(hub.connect('host'), 1234, { withOwnPlayer: false });
     const client = hub.connect('client');
     const welcomed = welcomeOf(client);
-    client.send('host', { type: 'hello', name: 'dave', protocol: 1 });
+    client.send('host', { type: 'hello', name: 'dave', protocol: PROTOCOL_VERSION });
     hub.pump(0);
     const w = (await welcomed) as Extract<Msg, { type: 'welcome' }>;
     const id = w.yourEntityId;
@@ -134,7 +134,7 @@ describe('HostSession', () => {
       if (m.type === 'welcome') resolveWelcome();
       else if (m.type === 'state') states.push(m);
     });
-    client.send('host', { type: 'hello', name: 'alice', protocol: 1 });
+    client.send('host', { type: 'hello', name: 'alice', protocol: PROTOCOL_VERSION });
     hub.pump(0);
     await welcomed;
     tick(hub, host, [], 6); // state broadcasts on the NET_STATE_STRIDE (3) lattice
@@ -152,5 +152,48 @@ describe('HostSession', () => {
     tick(hub, host, [], 30);
     const a = pos();
     expect(a.x).toBe(b.x); expect(a.z).toBe(b.z); // no input, idle controller — no drift
+  });
+
+  it('anchors() is symmetric: the host uses its governed radius, each peer its reported radius', async () => {
+    const hub = new LoopbackHub();
+    const host = new HostSession(hub.connect('host'), 1234, { withOwnPlayer: true });
+    const client = hub.connect('client');
+    const welcomed = welcomeOf(client);
+    client.send('host', { type: 'hello', name: 'alice', protocol: PROTOCOL_VERSION });
+    hub.pump(0);
+    await welcomed;
+    expect(host.anchors().find((a) => a.meshable)!.radius).toBe(2); // the host's own governed ring (default 2)
+    expect(host.anchors().find((a) => !a.meshable)!.radius).toBe(2); // the peer's ring (default 2 until it reports)
+    client.send('host', { type: 'radius', radius: 4 });
+    hub.pump(0);
+    expect(host.anchors().find((a) => !a.meshable)!.radius).toBe(4); // the peer reported a larger radius
+    client.send('host', { type: 'radius', radius: 2 });
+    hub.pump(0);
+    expect(host.anchors().find((a) => !a.meshable)!.radius).toBe(2); // the peer reported a smaller radius
+  });
+
+  it('the union data ring grows when a peer reports a larger radius', async () => {
+    const hub = new LoopbackHub();
+    const host = new HostSession(hub.connect('host'), 1234, { withOwnPlayer: true });
+    const client = hub.connect('client');
+    const welcomed = welcomeOf(client);
+    client.send('host', { type: 'hello', name: 'alice', protocol: PROTOCOL_VERSION });
+    hub.pump(0);
+    await welcomed;
+    const union = () => {
+      const s = new Set<string>();
+      for (const a of host.anchors())
+        for (let dx = -a.radius; dx <= a.radius; dx++)
+          for (let dz = -a.radius; dz <= a.radius; dz++)
+            s.add((a.cx + dx) + ',' + (a.cz + dz));
+      return s.size;
+    };
+    const before = union();
+    client.send('host', { type: 'radius', radius: 4 });
+    hub.pump(0);
+    expect(union()).toBeGreaterThan(before); // the union ring grew (the peer's ring is now radius 4)
+    client.send('host', { type: 'radius', radius: 2 });
+    hub.pump(0);
+    expect(union()).toBe(before); // the union ring shrank back (the peer's ring is radius 2 again)
   });
 });

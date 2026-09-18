@@ -3,18 +3,18 @@ import { WaterSim } from '../water';
 import { Sim, IdleController, type Controller, type Entity, type EntityRecord, type ApplyHooks } from '../entity';
 import { Persistence, snapshotChunk, InMemoryChunkStore, type ChunkRecord, type WorldMeta } from '../persistence';
 import { Recorder, type ReplaySnapshot } from '../replay';
-import { update as streamUpdate, type Anchor, type StreamingUpdate, VIEW_RADIUS as SR_VIEW_RADIUS, CY_MIN, CY_MAX } from '../streaming';
+import { update as streamUpdate, type Anchor, type StreamingUpdate, VIEW_RADIUS, VIEW_RADIUS as SR_VIEW_RADIUS, CY_MIN, CY_MAX } from '../streaming';
 import { TERRAIN_SEED, TerrainGen, generateChunkTerrain } from '../terrain';
 import { Block } from '../blocks';
 import { WorldTime } from '../time';
-import { NET_STATE_STRIDE, CELLS_FULL_THRESHOLD, NET_REMOTE_RADIUS, TIME_STRIDE, PROTOCOL_VERSION, type Msg, type NetEntity, type CellWrite } from './messages';
+import { NET_STATE_STRIDE, CELLS_FULL_THRESHOLD, TIME_STRIDE, PROTOCOL_VERSION, type Msg, type NetEntity, type CellWrite } from './messages';
 import { RemoteController } from './remote-controller';
 import { type Transport } from './transport';
 
 // The 60 Hz heartbeat + water pulse (the host runs the sim at the fixed timestep).
 const STEP = 1 / 60, WATER_STRIDE = 30, WATER_PULSE = 1000;
 
-interface Peer { name: string; entityId: number; controller: RemoteController; loaded: Set<string> }
+interface Peer { name: string; entityId: number; controller: RemoteController; loaded: Set<string>; radius: number }
 
 export interface HostOpts {
   withOwnPlayer?: boolean;
@@ -36,6 +36,7 @@ export class HostSession {
   readonly recorder: Recorder;
   readonly spawn: { x: number; y: number; z: number };
   meshable = new Set<string>(); // chunk keys the host meshes (its own anchor's ring)
+  activeRadius = VIEW_RADIUS; // the host's own governed view radius (the governor drives it; mirrors single-player)
   lastStream: StreamingUpdate | null = null; // the last substep's streaming result (the frame consumes it once per frame)
   worldTime = new WorldTime(); // the host's authoritative clock (advanced per tick; the client slews from it)
   private readonly transport: Transport;
@@ -106,6 +107,7 @@ export class HostSession {
         break;
       }
       case 'chunkUnloaded': this.peers.get(from)?.loaded.delete(msg.key); break;
+      case 'radius': { const p = this.peers.get(from); if (p) p.radius = msg.radius; break; }
       default: break; // state/cells/chunkRec/time are host→client
     }
   }
@@ -128,12 +130,12 @@ export class HostSession {
       id = saved.id;
       const re = this.sim.entities.get(id);
       if (re) re.name = name; // the display name (the name tag)
-      this.peers.set(from, { name, entityId: id, controller: rc, loaded: new Set() });
+      this.peers.set(from, { name, entityId: id, controller: rc, loaded: new Set(), radius: VIEW_RADIUS });
     } else {
       const e = this.sim.spawn(this.spawn, rc, { yaw: -Math.PI / 2, kindId: 'player', baseController: rc });
       e.name = name; // the display name (the name tag)
       id = e.id;
-      this.peers.set(from, { name, entityId: id, controller: rc, loaded: new Set() });
+      this.peers.set(from, { name, entityId: id, controller: rc, loaded: new Set(), radius: VIEW_RADIUS });
     }
     this.transport.send(from, { type: 'welcome', seed: this.seed, tick: this.worldTime.tick, worldTime: this.worldTime.snapshot(), yourEntityId: id, snapshot: this.welcomeSnapshot() });
   }
@@ -183,13 +185,13 @@ export class HostSession {
     this.peers.delete(id);
   }
 
-  private anchors(): Anchor[] {
+  anchors(): Anchor[] { // public: the union data ring's anchors (the host's own governed ring + each peer's reported ring); tested directly
     const out: Anchor[] = [];
     const own = this.sim.viewed();
-    if (own) out.push({ cx: chunkOf(own.pos.x), cz: chunkOf(own.pos.z), cy: chunkOf(own.pos.y), radius: SR_VIEW_RADIUS, meshable: true });
+    if (own) out.push({ cx: chunkOf(own.pos.x), cz: chunkOf(own.pos.z), cy: chunkOf(own.pos.y), radius: this.activeRadius, meshable: true });
     for (const p of this.peers.values()) {
       const e = this.sim.entities.get(p.entityId);
-      if (e) out.push({ cx: chunkOf(e.pos.x), cz: chunkOf(e.pos.z), cy: chunkOf(e.pos.y), radius: NET_REMOTE_RADIUS, meshable: false });
+      if (e) out.push({ cx: chunkOf(e.pos.x), cz: chunkOf(e.pos.z), cy: chunkOf(e.pos.y), radius: p.radius, meshable: false });
     }
     return out;
   }
