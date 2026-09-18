@@ -44,5 +44,13 @@ test('MP: the host + client governors are wired (start at 2, stay within [2,4])'
   expect(hMax).toBeLessThanOrEqual(4);
   expect(cMax).toBeGreaterThanOrEqual(2);
   expect(cMax).toBeLessThanOrEqual(4);
+  // The host draws only its own ring (not the union data ring it serves to peers): its meshed
+  // chunk count is bounded to its own radius, not the host+client union.
+  await host.waitForFunction(() => (window as { __mpResult?: unknown }).__mpResult !== undefined, undefined, { timeout: 30_000 });
+  const hostMeshed = await host.evaluate(() => (window as { __mpResult?: { hostMeshedChunks?: number } }).__mpResult?.hostMeshedChunks ?? 0);
+  const hostOwnRing = (2 * hMax + 1) ** 2 * 5; // targetChunks(hMax): the host's own ring at its max radius
+  console.log('MP VIEW-RADIUS host meshed chunks: ' + hostMeshed + ' (own ring at max radius: ' + hostOwnRing + ')');
+  expect(hostMeshed).toBeGreaterThan(0); // the host is meshing its own ring
+  expect(hostMeshed).toBeLessThanOrEqual(hostOwnRing); // bounded to the host's own ring, not the union
   await clientCtx.close(); await hostCtx.close();
 }, 180_000);

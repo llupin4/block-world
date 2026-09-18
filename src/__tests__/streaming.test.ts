@@ -291,6 +291,23 @@ describe('streaming — union ring (multiplayer phase A)', () => {
     expect(world.hasChunk(0, 0, 0)).toBe(true);
   });
 
+  it('does not remesh a dirty chunk that is only in a remote anchor\'s ring (the host draws only its own ring)', () => {
+    const world = new World();
+    const A = anchor(0, 0, 2, 2, true); // the host's own ring (meshable)
+    const B = anchor(4, 4, 2, 1, false); // a remote player's ring (non-meshable)
+    let r: ReturnType<typeof update>;
+    for (;;) {
+      r = update(world, [A, B]);
+      for (const c of r.rebuilt) world.getChunk(c.cx, c.cy, c.cz)!.dirty = false;
+      if (r.rebuilt.length === 0 && r.unloaded.length === 0) break;
+    }
+    // A peer-only chunk (in B's ring, outside A's ring) becomes dirty.
+    world.getChunk(4, 2, 4)!.dirty = true;
+    const r2 = update(world, [A, B]);
+    expect(r2.remeshed).toEqual([]); // not remeshed — it is not meshable (the host draws only its own ring)
+    expect(r2.rebuilt).toEqual([]);
+  });
+
   it('with a single anchor the player ring alone governs (single player, unchanged)', () => {
     const world = new World();
     world.ensureChunk(0, 0, 0).edited = true;

@@ -1468,16 +1468,22 @@ function consumeStream(r: streaming.StreamingUpdate, persist: PersistSource, isC
   }
   if (r.unloaded.length && !playback && !isClient) (persist as Persistence).saveMeta(metaSnapshot()); // the world just changed durably (a chunk left): refresh the save point (host). NEVER during playback.
   for (const c of r.rebuilt) {
+    const key = chunkKey(c.cx, c.cy, c.cz);
     if (!isClient) waterSim.settle(c.cx, c.cy, c.cz); // the host's water settle BEFORE meshing (the client has no WaterSim — water arrives via cells)
-    lightSim.load(c.cx, c.cy, c.cz); // the worker settles it; the fields land with the tick reply
-    deferredFirstMesh.add(chunkKey(c.cx, c.cy, c.cz)); // ADR 0012: the first/fresh mesh waits a guaranteed frame
+    if (r.meshable.has(key)) { // the host draws only its own ring; peer-only chunks are data-served, not meshed
+      lightSim.load(c.cx, c.cy, c.cz); // the worker settles it; the fields land with the tick reply
+      deferredFirstMesh.add(key); // ADR 0012: the first/fresh mesh waits a guaranteed frame
+    }
   }
   if (!isClient) for (const c of r.generated) deerPendingMesh.add(chunkKey(c.cx, c.cy, c.cz)); // deer into freshly GENERATED columns only (host); the client's deer come from the host — deferred until the column's mesh is built (swapChunkMesh) so a wandering deer never appears in a not-yet-meshed column
   for (const c of r.restored) {
+    const key = chunkKey(c.cx, c.cy, c.cz);
     const ch = world.getChunk(c.cx, c.cy, c.cz)!;
     if (!isClient) waterSim.restore(ch); // the host's water restore (the client has no WaterSim)
-    lightSim.load(c.cx, c.cy, c.cz); // light is never persisted: the worker re-settles the chunk
-    deferredFirstMesh.add(chunkKey(c.cx, c.cy, c.cz)); // first mesh of the restored chunk, same pacing as a load
+    if (r.meshable.has(key)) { // the host draws only its own ring; peer-only chunks are data-served, not meshed
+      lightSim.load(c.cx, c.cy, c.cz); // light is never persisted: the worker re-settles the chunk
+      deferredFirstMesh.add(key); // first mesh of the restored chunk, same pacing as a load
+    }
   }
   for (const c of r.pending) {
     const key = chunkKey(c.cx, c.cy, c.cz);
@@ -1492,8 +1498,10 @@ function consumeStream(r: streaming.StreamingUpdate, persist: PersistSource, isC
       streaming.markNeighborsDirty(world, c.cx, c.cy, c.cz, pcx, pcz);
       const ch = world.getChunk(c.cx, c.cy, c.cz)!;
       if (!isClient) waterSim.restore(ch);
-      lightSim.load(c.cx, c.cy, c.cz);
-      deferredFirstMesh.add(key);
+      if (r.meshable.has(key)) { // the host draws only its own ring; peer-only chunks are data-served, not meshed
+        lightSim.load(c.cx, c.cy, c.cz);
+        deferredFirstMesh.add(key);
+      }
     });
   }
 }
@@ -1736,10 +1744,12 @@ function frame(now: number): void {
       if (!mpFirstPos.has(e.id)) mpFirstPos.set(e.id, { x: e.pos.x, z: e.pos.z });
     }
   }
-  if (mpActive && worldTime.tick >= 300 && (window as unknown as Record<string, unknown>).__mpResult === undefined) {
-    const rep: Record<string, unknown> = { mode: mpMode, tick: worldTime.tick, bots: mpBots };
-    if (mpMode === 'host') {
+  if (mpSession && worldTime.tick >= 300 && (window as unknown as Record<string, unknown>).__mpResult === undefined) {
+    const isHost = mpSession instanceof HostSession; // works for B1 (?mp=) and B2 (?host/?join lobby) alike
+    const rep: Record<string, unknown> = { mode: isHost ? 'host' : 'client', tick: worldTime.tick, bots: mpBots };
+    if (isHost) {
       rep.rigCount = rigs.size;
+      rep.hostMeshedChunks = chunkObjs.size; // the host's meshed chunk count (bounded to the host's own ring, not the union)
       rep.remotePlayers = sim.all().filter((e) => e.kind.id === 'player' && e.id !== sim.viewedId).map((e) => {
         const first = mpFirstPos?.get(e.id);
         const moved = first ? Math.hypot(e.pos.x - first.x, e.pos.z - first.z) > 0.25 : false;

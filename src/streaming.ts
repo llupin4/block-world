@@ -149,6 +149,7 @@ function _update(world: World, anchors: Anchor[], persist?: PersistSource, sim?:
   for (const c of world.allChunks()) {
     if (!c.dirty || done.has(chunkKey(c.cx, c.cy, c.cz))) continue;
     if (!candidates.has(chunkKey(c.cx, c.cy, c.cz))) continue; // out of the union ring → unloading
+    if (!meshable.has(chunkKey(c.cx, c.cy, c.cz))) continue; // peer-only: data-served, not meshed (the host draws only its own ring)
     dirty.push({ cx: c.cx, cy: c.cy, cz: c.cz });
   }
   dirty.sort((a, b) => minDist(a, anchors) - minDist(b, anchors) || a.cx - b.cx || a.cy - b.cy || a.cz - b.cz);
