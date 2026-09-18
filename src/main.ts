@@ -3,6 +3,7 @@ import { Block, BLOCKS, isOpaque, PLACEABLE, iconPosition, torchMeta, doorMeta, 
 import { World, chunkKey, chunkOf, CHUNK_SIZE, WORLD_Y_MAX, WORLD_Y_MIN } from './world';
 import { TERRAIN_SEED, TerrainGen, generateChunkTerrain } from './terrain';
 import * as streaming from './streaming';
+import { ViewRadiusGovernor, targetChunks } from './view-radius';
 import { Hotbar } from './ui';
 import { meshChunk, meshChunkRange, probeMeshChunk, type ChunkMesh, type LightSampler } from './chunk-mesher';
 import { SliceScheduler, decideBands, PROBE_VERTS, SLICE_COUNT } from './mesh-slices';
@@ -1554,10 +1555,13 @@ const STEP = 1 / 60;
 const WATER_STRIDE = 30;  // substep ticks per water pulse (ADR 0011): 30 × (1/60 s) = 0.5 sim s — water takes one "tick" per pulse, so placement and drain visibly take time (was a floating-point dt accumulator that could miss the 0.5 s boundary by a frame; measured in the deterministic 10 s replay: 19 pulses instead of 20)
 const WATER_PULSE = 1000; // cell updates budgeted per pulse: big enough that a cut-off body's re-stabilization cascade (level wave + drain) finishes within a pulse or two, so a stopped flow settles in ~1 s instead of crawling for many seconds (and visibly re-expanding before it drains); smaller pulses made that crawl read as "flow that keeps moving"
 
+const governor = new ViewRadiusGovernor(); // adaptive single-player view radius (spec 2026-09-17)
+
 let last = performance.now();
 let acc = 0;
 
 function frame(now: number): void {
+  const frameT0 = performance.now(); // the view-radius governor's load signal (whole-frame main-thread work)
   const profT0 = profMode ? performance.now() : 0; // the rig measures the whole frame's main-thread work
   let dt = (now - last) / 1000;
   last = now;
@@ -1749,6 +1753,12 @@ function frame(now: number): void {
     }
     console.log('MP-RESULT ' + JSON.stringify(rep));
     (window as unknown as Record<string, unknown>).__mpResult = rep;
+  }
+  if (!mpSession) { // single-player only: multiplayer keeps the fixed VIEW_RADIUS
+    const workMs = performance.now() - frameT0;
+    const ringFull = world.count() >= targetChunks(governor.radius);
+    streaming.setActiveRadius(governor.noteFrame(workMs, ringFull));
+    (window as unknown as Record<string, unknown>).__viewRadius = governor.radius; // e2e smoke readout
   }
   requestAnimationFrame(frame);
 }
