@@ -2,7 +2,7 @@ import { describe, it, expect } from 'vitest';
 import { Block } from '../blocks';
 import { World } from '../world';
 import { TERRAIN_SEED, TerrainGen } from '../terrain';
-import { update } from '../streaming';
+import { update, setActiveRadius, inRange } from '../streaming';
 import { InMemoryChunkStore, Persistence, applyRecord, type PersistSource } from '../persistence';
 import { Sim, IdleController, type EntityRecord } from '../entity';
 
@@ -94,6 +94,25 @@ describe('streaming', () => {
     expect(world.hasChunk(10, 1, 10)).toBe(false); // streams in on a later call (budget 1)
     expect(world.hasChunk(2, 2, 2)).toBe(false);
     expect(world.hasChunk(4, 4, 4)).toBe(false);
+  });
+
+  it('E: setActiveRadius resizes the single-player ring (adaptive radius)', () => {
+    try {
+      setActiveRadius(4);
+      const world = new World();
+      let calls = 0;
+      for (;;) {
+        const r = update(world, 2, 2, 2);
+        for (const c of r.rebuilt) world.getChunk(c.cx, c.cy, c.cz)!.dirty = false;
+        if (r.rebuilt.length === 0 && r.unloaded.length === 0) break;
+        if (++calls > 2000) throw new Error('did not converge at radius 4');
+      }
+      expect(world.count()).toBe(405); // 9 x 9 columns x 5 levels
+      expect(inRange(6, 2, 2, 2)).toBe(true);  // |6-2| = 4 <= 4
+      expect(inRange(7, 2, 2, 2)).toBe(false); // |7-2| = 5 > 4
+    } finally {
+      setActiveRadius(2); // restore the default (module state) for the other tests
+    }
   });
 });
 

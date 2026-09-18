@@ -14,7 +14,11 @@ export interface EntitySource {
 // x/z generates; only y is band-limited to 0..79).
 const GEN = new TerrainGen(TERRAIN_SEED);
 
-export const VIEW_RADIUS = 2; // chunk radius in x/z: the ring is 5x5 columns
+export const VIEW_RADIUS = 2;
+// The single-player's live view radius: the adaptive governor (main.ts) writes it each frame.
+// Multiplayer keeps the VIEW_RADIUS const. Defaults to VIEW_RADIUS so a fresh world streams at 2.
+let activeRadius = VIEW_RADIUS;
+export function setActiveRadius(r: number): void { activeRadius = r; } // chunk radius in x/z: the ring is 5x5 columns
 export const CY_MIN = 0;      // generated y band: 0..79
 export const CY_MAX = 4;
 
@@ -58,7 +62,7 @@ function minDist(c: Coord, anchors: Anchor[]): number {
  *  range-checks a cold-restore callback against the CURRENT player position (stale fetches
  *  must not resurrect chunks the player has walked past). */
 export function inRange(cx: number, cz: number, pcx: number, pcz: number): boolean {
-  return Math.abs(cx - pcx) <= VIEW_RADIUS && Math.abs(cz - pcz) <= VIEW_RADIUS;
+  return Math.abs(cx - pcx) <= activeRadius && Math.abs(cz - pcz) <= activeRadius;
 }
 
 /** Mark existing in-range neighbors of (cx,cy,cz) dirty: their culling is stale after a load/unload/restore. Exported: main.ts marks after an async (cold) apply. */
@@ -179,5 +183,5 @@ export function update(world: World, anchors: Anchor[], persist?: PersistSource,
 export function update(world: World, pcx: number, pcz: number, pcy?: number, persist?: PersistSource, sim?: EntitySource): StreamingUpdate;
 export function update(world: World, a: Anchor[] | number, b?: number | PersistSource, c?: number | EntitySource, d?: PersistSource, e?: EntitySource): StreamingUpdate {
   if (Array.isArray(a)) return _update(world, a, b as PersistSource | undefined, c as EntitySource | undefined);
-  return _update(world, [{ cx: a, cz: b as number, cy: typeof c === 'number' ? c : 2, radius: VIEW_RADIUS, meshable: true }], d, e);
+  return _update(world, [{ cx: a, cz: b as number, cy: typeof c === 'number' ? c : 2, radius: activeRadius, meshable: true }], d, e);
 }
