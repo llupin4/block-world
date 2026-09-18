@@ -1760,11 +1760,16 @@ function frame(now: number): void {
     console.log('MP-RESULT ' + JSON.stringify(rep));
     (window as unknown as Record<string, unknown>).__mpResult = rep;
   }
-  if (!mpSession && !profMode) { // single-player game only: multiplayer + the deterministic prof rig keep the fixed VIEW_RADIUS
+  if (!profMode) {
     const workMs = performance.now() - frameT0;
-    const ringFull = world.count() >= targetChunks(governor.radius);
-    streaming.setActiveRadius(governor.noteFrame(workMs, ringFull));
-    (window as unknown as Record<string, unknown>).__viewRadius = governor.radius; // e2e smoke readout
+    if (mpSession) {
+      mpSession.noteFrame(workMs); // the MP session's own governor (host or client)
+      (window as unknown as Record<string, unknown>).__viewRadius = mpSession.activeRadius; // e2e smoke readout
+    } else {
+      const ringFull = world.count() >= targetChunks(governor.radius);
+      streaming.setActiveRadius(governor.noteFrame(workMs, ringFull));
+      (window as unknown as Record<string, unknown>).__viewRadius = governor.radius; // e2e smoke readout
+    }
   }
   requestAnimationFrame(frame);
 }
