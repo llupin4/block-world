@@ -15,6 +15,8 @@ import { type Transport } from './transport';
 // The 60 Hz heartbeat + water pulse (the host runs the sim at the fixed timestep).
 const STEP = 1 / 60, WATER_STRIDE = 30, WATER_PULSE = 1000;
 
+const colKey = (cx: number, cz: number): string => cx + ',' + cz; // a 2D column key (x/z only)
+
 interface Peer { name: string; entityId: number; controller: RemoteController; loaded: Set<string>; radius: number }
 
 export interface HostOpts {
@@ -234,14 +236,27 @@ export class HostSession {
     }
   }
 
+  /** The union data ring's columns: the host's radius at the host's position ∪ each peer's radius at
+   *  each peer's position. `broadcastState` sends every entity in this ring to every peer (the
+   *  superset); each client culls to its own radius locally. Reuses `anchors()` so the broadcast and
+   *  the data ring never disagree. */
+  private unionRing(): Set<string> {
+    const ring = new Set<string>();
+    for (const a of this.anchors())
+      for (let dx = -a.radius; dx <= a.radius; dx++)
+        for (let dz = -a.radius; dz <= a.radius; dz++)
+          ring.add(colKey(a.cx + dx, a.cz + dz));
+    return ring;
+  }
+
   private broadcastState(): void {
+    const ring = this.unionRing(); // the union data ring (2D x/z columns)
     for (const [id, p] of this.peers) {
       const e = this.sim.entities.get(p.entityId);
       if (!e) continue;
-      const pcx = chunkOf(e.pos.x), pcz = chunkOf(e.pos.z);
       const list: NetEntity[] = [];
       for (const ent of this.sim.all()) {
-        if (Math.abs(chunkOf(ent.pos.x) - pcx) > SR_VIEW_RADIUS || Math.abs(chunkOf(ent.pos.z) - pcz) > SR_VIEW_RADIUS) continue;
+        if (!ring.has(colKey(chunkOf(ent.pos.x), chunkOf(ent.pos.z)))) continue; // 2D x/z cull (union ring)
         list.push({ id: ent.id, kindId: ent.kind.id, name: ent.name, x: ent.pos.x, y: ent.pos.y, z: ent.pos.z, yaw: ent.yaw, pitch: ent.pitch, vx: ent.vel.x, vy: ent.vel.y, vz: ent.vel.z, flags: (ent.inWater ? 1 : 0) | (ent.onGround ? 2 : 0) });
       }
       this.transport.send(id, { type: 'state', tick: this.worldTime.tick, entities: list });

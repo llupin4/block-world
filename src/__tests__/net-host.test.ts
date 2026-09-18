@@ -3,7 +3,7 @@ import { LoopbackHub } from '../net/transport';
 import { HostSession } from '../net/host';
 import { type Msg, PROTOCOL_VERSION } from '../net/messages';
 import { Block } from '../blocks';
-import { HumanController, NULL_INTENT, possess, returnHome } from '../entity';
+import { HumanController, NULL_INTENT, IdleController, possess, returnHome } from '../entity';
 import { Persistence, InMemoryChunkStore } from '../persistence';
 
 const tick = (hub: LoopbackHub, host: HostSession, clients: { tick: (t: number) => void }[], n: number) => {
@@ -207,5 +207,34 @@ describe('HostSession', () => {
     let r = 2;
     for (let i = 0; i < 200; i++) r = host.noteFrame(1); // light frames + full ring → grow
     expect(r).toBeGreaterThan(2); // the governor grew the host's own radius
+  });
+
+  it('broadcastState sends the union-ring superset (far peer included, out-of-union excluded)', async () => {
+    const hub = new LoopbackHub();
+    const host = new HostSession(hub.connect('host'), 1234, { withOwnPlayer: true });
+    const near = hub.connect('near');
+    let nearState: Extract<Msg, { type: 'state' }> | undefined;
+    const welcomed = new Promise<void>((res) => {
+      near.onMessage((_f, m: Msg) => { if (m.type === 'welcome') res(); else if (m.type === 'state') nearState = m; });
+    });
+    near.send('host', { type: 'hello', name: 'near', protocol: PROTOCOL_VERSION });
+    hub.pump(0);
+    await welcomed;
+    const far = hub.connect('far');
+    const farWelcomeP = new Promise<Extract<Msg, { type: 'welcome' }>>((res) => {
+      far.onMessage((_f, m: Msg) => { if (m.type === 'welcome') res(m); });
+    });
+    far.send('host', { type: 'hello', name: 'far', protocol: PROTOCOL_VERSION });
+    hub.pump(0);
+    const farId = (await farWelcomeP).yourEntityId;
+    host.sim.entities.get(farId)!.pos = { x: 64, y: 40, z: 64 }; // chunk (4,4) — far from the near peer (spawn)
+    far.send('host', { type: 'radius', radius: 2 });
+    const deerId = host.sim.spawn({ x: 200, y: 40, z: 200 }, new IdleController(), { kindId: 'deer' }).id; // chunk (12,12) — outside every ring
+    hub.pump(0);
+    host.tick(3); // broadcastState (NET_STATE_STRIDE = 3)
+    hub.pump(3);
+    expect(nearState).toBeDefined();
+    expect(nearState!.entities.some((e) => e.id === farId), 'the far peer is in the union ring → included for the near peer').toBe(true);
+    expect(nearState!.entities.some((e) => e.id === deerId), 'the deer is outside every ring → excluded').toBe(false);
   });
 });
