@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { WorldTime } from '../time';
-import { PROTOCOL_VERSION } from '../net/messages';
-import type { WorldTimeSnapshot } from '../net/messages';
+import { PROTOCOL_VERSION, encodeMsg, decodeMsg } from '../net/messages';
+import type { WorldTimeSnapshot, Msg } from '../net/messages';
 
 describe('world-time wire format (B1)', () => {
   it('advanceClock advances time+phaseTotal, not tick', () => {
@@ -21,5 +21,9 @@ describe('world-time wire format (B1)', () => {
     expect(w.time).toBe(999);
     expect(w.dayPhase).toBeCloseTo(0.25);
   });
-  it('PROTOCOL_VERSION is still 1 (no bump)', () => { expect(PROTOCOL_VERSION).toBe(1); });
+  it('PROTOCOL_VERSION is 2 (the radius message was added)', () => { expect(PROTOCOL_VERSION).toBe(2); });
+  it('encode/decode round-trips a radius message', () => {
+    const msg: Msg = { type: 'radius', radius: 4 };
+    expect(decodeMsg(encodeMsg(msg))).toEqual({ type: 'radius', radius: 4 });
+  });
 });

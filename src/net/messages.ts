@@ -4,7 +4,7 @@ import { type ReplaySnapshot } from '../replay';
 
 // The wire protocol: versioned, plain data, a `type` discriminant. `Intent`, `ChunkRecord`,
 // `EntityRecord`, `WorldMeta`, `ReplaySnapshot` are reused verbatim as wire types.
-export const PROTOCOL_VERSION = 1;
+export const PROTOCOL_VERSION = 2;
 
 // Net pacing (the host's stride-based broadcasts + the client's remote ring). Pinned by the
 // session spec (phase A); the loopback harness measures latency, not these.
@@ -47,6 +47,7 @@ export type Msg =
   | { type: 'chunkRec'; key: string; rec: ChunkRecord | null }
   | { type: 'chunkLoaded'; key: string }
   | { type: 'chunkUnloaded'; key: string }
+  | { type: 'radius'; radius: number }
   | { type: 'time'; tick: number; worldTime: WorldTimeSnapshot };
 
 // --- Real-transport wire codec (B2) ---
