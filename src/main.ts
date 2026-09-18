@@ -1754,7 +1754,7 @@ function frame(now: number): void {
     console.log('MP-RESULT ' + JSON.stringify(rep));
     (window as unknown as Record<string, unknown>).__mpResult = rep;
   }
-  if (!mpSession) { // single-player only: multiplayer keeps the fixed VIEW_RADIUS
+  if (!mpSession && !profMode) { // single-player game only: multiplayer + the deterministic prof rig keep the fixed VIEW_RADIUS
     const workMs = performance.now() - frameT0;
     const ringFull = world.count() >= targetChunks(governor.radius);
     streaming.setActiveRadius(governor.noteFrame(workMs, ringFull));
