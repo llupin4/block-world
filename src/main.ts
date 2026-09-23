@@ -27,6 +27,7 @@ import { createClouds } from './clouds';
 import { LIGHT_AMBIENT, LIGHT_TICK_BUDGET } from './light';
 import { LightClient } from './light-transport';
 import { Persistence, type WorldMeta, type PersistSource } from './persistence';
+import { SavePoints, installSavePoints } from './persistence/save-points';
 import { IndexedDBChunkStore } from './idb-store';
 import type { Replay } from './replay';
 import { FrameStepper } from './simulation/frame-stepper';
@@ -616,38 +617,15 @@ function consumeStream(update: streaming.StreamingUpdate, source: PersistSource,
     removeRemesh: (key) => chunkRemesher.remove(key),
     deferredMeshes: deferredFirstMesh,
     pendingSpawns: deerPendingMesh,
-    saveMeta: !playback && !isClient ? () => (source as Persistence).saveMeta(metaSnapshot()) : null,
+    saveMeta: !playback && !isClient ? () => savePoints.saveMeta(source as Persistence) : null,
     controllerFor: streamControllerFor,
   }).catch((error) => console.error('[streaming] restore failed', error));
 }
 
-function metaSnapshot(): WorldMeta {
-  return {
-    v: 2, seed: TERRAIN_SEED,
-    entities: sim.all().map((e) => sim.toRecord(e)),
-    viewedEntityId: sim.viewedId,
-    simPrng: sim.rng.state(),
-    time: worldTime.snapshot(),
-    hotbar: { slots: [...hotbar.slots], selected: hotbar.selected },
-  };
-}
-
-// Save points (ADR 0014). Chunk records are written (a) when a chunk UNLOADS (the streaming
-// path) and (b) at every save point below — every currently-loaded EDITED + OUT-OF-SYNC chunk
-// is snapshotted in ONE putMany (one store transaction) along with the meta (saveLoaded). The
-// gate is inside saveLoaded (isDue), so an untouched or already-saved world writes only the
-// meta. The 5 s interval is what makes a hard reload safe: the pagehide put is best-effort (the
-// page can be torn down mid-transaction, so it may not commit), and edits in still-loaded
-// chunks are otherwise only saved when those chunks unload. Worst case, a hard kill loses
-// ~5 s of edits **[POC shortcut]**.
-const saveAndFlush = (): void => {
-  if (playback) return; // a replay is read-only: never overwrite the real save with the replay's state (player pos / edits)
-  persist.saveLoaded(world.allChunks(), metaSnapshot()); // one batched putMany: the DUE chunks + the meta
-  void persist.flush();
-};
-document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'hidden') saveAndFlush(); });
-window.addEventListener('pagehide', () => saveAndFlush());
-setInterval(() => saveAndFlush(), 5000); // best-effort periodic save: the crash window is ~5 s
+const savePoints = new SavePoints(() => playback ? null : {
+  seed: TERRAIN_SEED, world, sim, clock: worldTime, hotbar, persist,
+});
+installSavePoints(savePoints, document, window);
 
 // === debug ===
 

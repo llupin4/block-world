@@ -1,5 +1,6 @@
 import type { Sim } from '../entity';
 import { snapshotChunk } from '../persistence';
+import { snapshotWorldMeta } from '../persistence/world-snapshot';
 import { Recorder, type Replay, type ReplaySnapshot } from '../replay';
 import type { WorldTime } from '../time';
 import type { Hotbar } from '../ui/hotbar';
@@ -24,15 +25,7 @@ interface ActiveRecording {
 function captureSnapshot({ seed, world, sim, clock, hotbar }: RecordingSource): ReplaySnapshot {
   return {
     chunks: [...world.allChunks()].map((chunk) => snapshotChunk(chunk)),
-    meta: {
-      v: 2,
-      seed,
-      entities: sim.all().map((entity) => sim.toRecord(entity)),
-      viewedEntityId: sim.viewedId,
-      time: clock.snapshot(),
-      hotbar: { slots: [...hotbar.slots], selected: hotbar.selected },
-      simPrng: sim.rng.state(),
-    },
+    meta: snapshotWorldMeta({ seed, sim, clock, hotbar }),
   };
 }
 
