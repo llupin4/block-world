@@ -172,6 +172,7 @@ src/
   main.ts            boot, scene setup, input, render loop, lobby/debug entry points
   block-atlas.ts     deterministic block textures shared by rendering and inventory icons
   startup/          URL options, multiplayer sessions, saved-world and replay restoration
+  rendering/        chunk mesh lifecycle, entity rigs, animation, and name-tag textures
   ui/
     hotbar.ts         inventory state, independent of the browser
     inventory-view.ts hotbar icons, palette rows, and selection highlighting

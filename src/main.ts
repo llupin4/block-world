@@ -11,11 +11,11 @@ import { createGameMenus } from './ui/game-menus';
 import { meshChunk, meshChunkRange, probeMeshChunk, type ChunkMesh, type LightSampler } from './chunk-mesher';
 import { SliceScheduler, decideBands, PROBE_VERTS, SLICE_COUNT } from './mesh-slices';
 import { ProfRig, meshVerts, PROF_WORST_KEY } from './prof-rig';
-import { toGeometry } from './geometry';
+import { ChunkRenderer } from './rendering/chunk-renderer';
 import { Sim, HumanController, eyeOf, lookDir, breakRayTarget, possessToggle, possessableCandidates, type ApplyHooks, type Controller, type EntityRecord } from './entity';
 import { raycastVoxel, pickEntity, REACH, type RayHit } from './raycast';
 import { spawnDeer } from './spawn';
-import { buildEntityRig, updateEntityRig, advanceRigAnim, newRigAnim, RIG_COLORS, LEG_RATE, buildPartAtlas, type Rig, type RigAnim } from './entity-mesh';
+import { EntityRenderer } from './rendering/entity-renderer';
 import { WaterSim } from './water';
 import { WorldTime, formatClock, tickCrossed } from './time';
 import { sampleSky, createSky } from './sky';
@@ -355,65 +355,8 @@ void persist.boot().then((meta) => {
   void startGame(meta).catch(startFatal);
 });
 
-// === entity rigs ===
-
-// One material per kind (a deterministic speckled part-atlas, block-atlas style). The rig
-// renders every non-spectator entity; the viewed entity's rig is hidden (first person).
-const rigOf: Record<string, THREE.MeshBasicMaterial> = {};
-for (const [id, color] of Object.entries(RIG_COLORS)) rigOf[id] = new THREE.MeshBasicMaterial({ map: buildPartAtlas(color, 0x5eed) });
-const rigs = new Map<number, { rig: Rig; anim: RigAnim }>();
-// Name tags (B1): one THREE.Sprite per entity id (positioned above the rig); the texture (a small
-// canvas with the name) is cached by name (many "Louis"es share one texture) but the sprite is
-// keyed by entity id (two peers who both type "Louis" don't share one tag / position).
-const tagTextureCache = new Map<string, THREE.CanvasTexture>();
-const nameTags = new Map<number, THREE.Sprite>();
-function tagTexture(name: string): THREE.CanvasTexture {
-  let t = tagTextureCache.get(name);
-  if (!t) {
-    const canvas = document.createElement('canvas'); canvas.width = 256; canvas.height = 64;
-    const ctx = canvas.getContext('2d')!; ctx.font = 'bold 40px sans-serif'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
-    ctx.fillStyle = 'rgba(0,0,0,0.55)'; ctx.fillRect(0, 0, 256, 64);
-    ctx.fillStyle = '#fff'; ctx.fillText(name.slice(0, 14), 128, 34);
-    t = new THREE.CanvasTexture(canvas);
-    tagTextureCache.set(name, t);
-  }
-  return t;
-}
+const entityRenderer = new EntityRenderer(scene);
 const kindEl = document.getElementById('kind')!;
-
-function syncEntityRigs(dt: number): void {
-  const seen = new Set<number>();
-  for (const e of sim.all()) {
-    seen.add(e.id);
-    if (e.kind.collides === false) continue; // spectator: no rig
-    let entry = rigs.get(e.id);
-    if (!entry) {
-      const mat = rigOf[e.kind.id] ?? (rigOf[e.kind.id] = new THREE.MeshBasicMaterial({ map: buildPartAtlas(0x888888, 0x5eed) }));
-      const rig = buildEntityRig(e.kind, mat);
-      if (!rig) continue;
-      entry = { rig, anim: newRigAnim() };
-      rigs.set(e.id, entry);
-      scene.add(rig.root);
-    }
-    advanceRigAnim(entry.anim, e, dt, LEG_RATE[e.kind.id] ?? 4);
-    updateEntityRig(entry.rig, e, entry.anim);
-    entry.rig.root.visible = e.id !== sim.viewedId; // hide the viewed entity in first person
-    // Name tag (B1): one sprite per entity id, positioned above the rig; the texture is cached by name.
-    if (e.name) {
-      let tag = nameTags.get(e.id);
-      if (!tag) {
-        tag = new THREE.Sprite(new THREE.SpriteMaterial({ map: tagTexture(e.name), depthTest: false }));
-        tag.scale.set(1.6, 0.4, 1);
-        scene.add(tag);
-        nameTags.set(e.id, tag);
-      }
-      tag.position.set(e.pos.x, e.pos.y + 1.8, e.pos.z); // above the rig
-      tag.visible = e.id !== sim.viewedId; // hide the viewed entity's tag (first person)
-    }
-  }
-  for (const [id, entry] of rigs) if (!seen.has(id)) { scene.remove(entry.rig.root); rigs.delete(id); }
-  for (const [id, tag] of nameTags) if (!seen.has(id)) { scene.remove(tag); tag.material.map?.dispose(); nameTags.delete(id); }
-}
 
 // The HUD kind label + hotbar visibility: show what you are viewing, and hide the hotbar when
 // the viewed kind can't edit (a deer / the ghost can't place blocks).
@@ -435,7 +378,7 @@ function syncHud(): void {
 
 // === chunks-meshing ===
 
-const chunkObjs = new Map<string, { opaque: THREE.Mesh | null; trans: THREE.Mesh | null }>();
+const chunkRenderer = new ChunkRenderer(scene, matOpaque, matTrans);
 
 // Budgeted re-mesh of the light/water TOUCHED chunks. A cave's light convergence marks many
 // chunks in one frame (up to ~7+); re-meshing all of them is a ~20ms spike (a re-mesh is a full
@@ -464,19 +407,7 @@ function rebuildScore(c: [number, number, number], pcx: number, pcy: number, pcz
  * Shared by the sync edit path, the probe-complete drain path, and the slice-merge path. */
 function swapChunkMesh(cx: number, cy: number, cz: number, mesh: ChunkMesh): void {
   const key = chunkKey(cx, cy, cz);
-  const old = chunkObjs.get(key);
-  for (const m of [old?.opaque, old?.trans]) {
-    if (m) {
-      scene.remove(m);
-      m.geometry.dispose();
-    }
-  }
-  const entry: { opaque: THREE.Mesh | null; trans: THREE.Mesh | null } = { opaque: null, trans: null };
-  if (mesh.opaque) entry.opaque = new THREE.Mesh(toGeometry(mesh.opaque), matOpaque);
-  if (mesh.trans) entry.trans = new THREE.Mesh(toGeometry(mesh.trans), matTrans);
-  if (entry.opaque) scene.add(entry.opaque);
-  if (entry.trans) scene.add(entry.trans);
-  chunkObjs.set(key, entry);
+  chunkRenderer.replace(key, mesh);
   const ch = world.getChunk(cx, cy, cz);
   if (ch) ch.dirty = false; // a rebuilt mesh is up to date; streaming only reschedules stale chunks
   if (deerPendingMesh.has(key)) { // the column's ground is now visible: spawn its deer (idempotent per column)
@@ -498,14 +429,7 @@ function rebuildChunkMesh(cx: number, cy: number, cz: number): void {
 function removeChunkMesh(cx: number, cy: number, cz: number): void {
   scheduler.cancel(chunkKey(cx, cy, cz)); // an in-flight split of a vanished chunk is discarded (partial buffers are CPU-only)
   const key = chunkKey(cx, cy, cz);
-  const old = chunkObjs.get(key);
-  for (const m of [old?.opaque, old?.trans]) {
-    if (m) {
-      scene.remove(m);
-      m.geometry.dispose();
-    }
-  }
-  chunkObjs.delete(key);
+  chunkRenderer.remove(key);
   deerPendingMesh.delete(key); // the column is gone before its mesh was built: don't spawn its deer
 }
 
@@ -1071,14 +995,14 @@ function frame(now: number): void {
   if (mpSession instanceof ClientSession) mpSession.syncPoses(); // interpolate the entities' poses at renderTick (the own body's position)
   syncCamera();
   updateHitbox();
-  syncEntityRigs(dt); // place/update the mob+player rigs; hide the viewed entity's rig (first person)
+  entityRenderer.update(sim.all(), sim.viewedId, dt);
   syncHud(); // the "viewing: <kind>" label + hotbar visibility
   syncWaterFx();
   clouds.setVisible(waterFx === 'air');
   const skySample = sampleSky(worldTime.dayPhase);
   sky.apply(skySample, waterFx, camera);
   for (const u of daynessUniforms) u.value = skySample.dayness;
-  for (const mat of Object.values(rigOf)) mat.color.setScalar(LIGHT_AMBIENT + (1 - LIGHT_AMBIENT) * skySample.dayness); // dim the rigs at night, matching the chunks' uDayness floor
+  entityRenderer.setBrightness(LIGHT_AMBIENT + (1 - LIGHT_AMBIENT) * skySample.dayness);
   clouds.update(camera.position.x, camera.position.z, camera.position.y, worldTime.time, skySample.worldDim);
   const label = formatClock(worldTime.day, worldTime.hour);
   if (label !== clockLabel) {
@@ -1113,8 +1037,8 @@ function frame(now: number): void {
     const isHost = mpSession instanceof HostSession; // works for B1 (?mp=) and B2 (?host/?join lobby) alike
     const rep: Record<string, unknown> = { mode: isHost ? 'host' : 'client', tick: worldTime.tick, bots: mpBots };
     if (isHost) {
-      rep.rigCount = rigs.size;
-      rep.hostMeshedChunks = chunkObjs.size; // the host's meshed chunk count (bounded to the host's own ring, not the union)
+      rep.rigCount = entityRenderer.rigCount;
+      rep.hostMeshedChunks = chunkRenderer.chunkCount;
       rep.remotePlayers = sim.all().filter((e) => e.kind.id === 'player' && e.id !== sim.viewedId).map((e) => {
         const first = mpFirstPos?.get(e.id);
         const moved = first ? Math.hypot(e.pos.x - first.x, e.pos.z - first.z) > 0.25 : false;
@@ -1124,13 +1048,13 @@ function frame(now: number): void {
       world.setBlock(tx, ty, tz, Block.Planks);
       rep.editReflected = world.getBlock(tx, ty, tz) === Block.Planks;
     } else {
-      rep.rigCount = rigs.size;
+      rep.rigCount = entityRenderer.rigCount;
       rep.otherPlayers = sim.all().filter((e) => e.kind.id === 'player' && e.id !== sim.viewedId).map((e) => ({ id: e.id, x: Math.round(e.pos.x * 10) / 10, y: Math.round(e.pos.y * 10) / 10, z: Math.round(e.pos.z * 10) / 10, name: e.name ?? null }));
       const ve = sim.viewed();
       rep.camera = ve ? { x: Math.round(ve.pos.x * 10) / 10, y: Math.round(ve.pos.y * 10) / 10, z: Math.round(ve.pos.z * 10) / 10 } : null;
-      rep.clientMeshedChunks = chunkObjs.size; // the client's meshed chunk count (bounded to the client's ring)
+      rep.clientMeshedChunks = chunkRenderer.chunkCount;
       rep.headlessHostMeshedChunks = 0; // the headless host is simulation-only (never meshed/lit)
-      rep.leaveRigRemoved = mpOtherTransports.length > 1 ? rigs.size < mpOtherTransports.length + 1 : true; // the disconnected bot's rig is removed (the rig count is the remaining other players + the own body)
+      rep.leaveRigRemoved = mpOtherTransports.length > 1 ? entityRenderer.rigCount < mpOtherTransports.length + 1 : true; // the disconnected bot's rig is removed (the rig count is the remaining other players + the own body)
     }
     console.log('MP-RESULT ' + JSON.stringify(rep));
     (window as unknown as Record<string, unknown>).__mpResult = rep;
