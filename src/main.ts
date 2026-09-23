@@ -4,6 +4,7 @@ import { Block, PLACEABLE, torchMeta, doorMeta, doorOpen, doorAxis, doorSide, is
 import { World, chunkKey, chunkOf, CHUNK_SIZE, WORLD_Y_MAX, WORLD_Y_MIN } from './world';
 import { TERRAIN_SEED } from './terrain';
 import * as streaming from './streaming';
+import { StreamEffects } from './streaming/stream-effects';
 import { ViewRadiusGovernor, targetChunks } from './view-radius';
 import { Hotbar } from './ui/hotbar';
 import { InventoryView } from './ui/inventory-view';
@@ -25,7 +26,7 @@ import { sampleSky, createSky } from './sky';
 import { createClouds } from './clouds';
 import { LIGHT_AMBIENT, LIGHT_TICK_BUDGET } from './light';
 import { LightClient } from './light-transport';
-import { Persistence, applyRecord, type WorldMeta, type PersistSource } from './persistence';
+import { Persistence, type WorldMeta, type PersistSource } from './persistence';
 import { IndexedDBChunkStore } from './idb-store';
 import type { Replay } from './replay';
 import { FrameStepper } from './simulation/frame-stepper';
@@ -161,11 +162,7 @@ const noopPersist: PersistSource = {
 const recording = new RecordingSession((key, replay) => persist.saveReplay(key, replay));
 let playback: { replay: Replay; paused: boolean } | null = null;
 let replayControllerFor: ((r: EntityRecord) => Controller) | null = null;
-// Cold-restore in-flight keys (ADR 0014): one fetchRecord per key at a time. streaming
-// re-pends a key every frame until its record lands, so without this we would re-attach a
-// new .then continuation (re-running the whole apply) every frame. The key is added when
-// the fetch starts and removed when it settles (apply or drop).
-const restoring = new Set<string>();
+const streamEffects = new StreamEffects();
 
 // === Multiplayer (B1) ===
 // The B1 session (a HostSession for ?mp=host, a ClientSession for ?mp=client) that the frame loop
@@ -608,61 +605,20 @@ function tickStreaming(): void {
   consumeStream(r, playback ? noopPersist : persist, false);
 }
 
-/** The mesh-adjacent work for a streaming result: light load/unload, deferred first mesh, water
- * settle/restore (host), deer spawn (host), pending fetch. The single-player's tickStreaming and
- * the B1 frame loop (host/client) both consume a StreamingUpdate via this. `isClient` skips the
- * water work + the deer spawn/despawn + the save point (the client has no WaterSim — water arrives
- * via cells; its deer come from the host; it has no save point). `persist` is the session's persist
- * (the host's Persistence / the client's NetworkPersistSource / the single-player's Persistence). */
-function consumeStream(r: streaming.StreamingUpdate, persist: PersistSource, isClient: boolean): void {
-  const ve = sim.viewed();
-  const pcx = ve ? chunkOf(ve.pos.x) : 0, pcz = ve ? chunkOf(ve.pos.z) : 0;
-  for (const c of r.unloaded) {
-    removeChunkMesh(c.cx, c.cy, c.cz);
-    lightSim.unload(c.cx, c.cy, c.cz); // the worker re-seeds the surviving seams (the darkness wave)
-    chunkRemesher.remove(chunkKey(c.cx, c.cy, c.cz)); // don't re-mesh a chunk we just unloaded
-    deferredFirstMesh.delete(chunkKey(c.cx, c.cy, c.cz)); // it may still be waiting for its first mesh
-    if (!isClient) for (const d of sim.entitiesInChunk(c.cx, c.cy, c.cz)) // the deer leaving with the chunk persist via the entity-ride; restore on walk-back (host)
-      if (d.kind.id === 'deer' || d.kind.id === 'dolt') sim.despawn(d.id);
-  }
-  if (r.unloaded.length && !playback && !isClient) (persist as Persistence).saveMeta(metaSnapshot()); // the world just changed durably (a chunk left): refresh the save point (host). NEVER during playback.
-  for (const c of r.rebuilt) {
-    const key = chunkKey(c.cx, c.cy, c.cz);
-    if (!isClient) waterSim.settle(c.cx, c.cy, c.cz); // the host's water settle BEFORE meshing (the client has no WaterSim — water arrives via cells)
-    if (r.meshable.has(key)) { // the host draws only its own ring; peer-only chunks are data-served, not meshed
-      lightSim.load(c.cx, c.cy, c.cz); // the worker settles it; the fields land with the tick reply
-      deferredFirstMesh.add(key); // ADR 0012: the first/fresh mesh waits a guaranteed frame
-    }
-  }
-  if (!isClient) for (const c of r.generated) deerPendingMesh.add(chunkKey(c.cx, c.cy, c.cz)); // deer into freshly GENERATED columns only (host); the client's deer come from the host — deferred until the column's mesh is built (swapChunkMesh) so a wandering deer never appears in a not-yet-meshed column
-  for (const c of r.restored) {
-    const key = chunkKey(c.cx, c.cy, c.cz);
-    const ch = world.getChunk(c.cx, c.cy, c.cz)!;
-    if (!isClient) waterSim.restore(ch); // the host's water restore (the client has no WaterSim)
-    if (r.meshable.has(key)) { // the host draws only its own ring; peer-only chunks are data-served, not meshed
-      lightSim.load(c.cx, c.cy, c.cz); // light is never persisted: the worker re-settles the chunk
-      deferredFirstMesh.add(key); // first mesh of the restored chunk, same pacing as a load
-    }
-  }
-  for (const c of r.pending) {
-    const key = chunkKey(c.cx, c.cy, c.cz);
-    if (restoring.has(key)) continue; // a fetch for this key is already in flight
-    restoring.add(key);
-    void persist.fetchRecord(c.cx, c.cy, c.cz).then((rec) => {
-      restoring.delete(key); // free the slot whether we apply or drop
-      if (!rec) { persist.dropPersisted(c.cx, c.cy, c.cz); return; }
-      if (!ve || !streaming.inRange(c.cx, c.cz, pcx, pcz)) return; // stale guard: the player may have moved on
-      if (world.hasChunk(c.cx, c.cy, c.cz)) return; // a duplicate in-flight fetch applied it first
-      applyRecord(world, rec, sim, streamControllerFor); // restore frozen entities into the sim (idle)
-      streaming.markNeighborsDirty(world, c.cx, c.cy, c.cz, pcx, pcz);
-      const ch = world.getChunk(c.cx, c.cy, c.cz)!;
-      if (!isClient) waterSim.restore(ch);
-      if (r.meshable.has(key)) { // the host draws only its own ring; peer-only chunks are data-served, not meshed
-        lightSim.load(c.cx, c.cy, c.cz);
-        deferredFirstMesh.add(key);
-      }
-    });
-  }
+function consumeStream(update: streaming.StreamingUpdate, source: PersistSource, isClient: boolean): void {
+  void streamEffects.consume(update, {
+    world,
+    sim,
+    persist: source,
+    water: isClient ? null : waterSim,
+    light: lightSim,
+    removeMesh: removeChunkMesh,
+    removeRemesh: (key) => chunkRemesher.remove(key),
+    deferredMeshes: deferredFirstMesh,
+    pendingSpawns: deerPendingMesh,
+    saveMeta: !playback && !isClient ? () => (source as Persistence).saveMeta(metaSnapshot()) : null,
+    controllerFor: streamControllerFor,
+  }).catch((error) => console.error('[streaming] restore failed', error));
 }
 
 function metaSnapshot(): WorldMeta {
