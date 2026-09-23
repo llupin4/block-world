@@ -1,8 +1,8 @@
 import * as THREE from 'three';
 import { createBlockAtlas } from './block-atlas';
-import { Block, isOpaque, PLACEABLE, torchMeta, doorMeta, doorOpen, doorAxis, doorSide, isDoor, doorPlacementFromView } from './blocks';
+import { Block, PLACEABLE, torchMeta, doorMeta, doorOpen, doorAxis, doorSide, isDoor, doorPlacementFromView } from './blocks';
 import { World, chunkKey, chunkOf, CHUNK_SIZE, WORLD_Y_MAX, WORLD_Y_MIN } from './world';
-import { TERRAIN_SEED, TerrainGen, generateChunkTerrain } from './terrain';
+import { TERRAIN_SEED } from './terrain';
 import * as streaming from './streaming';
 import { ViewRadiusGovernor, targetChunks } from './view-radius';
 import { Hotbar } from './ui/hotbar';
@@ -12,7 +12,7 @@ import { meshChunk, meshChunkRange, probeMeshChunk, type ChunkMesh, type LightSa
 import { SliceScheduler, decideBands, PROBE_VERTS, SLICE_COUNT } from './mesh-slices';
 import { ProfRig, meshVerts, PROF_WORST_KEY } from './prof-rig';
 import { toGeometry } from './geometry';
-import { Sim, HumanController, IdleController, MobController, eyeOf, lookDir, breakRayTarget, possessToggle, possessableCandidates, type ApplyHooks, type Controller, type EntityRecord } from './entity';
+import { Sim, HumanController, eyeOf, lookDir, breakRayTarget, possessToggle, possessableCandidates, type ApplyHooks, type Controller, type EntityRecord } from './entity';
 import { raycastVoxel, pickEntity, REACH, type RayHit } from './raycast';
 import { spawnDeer } from './spawn';
 import { buildEntityRig, updateEntityRig, advanceRigAnim, newRigAnim, RIG_COLORS, LEG_RATE, buildPartAtlas, type Rig, type RigAnim } from './entity-mesh';
@@ -24,13 +24,18 @@ import { LIGHT_AMBIENT, LIGHT_TICK_BUDGET } from './light';
 import { LightClient } from './light-transport';
 import { Persistence, applyRecord, snapshotChunk, type WorldMeta, type PersistSource } from './persistence';
 import { IndexedDBChunkStore } from './idb-store';
-import { Recorder, ReplayController, viewedAt, type Replay, type ReplaySnapshot } from './replay';
+import { Recorder, viewedAt, type Replay, type ReplaySnapshot } from './replay';
 import { LoopbackHub } from './net/transport';
 import { HostSession } from './net/host';
 import { ClientSession } from './net/client';
 import { sanitizeName } from './net/name';
 import { parseStartupOptions } from './startup/options';
 import { createLoopbackSession } from './startup/loopback-session';
+import { initializeSinglePlayer } from './startup/single-player';
+import { restoreReplay } from './startup/replay-session';
+import { restoredController } from './startup/restore-entities';
+import { createLobbySession, generateRoomCode } from './startup/lobby-session';
+import { createLobbyView, showHostLeft } from './ui/lobby-view';
 import { TrysteroTransport, webCryptoUnavailableMessage } from './net/trystero';
 
 // === boot ===
@@ -168,14 +173,7 @@ const simHooks: ApplyHooks = {
   springTarget: (x, y, z) => waterSim.cellState(x, y, z).p === 1,
 };
 let sim = new Sim(world, simHooks, TERRAIN_SEED); // let: the B1 boot reassigns it to the session's sim
-// Frozen non-viewed entities (restored from chunks / the meta) run on the idle controller —
-// except a deer (kindId 'deer'; old saves use 'dolt'), which reattaches its wander AI on
-// walk-back. Keying off the kind (not the saved controllerKind) means a dolt persisted while
-// it was still idle (pre-mob save) still wakes up and wanders on restore.
-const streamControllerFor = (r: EntityRecord): Controller =>
-  (r.kindId === 'deer' || r.kindId === 'dolt')
-    ? new MobController((x, y, z) => world.getBlock(x, y, z), () => sim.rng.next())
-    : new IdleController();
+const streamControllerFor = (record: EntityRecord): Controller => restoredController(world, sim, record);
 
 // World persistence (ADR 0014): edited chunks snapshot to IndexedDB on unload; on boot
 // the key set + meta load, and previously edited chunks restore verbatim (warm: inline,
@@ -230,70 +228,6 @@ let mpOtherTransports: { transport: { disconnect(): void }; name: string }[] = [
 let mpFirstPos: Map<number, { x: number; z: number }> | null = null; // the ?mp=host remote players' first-observed positions (the report asserts they moved off it)
 let mpLeaveFired = false; // one-shot: the ?mp=client leave check disconnects an other player once, at the first tick >= 250 (the frame loop can run multiple substeps/frame, so an exact === match would be flaky)
 
-// SPAWN is computed in startGame, after the boot column exists (it may be RESTORED from
-// a persisted record — the scan must read the current world state, whatever that is).
-let SPAWN: THREE.Vector3;
-
-// === multiplayer lobby (B2) helpers ===
-// A short, unambiguous room code (no l/o/0/1 — they read alike). The host shows it; a peer types
-// it as ?join=<code>. ?host=<code> fixes it (the e2e passes the same code to both tabs).
-function genRoomCode(): string {
-  const A = 'abcdefghijkmnpqrstuvwxyz23456789';
-  let s = '';
-  for (let i = 0; i < 6; i++) s += A[Math.floor(Math.random() * A.length)];
-  return s;
-}
-// The lobby overlay: the room code + a copy button + a live peer list (polled every 500 ms — the
-// HostSession/ClientSession own the transport's onPeerJoin/onPeerLeave, so the lobby reads peers()
-// instead of registering its own callback). `window.__lobby` is the e2e hook.
-function showLobby(code: string, isHost: boolean, tr: { peers(): string[] }, session: HostSession | ClientSession, name: string): void {
-  const el = document.createElement('div');
-  el.id = 'lobby';
-  el.style.cssText = 'position:fixed;top:12px;right:12px;z-index:9998;background:rgba(0,0,0,.72);color:#fff;font:13px/1.5 sans-serif;padding:10px 12px;border-radius:8px;max-width:300px';
-  el.innerHTML =
-    `<div style="font-weight:600;margin-bottom:6px">${isHost ? 'Hosting a world' : 'Joined a world'}</div>` +
-    `<div>Room code</div>` +
-    `<div id="lobby-code" style="font:600 20px monospace;letter-spacing:2px;margin:2px 0 6px;user-select:all">${code}</div>` +
-    `<button id="lobby-copy" style="cursor:pointer;font:12px sans-serif;padding:4px 8px;background:#2a2a2a;color:#fff;border:1px solid #555;border-radius:4px">copy code</button>` +
-    `<button id="lobby-leave" style="display:block;width:100%;margin-top:6px;cursor:pointer;font:12px sans-serif;padding:4px 8px;background:#2a2a2a;color:#fff;border:1px solid #555;border-radius:4px">${isHost ? 'stop hosting' : 'leave lobby'}</button>` +
-    `<div id="lobby-peers" style="margin-top:8px;color:#bbb">Peers: ${isHost ? 'waiting for players…' : 'connecting to host…'}</div>`;
-  document.body.appendChild(el);
-  // The display name (textContent, so a pasted `<script>`-ish name cannot inject HTML) — under the header.
-  const nameEl = document.createElement('div');
-  nameEl.style.cssText = 'color:#bbb;margin-bottom:6px';
-  nameEl.textContent = `name: ${name}`;
-  el.firstElementChild?.after(nameEl);
-  const copyBtn = document.getElementById('lobby-copy')!;
-  copyBtn.addEventListener('click', () => {
-    navigator.clipboard?.writeText(code).then(() => { copyBtn.textContent = 'copied!'; setTimeout(() => { copyBtn.textContent = 'copy code'; }, 1200); }).catch(() => {});
-  });
-  // Leave the lobby → the normal single-player game: navigate to the base URL (the whole query is
-  // dropped, so the URL-driven boot gate re-runs the single-player boot; the lobby session runs on
-  // the same `persist`, so lobby edits are kept). The host's click drops every connected player
-  // (they see the static "host left" screen) — confirm; a joiner's leave only affects them.
-  // Page unload tears down the transport (WebRTC + Nostr) — no explicit dispose.
-  const leaveBtn = document.getElementById('lobby-leave')!;
-  leaveBtn.addEventListener('click', () => {
-    if (isHost && !confirm('Leave? Connected players will be dropped.')) return;
-    location.href = location.pathname;
-  });
-  const peersEl = document.getElementById('lobby-peers')!;
-  const render = () => { const p = tr.peers(); peersEl.textContent = p.length ? 'Peers: ' + p.join(', ') : (isHost ? 'Peers: waiting for players…' : 'Peers: connecting to host…'); };
-  const timer = setInterval(render, 500);
-  render();
-  // The e2e hook: the connected peer ids (the transport connection) + the remote players this side
-  // sees in its sim (the "see each other" render sense — the host's clients / the client's host).
-  (window as unknown as Record<string, unknown>).__lobby = {
-    code, isHost,
-    peers: () => tr.peers(),
-    remotePlayers: () => session.sim.all()
-      .filter((e) => e.kind.id === 'player' && e.id !== session.sim.viewedId)
-      .map((e) => ({ id: e.id, name: e.name ?? null, x: Math.round(e.pos.x * 10) / 10, z: Math.round(e.pos.z * 10) / 10 })),
-    ownPos: () => { const e = session.sim.viewed(); return e ? { x: e.pos.x, y: e.pos.y, z: e.pos.z } : null; },
-    _dispose: () => clearInterval(timer),
-  };
-}
-
 // === boot gate (ADR 0014) ===
 // The game starts only once persistence has booted (key set + meta) — capped at 5 s:
 // a stalled IDB must not hold the first frame hostage (the fallback starts a fresh
@@ -303,53 +237,52 @@ let booted = false;
 async function startGame(meta: WorldMeta | null): Promise<void> {
   if (booted) return;
   booted = true;
-  // === multiplayer lobby (B2) ===
-  // ?host/?join win over ?mp/?replay/?prof. The session is wired exactly like the B1 ?mp boot
-  // (reassign the module globals to the session's objects so the render path runs unchanged; the
-  // frame loop ticks the clients -> delivers transport msgs -> ticks the local host -> advanceTick),
-  // differing only in the Transport: a real TrysteroTransport (WebRTC data channels) instead of the
-  // in-page LoopbackHub. A host has no local clients (real peers are remote; their intents arrive
-  // via the transport's onMessage); a client has no in-page headless host (the real host is a
-  // separate tab), so the frame loop's host-tick step is conditional on mpHost (null here).
+  // Lobby URLs take precedence over loopback, replay, and profiling modes.
   if (lobbyActive) {
     const webCryptoError = webCryptoUnavailableMessage();
     if (webCryptoError) {
       showFatalOverlay('Multiplayer unavailable', webCryptoError);
       return;
     }
-    // The display name (?host&name= / ?join=code&name=): typed (non-empty param) names are
-    // remembered for the M menu; an empty param gets a random name (not remembered).
-    const nameParam = startup.name;
-    const name = sanitizeName(nameParam);
-    if (nameParam.trim() !== '') localStorage.setItem('bw.name', name);
-    const code = lobbyHost ? (startup.hostCode || genRoomCode()) : (lobbyJoinCode as string);
-    const tr = new TrysteroTransport(APP_ID, code);
-    let session: HostSession | ClientSession;
-    if (lobbyHost) {
-      const host = new HostSession(tr, TERRAIN_SEED, { withOwnPlayer: true, ownController: human, ownName: name, persist, hooks: simHooks });
-      session = host; mpHost = host; mpClients = []; // no local clients: real peers are remote
-      world = host.world; sim = host.sim; waterSim = host.waterSim; worldTime = host.worldTime;
-      { const ve = host.sim.viewed(); if (ve) human.setLook(ve.yaw, ve.pitch); } // sync the look to the own body's spawn look (mirrors the single-player boot sync)
-    } else {
-      const client = new ClientSession(tr, name, human);
-      session = client; mpHost = null; mpClients = [client]; // the page's own body (tick it to send intents)
-      client.setLightEdit((x, y, z) => { lightSim?.edit(x, y, z); }); // the client's light tracks the host's edits
-      client.onPeerLeave((id) => { // the host (the welcome sender) left -> a static view of the last world
-        if (id === client.hostId && mpSession === client) {
-          mpSession = null;
-          const el = document.createElement('div');
-          el.style.cssText = 'position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);color:#fff;font:600 24px sans-serif;z-index:9999;pointer-events:none;text-shadow:0 0 8px #000';
-          el.textContent = 'host left';
-          document.body.appendChild(el);
-        }
-      });
-      world = client.world; sim = client.sim; worldTime = client.worldTime;
+    const name = sanitizeName(startup.name);
+    if (startup.name.trim() !== '') localStorage.setItem('bw.name', name);
+    const code = lobbyHost ? (startup.hostCode || generateRoomCode()) : (lobbyJoinCode as string);
+    const transport = new TrysteroTransport(APP_ID, code);
+    const runtime = createLobbySession({
+      isHost: lobbyHost,
+      transport,
+      seed: TERRAIN_SEED,
+      name,
+      controller: human,
+      persist,
+      hooks: simHooks,
+      lightEdit: (x, y, z) => lightSim.edit(x, y, z),
+      hostLeft: (client) => {
+        if (mpSession !== client) return;
+        mpSession = null;
+        showHostLeft(document);
+      },
+    });
+    mpSession = runtime.session;
+    mpHost = runtime.host;
+    mpClients = runtime.clients;
+    mpHub = null;
+    world = runtime.session.world;
+    sim = runtime.session.sim;
+    worldTime = runtime.session.worldTime;
+    if (runtime.host) {
+      waterSim = runtime.host.waterSim;
+      const viewed = sim.viewed();
+      if (viewed) human.setLook(viewed.yaw, viewed.pitch);
     }
-    lightSim = new LightClient(world, worldTime); // the page's light worker runs on the session's world
+    lightSim = new LightClient(world, worldTime);
     window.__lightDebug = lightSim;
-    mpSession = session;
-    mpHub = null; // no in-page hub to pump (a real transport delivers messages asynchronously)
-    showLobby(code, lobbyHost, tr, session, name);
+    (window as unknown as Record<string, unknown>).__lobby = createLobbyView({
+      document, code, isHost: lobbyHost, name, transport, session: runtime.session,
+      copyCode: (value) => navigator.clipboard?.writeText(value),
+      confirmLeave: () => confirm('Leave? Connected players will be dropped.'),
+      leave: () => { location.href = location.pathname; },
+    });
     syncCamera();
     requestAnimationFrame(frame);
     return;
@@ -366,10 +299,7 @@ async function startGame(meta: WorldMeta | null): Promise<void> {
       lightEdit: (x, y, z) => lightSim.edit(x, y, z),
       hostLeft: () => {
         mpSession = null;
-        const message = document.createElement('div');
-        message.style.cssText = 'position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);color:#fff;font:600 24px sans-serif;z-index:9999;pointer-events:none;text-shadow:0 0 8px #000';
-        message.textContent = 'host left';
-        document.body.appendChild(message);
+        showHostLeft(document);
       },
     });
     mpSession = runtime.session;
@@ -387,134 +317,29 @@ async function startGame(meta: WorldMeta | null): Promise<void> {
     requestAnimationFrame(frame);
     return;
   }
-  // === replay playback (phase 3, ADR 0017) ===
-  // ?replay=<key> loads a saved session: a fresh world restored from the snapshot, driven
-  // tick-by-tick by a ReplayController (deterministic — no human input). The boot-spawned
-  // player id 1 would shadow the snapshot's entity id 1, so skip the normal spawn/restore.
+  const chunkReady = (cx: number, cy: number, cz: number): void => {
+    lightSim.load(cx, cy, cz);
+    deferredFirstMesh.add(chunkKey(cx, cy, cz));
+  };
   const replayKey = startup.replayKey;
   if (replayKey) {
-    const replay = await persist.loadReplay(replayKey); // await (startGame is async) so the frame loop starts AFTER the load — no race with an empty sim
+    const replay = await persist.loadReplay(replayKey);
     if (replay) {
-      for (const rec of replay.snapshot.chunks) {
-        applyRecord(world, rec); // chunk arrays only (the 2-arg form: no entity restore)
-        const c = world.getChunk(rec.cx, rec.cy, rec.cz);
-        if (c) {
-          waterSim.restore(c); // the water arrays ride in the chunk arrays; the world sim re-seats them
-          lightSim.load(rec.cx, rec.cy, rec.cz); // light is never persisted: the worker re-settles it
-          deferredFirstMesh.add(chunkKey(rec.cx, rec.cy, rec.cz));
-        }
-      }
-      sim.rng.restore(replay.simPrng);
-      worldTime.restore(replay.snapshot.meta.time); // the world tick resumes at the snapshot's tick (replay.startTick)
-      // Each entity is driven by a ReplayController: a pull-model controller that reports the
-      // LAST logged intent with tick <= the sim's current tick. The sim calls controller.intent(e,
-      // worldTime.tick) each substep, so the world is driven deterministically by the log (no
-      // human input). One ReplayController per entity (its own logged intents).
-      replayControllerFor = (r: EntityRecord): Controller =>
-        new ReplayController(replay.intents.filter((i) => i.entityId === r.id));
-      sim.restoreEntities(replay.snapshot.meta.entities, replayControllerFor);
-      // Derive the ghost (the single spectator); spawn one if the snapshot had none.
-      sim.ghostId = sim.all().find((e) => e.kind.id === 'spectator')?.id ?? 0;
-      if (sim.ghostId === 0) {
-        const v = sim.viewed() ?? sim.all()[0]!;
-        sim.ghostId = sim.spawn({ x: v.pos.x, y: v.pos.y + 4, z: v.pos.z }, new IdleController(), { kindId: 'spectator', baseController: new IdleController() }).id;
-      }
-      // Follow the user's recorded PERSPECTIVE: the viewed entity at record start (the snapshot's
-      // viewedEntityId). The frame loop (viewedAt) switches it as they possessed other entities
-      // during recording — so the viewer sees what the recorder actually saw, not always the body.
-      sim.setViewed(replay.snapshot.meta.viewedEntityId); // no-op if the entity doesn't exist (old recording)
-      sim.ensureViewed(); // ensure a valid viewed entity (a recording's viewedEntityId may not match a restored entity)
-      { const ve = sim.viewed(); if (ve) human.setLook(ve.yaw, ve.pitch); } // sync the live look to the recorded look (the initial view faces where they were)
+      replayControllerFor = restoreReplay({ world, sim, water: waterSim, clock: worldTime, chunkReady }, replay);
+      const viewed = sim.viewed();
+      if (viewed) human.setLook(viewed.yaw, viewed.pitch);
       playback = { replay, paused: false };
       console.log(`[replay] loaded ${replay.intents.length} deltas, playing ${replay.startTick}..${replay.endTick}`);
       syncCamera();
-      requestAnimationFrame(frame); // the sim is now populated — the first frame is safe (no race with the async load)
+      requestAnimationFrame(frame);
       return;
     }
     console.warn(`[replay] not found: ${replayKey} — starting a fresh world instead`);
-    // fall through to the normal boot path below (a missing replay must not leave a blank screen)
   }
-  // T10: only the spawn column is generated up front — here it is either RESTORED (a
-  // persisted, edited spawn column: arrays verbatim, settled = true, no settle) or
-  // generated exactly as before (settled by the first tickStreaming's remesh path).
-  for (let cy = 0; cy <= 4; cy++) {
-    let rec = persist.syncRecord(0, cy, 2);
-    if (!rec) rec = await persist.fetchRecord(0, cy, 2); // the record may exist but not be warm (first visit after a reload)
-    if (rec) {
-      applyRecord(world, rec, sim, streamControllerFor); // restore frozen entities (idle) + the chunk
-      streaming.markNeighborsDirty(world, 0, cy, 2, 0, 2);
-      waterSim.restore(world.getChunk(0, cy, 2)!);
-      lightSim.load(0, cy, 2); // light is never persisted: the worker re-settles
-      deferredFirstMesh.add(chunkKey(0, cy, 2));
-    } else {
-      const gen = new TerrainGen(TERRAIN_SEED);
-      generateChunkTerrain(world, gen, 0, cy, 2); // chunk column (0,·,2) → world x 0..15, z 32..47 — contains the (T9) spawn (6,46)
-      lightSim.load(0, cy, 2);
-      deferredFirstMesh.add(chunkKey(0, cy, 2));
-    }
-  }
-  // Spawn on MEASURED ground (the scan reads the boot column above — synchronous either way).
-  // Plan deviation (recorded): the plan's probe reported (33,41) as a grass shelf at
-  // surface y=33, but under the T4-pinned generator that column is a sea-basin cell (sand
-  // at y=30, water to y=32) in neither PRNG variant — the plan's T9 probe must have used a
-  // different scratch setup. (6,46) is the nearest clean grass column to the intended point
-  // in the rendered world: surface y=33, no tree in the column, and the sea starts 3 m east
-  // (toward the spawn's +x facing). The scan still drops from the top of the band (79) to
-  // the surface voxel; for an open-sea column the player would land on the sand floor and swim up.
-  const sx = 6, sz = 46;
-  let sy = 79;
-  while (sy >= 0 && !isOpaque(world.getBlock(sx, sy, sz))) sy--;
-  SPAWN = new THREE.Vector3(sx + 0.5, sy + 1, sz + 0.5);
-  sim.respawn = { x: SPAWN.x, y: SPAWN.y, z: SPAWN.z }; // the sim's fall-out-of-world respawn point (both branches)
-  if (meta) {
-    worldTime.restore(meta.time);
-    // Restore controllers: the viewed entity is driven by the human (possession); a deer
-    // (kindId 'deer'; old saves use 'dolt') reattaches its wander AI; the rest stand idle
-    // (e.g. the home body when left). Keying off the kind — not the saved controllerKind —
-    // means a dolt persisted while idle (pre-mob save) still wanders on restore.
-    const controllerFor = (r: EntityRecord): Controller =>
-      r.id === meta.viewedEntityId
-        ? human
-        : ((r.kindId === 'deer' || r.kindId === 'dolt')
-            ? new MobController((x, y, z) => world.getBlock(x, y, z), () => sim.rng.next())
-            : new IdleController());
-    sim.restoreEntities(meta.entities, controllerFor);
-    sim.setViewed(meta.viewedEntityId);
-    // The restored viewedEntityId may not match a restored entity (an older save persisted only
-    // loaded entities, or the viewed entity's chunk wasn't loaded) — setViewed is then a no-op and
-    // viewed() is undefined. Ensure a valid viewed entity before the ghost-spawn below reads it.
-    sim.ensureViewed();
-    // A corrupt/empty save (no entities) leaves the sim empty — the camera stays at (0,0,0) and the
-    // world renders as sky only. Spawn a fresh body at SPAWN so the sim is never empty.
-    if (!sim.all().some((e) => e.kind.id === 'player')) {
-      const p = sim.spawn(SPAWN, human, { yaw: -Math.PI / 2, kindId: 'player', baseController: new IdleController() });
-      sim.setViewed(p.id);
-    }
-    // The home body idles when left (not the human it was restored with); derive home/ghost from
-    // the restored entities, and spawn the single ghost only if none was restored (it is a normal
-    // entity and restores like any other — never spawn a second one).
-    const body = sim.entities.get(meta.viewedEntityId);
-    if (body && body.kind.id === 'player') body.baseController = new IdleController();
-    sim.homeId = sim.all().find((e) => e.kind.id === 'player')?.id ?? 0;
-    sim.ghostId = sim.all().find((e) => e.kind.id === 'spectator')?.id ?? 0;
-    if (sim.ghostId === 0) {
-      const v = sim.viewed() ?? sim.all()[0];
-      if (v) sim.ghostId = sim.spawn({ x: v.pos.x, y: v.pos.y + 4, z: v.pos.z }, new IdleController(), { kindId: 'spectator', baseController: new IdleController() }).id;
-    }
-    if (meta.simPrng !== undefined) sim.rng.restore(meta.simPrng);
-    if (meta.hotbar?.slots?.length === 9) {
-      for (let i = 0; i < 9; i++) hotbar.setSlot(i, meta.hotbar.slots[i]); // fires onSlotChange → icons refresh
-      hotbar.select(meta.hotbar.selected ?? 0);
-    }
-  } else {
-    // Fresh world: the body runs the human controller but idles when left (baseController), and
-    // the single spectator ghost is spawned (it restores like any entity on a later save).
-    const p = sim.spawn(SPAWN, human, { yaw: -Math.PI / 2, kindId: 'player', baseController: new IdleController() }); // face +x (east), at the sea
-    sim.setViewed(p.id);
-    sim.homeId = p.id;
-    sim.ghostId = sim.spawn({ x: SPAWN.x, y: SPAWN.y + 4, z: SPAWN.z }, new IdleController(), { kindId: 'spectator', baseController: new IdleController() }).id;
-    hotbar.select(PLACEABLE.indexOf(Block.Planks)); // default: planks, as T8's selectedBlock was
-  }
+  await initializeSinglePlayer({
+    world, sim, water: waterSim, clock: worldTime, human, hotbar,
+    persist, seed: TERRAIN_SEED, chunkReady,
+  }, meta);
   // The human controller's look is the source of truth (stepEntity adopts it each tick): sync it
   // to the entity's current look so the first tick does not clobber the spawn/restore facing.
   { const ve = sim.viewed(); if (ve) human.setLook(ve.yaw, ve.pitch); }

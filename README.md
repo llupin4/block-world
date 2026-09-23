@@ -171,12 +171,13 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for readability and formatting convention
 src/
   main.ts            boot, scene setup, input, render loop, lobby/debug entry points
   block-atlas.ts     deterministic block textures shared by rendering and inventory icons
-  startup/          URL options and loopback session assembly
+  startup/          URL options, multiplayer sessions, saved-world and replay restoration
   ui/
     hotbar.ts         inventory state, independent of the browser
     inventory-view.ts hotbar icons, palette rows, and selection highlighting
     game-menus.ts     menu assembly and overlay coordination
     multiplayer-menu.ts host/join form behavior
+    lobby-view.ts    room code, peer list, and leave/copy controls
     replay-list.ts    recordings list rendering and navigation
     overlays.ts       exclusive panel state and pointer-lock transitions
   world.ts           chunk storage + block get/set

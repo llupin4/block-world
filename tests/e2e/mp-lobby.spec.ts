@@ -6,6 +6,13 @@ import { test, expect, type Page } from '@playwright/test';
 
 const BASE = 'http://localhost:4173/';
 
+test('lobby renders a URL-provided room code as text', async ({ page }) => {
+  const code = '<b>room</b>';
+  await page.goto(`${BASE}?join=${encodeURIComponent(code)}`);
+  await expect(page.locator('#lobby-code')).toHaveText(code);
+  await expect(page.locator('#lobby-code b')).toHaveCount(0);
+});
+
 // Pick only the serializable fields (the __lobby object carries function properties).
 const lobby = (page: Page) =>
   page.evaluate(() => {
