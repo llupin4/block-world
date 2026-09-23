@@ -13,4 +13,8 @@ test('a saved recording boots through replay restoration', async ({ page }) => {
   await expect(page.locator('#scrub-label')).toContainText('replay');
   await expect(page.getByRole('heading', { name: 'Boot failed' })).toHaveCount(0);
   await expect(page.locator('#scrub-quit')).toBeVisible();
+  await page.locator('#scrub-quit').click();
+  await expect(page).not.toHaveURL(/replay=/);
+  await expect(page.locator('#hotbar')).toBeVisible();
+  await expect(page.locator('#scrub')).toBeHidden();
 });

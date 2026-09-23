@@ -7,17 +7,19 @@ import * as streaming from './streaming';
 import { ViewRadiusGovernor, targetChunks } from './view-radius';
 import { Hotbar } from './ui/hotbar';
 import { InventoryView } from './ui/inventory-view';
+import { Hud } from './ui/hud';
 import { createGameMenus } from './ui/game-menus';
 import { meshChunk, meshChunkRange, probeMeshChunk, type ChunkMesh, type LightSampler } from './chunk-mesher';
 import { SliceScheduler, decideBands, PROBE_VERTS, SLICE_COUNT } from './mesh-slices';
 import { ProfRig, meshVerts, PROF_WORST_KEY } from './prof-rig';
 import { ChunkRenderer } from './rendering/chunk-renderer';
+import { ChunkMaterials } from './rendering/chunk-materials';
 import { Sim, HumanController, eyeOf, lookDir, breakRayTarget, possessToggle, possessableCandidates, type ApplyHooks, type Controller, type EntityRecord } from './entity';
 import { raycastVoxel, pickEntity, REACH, type RayHit } from './raycast';
 import { spawnDeer } from './spawn';
 import { EntityRenderer } from './rendering/entity-renderer';
 import { WaterSim } from './water';
-import { WorldTime, formatClock, tickCrossed } from './time';
+import { WorldTime, tickCrossed } from './time';
 import { sampleSky, createSky } from './sky';
 import { createClouds } from './clouds';
 import { LIGHT_AMBIENT, LIGHT_TICK_BUDGET } from './light';
@@ -82,39 +84,7 @@ onResize();
 
 const { texture: atlas, iconUrl: atlasURL } = createBlockAtlas(document.createElement('canvas'));
 
-// Face shading, ambient occlusion, and lighting are baked into vertex attributes.
-const matOpaque = new THREE.MeshBasicMaterial({ map: atlas, vertexColors: true });
-const matTrans = new THREE.MeshBasicMaterial({
-  map: atlas,
-  vertexColors: true,
-  transparent: true,
-  opacity: 0.85,
-  depthWrite: false,
-  side: THREE.DoubleSide, // lets water be seen from under-side/side as well
-});
-
-// === per-vertex light (PROJECT.md §18) ===
-// aLight = (blight, skylight) 0..1 baked per corner by the mesher. uDayness scales the
-// sky component per frame (day/night fades in O(1) — no re-baking, no brightness
-// wavefront at dusk); uAmbient is the unlit floor so deep night is dark but readable.
-const daynessUniforms: { value: number }[] = [];
-function addLightShader(mat: THREE.MeshBasicMaterial): void {
-  const uDay = { value: 1.0 };
-  const uAmb = { value: LIGHT_AMBIENT };
-  mat.onBeforeCompile = (shader) => {
-    shader.uniforms.uDayness = uDay;
-    shader.uniforms.uAmbient = uAmb;
-    shader.vertexShader = shader.vertexShader
-      .replace('#include <common>', '#include <common>\nattribute vec2 aLight;\nvarying vec2 vLight;')
-      .replace('#include <begin_vertex>', '#include <begin_vertex>\n\tvLight = aLight;');
-    shader.fragmentShader = shader.fragmentShader
-      .replace('#include <common>', '#include <common>\nuniform float uDayness;\nuniform float uAmbient;\nvarying vec2 vLight;\n')
-      .replace('#include <color_fragment>', '// per-vertex light: sky component fades with dayness; block light never does\nfloat bwLight = clamp(max(vLight.x, vLight.y * uDayness), 0.0, 1.0);\ndiffuseColor.rgb *= uAmbient + (1.0 - uAmbient) * bwLight;\n#include <color_fragment>');
-  };
-  daynessUniforms.push(uDay);
-}
-addLightShader(matOpaque);
-addLightShader(matTrans);
+const chunkMaterials = new ChunkMaterials(atlas);
 
 // === sky ===
 const startup = parseStartupOptions(location.search);
@@ -126,20 +96,6 @@ const APP_ID = 'block-world'; // the trystero namespace (a shared constant both 
 let worldTime = new WorldTime(startPhase); // let: the B1 boot reassigns it to the session's clock
 const sky = createSky(scene, FOG_AIR, FOG_WATER, BG_WATER);
 const clouds = createClouds(scene);
-const clockEl = document.getElementById('clock')!;
-let clockLabel = '';
-const scrubEl = document.getElementById('scrub')!; // phase 3: the recording/playback scrub HUD (ADR 0017)
-const scrubLabelEl = document.getElementById('scrub-label')!; // the scrub label (recording… / replay t…)
-const scrubQuitEl = document.getElementById('scrub-quit')!; // the "quit replay" button (playback only)
-
-// Quit a replay: reload the page WITHOUT the ?replay param, which boots the normal world from the
-// real save (the replay is read-only, so the real save is untouched — see the playback persist guards).
-scrubQuitEl.addEventListener('click', () => {
-  const url = new URL(location.href);
-  url.searchParams.delete('replay');
-  location.href = url.toString();
-});
-
 // === world-state ===
 
 let world = new World(); // let: the B1 boot reassigns it to the session's world
@@ -356,29 +312,10 @@ void persist.boot().then((meta) => {
 });
 
 const entityRenderer = new EntityRenderer(scene);
-const kindEl = document.getElementById('kind')!;
-
-// The HUD kind label + hotbar visibility: show what you are viewing, and hide the hotbar when
-// the viewed kind can't edit (a deer / the ghost can't place blocks).
-function syncHud(): void {
-  const ve = sim.viewed();
-  kindEl.textContent = ve ? `viewing: ${ve.kind.id}` : '';
-  inventory.setVisible(Boolean(ve?.kind.canEdit));
-  // === replay scrub HUD (phase 3, ADR 0017) ===
-  if (recording) {
-    scrubEl.classList.remove('hidden');
-    scrubLabelEl.textContent = '● recording… (R to stop)';
-    scrubQuitEl.classList.add('hidden');
-  } else if (playback) {
-    scrubEl.classList.remove('hidden');
-    scrubLabelEl.textContent = `replay ${playback.paused ? '⏸ paused' : '▶ playing'}   t ${worldTime.tick} / ${playback.replay.endTick}`;
-    scrubQuitEl.classList.remove('hidden'); // the "quit replay" button (reload without ?replay)
-  } else scrubEl.classList.add('hidden');
-}
 
 // === chunks-meshing ===
 
-const chunkRenderer = new ChunkRenderer(scene, matOpaque, matTrans);
+const chunkRenderer = new ChunkRenderer(scene, chunkMaterials.opaque, chunkMaterials.transparent);
 
 // Budgeted re-mesh of the light/water TOUCHED chunks. A cave's light convergence marks many
 // chunks in one frame (up to ~7+); re-meshing all of them is a ~20ms spike (a re-mesh is a full
@@ -690,6 +627,15 @@ const inventory = new InventoryView(
   atlasURL,
 );
 
+const hud = new Hud(document, {
+  setInventoryVisible: (visible) => inventory.setVisible(visible),
+  quitReplay: () => {
+    const url = new URL(location.href);
+    url.searchParams.delete('replay');
+    location.href = url.toString();
+  },
+});
+
 const menus = createGameMenus({
   document,
   lockPointer() {
@@ -848,8 +794,7 @@ function syncWaterFx(): void {
 let wireframeOn = false;
 function setWireframe(on: boolean): void {
   wireframeOn = on;
-  matOpaque.wireframe = on;
-  matTrans.wireframe = on;
+  chunkMaterials.setWireframe(on);
 }
 
 // === loop ===
@@ -996,19 +941,23 @@ function frame(now: number): void {
   syncCamera();
   updateHitbox();
   entityRenderer.update(sim.all(), sim.viewedId, dt);
-  syncHud(); // the "viewing: <kind>" label + hotbar visibility
+  const viewed = sim.viewed();
+  hud.update({
+    viewedKind: viewed?.kind.id ?? null,
+    canEdit: Boolean(viewed?.kind.canEdit),
+    recording,
+    playback: playback ? { paused: playback.paused, endTick: playback.replay.endTick } : null,
+    tick: worldTime.tick,
+    day: worldTime.day,
+    hour: worldTime.hour,
+  });
   syncWaterFx();
   clouds.setVisible(waterFx === 'air');
   const skySample = sampleSky(worldTime.dayPhase);
   sky.apply(skySample, waterFx, camera);
-  for (const u of daynessUniforms) u.value = skySample.dayness;
+  chunkMaterials.setDayness(skySample.dayness);
   entityRenderer.setBrightness(LIGHT_AMBIENT + (1 - LIGHT_AMBIENT) * skySample.dayness);
   clouds.update(camera.position.x, camera.position.z, camera.position.y, worldTime.time, skySample.worldDim);
-  const label = formatClock(worldTime.day, worldTime.hour);
-  if (label !== clockLabel) {
-    clockLabel = label;
-    clockEl.textContent = label;
-  }
   if (!profNoRender) renderer.render(scene, camera);
   if (profRig) {
     const rep = profRig.noteFrame(performance.now() - profT0, profDrainMs);
