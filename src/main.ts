@@ -14,6 +14,7 @@ import { SliceScheduler, decideBands, PROBE_VERTS, SLICE_COUNT } from './mesh-sl
 import { ProfRig, meshVerts, PROF_WORST_KEY } from './prof-rig';
 import { ChunkRenderer } from './rendering/chunk-renderer';
 import { ChunkMaterials } from './rendering/chunk-materials';
+import { CameraView, AIR_FOV } from './rendering/camera-view';
 import { Sim, HumanController, eyeOf, lookDir, breakRayTarget, possessToggle, possessableCandidates, type ApplyHooks, type Controller, type EntityRecord } from './entity';
 import { raycastVoxel, pickEntity, REACH, type RayHit } from './raycast';
 import { spawnDeer } from './spawn';
@@ -70,9 +71,8 @@ const BG_WATER = new THREE.Color(0x0a2a55);
 const FOG_AIR = new THREE.FogExp2(0xcfe8ff, 0.004);
 const FOG_WATER = new THREE.FogExp2(0x0a2a55, 0.35);
 renderer.setClearColor(0x101a33); // fallback clear (night horizon): the sky dome covers every pixel anyway
-const camera = new THREE.PerspectiveCamera(70, 1, 0.1, 512);
-const FOV_AIR = 70; // must equal the perspective camera fov above
-const FOV_WATER = 62;
+const camera = new THREE.PerspectiveCamera(AIR_FOV, 1, 0.1, 512);
+const cameraView = new CameraView(camera);
 
 function onResize() {
   camera.aspect = window.innerWidth / window.innerHeight;
@@ -375,31 +375,16 @@ function removeChunkMesh(cx: number, cy: number, cz: number): void {
 
 // === camera ===
 
-// Camera = the VIEWED entity's eyes (feet + the kind's eye height). Rotation order YXZ: yaw
-// first, then pitch. (The legacy Player is gone from main.ts — the entity sim owns the player
-// now; the kind supplies the eye, so the old EYE constant is no longer needed here.)
-let profRig: ProfRig | null = null; // owned by startGame (it needs the restored viewed position)
+let profRig: ProfRig | null = null;
 let profDrainMs = 0;
-camera.rotation.order = 'YXZ';
 
 function syncCamera(): void {
-  const ve = sim.viewed();
-  if (!ve) return;
-  // The client's own body reads the display pose (a smoothed follower of the sim pose that eases
-  // out a large reconciliation snap). A possessed remote entity — or the host/single-player —
-  // reads the sim pose directly. The inline `instanceof` narrows `mpSession` (a
-  // `HostSession | ClientSession | null`) so `displayPos`/`entityId` typecheck. The look is
-  // client-owned (immediate) for a ClientSession.
-  const ownDisplay = mpSession instanceof ClientSession && ve.id === mpSession.entityId
-    ? mpSession.displayPos : null;
-  const p = ownDisplay ?? ve.pos;
-  camera.position.set(p.x, p.y + ve.kind.eye, p.z);
-  if (mpSession instanceof ClientSession) {
-    const look = human.getLook();
-    camera.rotation.set(look.pitch, look.yaw, 0);
-  } else {
-    camera.rotation.set(ve.pitch, ve.yaw, 0);
-  }
+  const client = mpSession instanceof ClientSession ? {
+    entityId: mpSession.entityId,
+    displayPosition: mpSession.displayPos,
+    look: human.getLook(),
+  } : null;
+  cameraView.syncPose(sim.viewed(), client);
 }
 
 // ?dbg dev-only: exposes the render triple for headless pixel verification (readPixels
@@ -769,22 +754,6 @@ document.addEventListener('visibilitychange', () => { if (document.visibilitySta
 window.addEventListener('pagehide', () => saveAndFlush());
 setInterval(() => saveAndFlush(), 5000); // best-effort periodic save: the crash window is ~5 s
 
-// === water-fx ===
-
-// T12: when the viewed entity's head voxel is water the whole scene swaps to the water mood —
-// the FOV squeeze here; the time-driven sky (sky.apply) paints whichever
-// background/fog is active, in both moods. Driven by headInWater
-// (stepEntity samples it each physics step); called per frame below.
-let waterFx: 'air' | 'water' = 'air';
-function syncWaterFx(): void {
-  const ve = sim.viewed();
-  const m: 'air' | 'water' = ve?.headInWater ? 'water' : 'air';
-  if (m === waterFx) return; // stable: one swap per (de)submersion, not per frame
-  waterFx = m;
-  camera.fov = m === 'water' ? FOV_WATER : FOV_AIR;
-  camera.updateProjectionMatrix(); // a fov change only reaches the GPU via this call
-}
-
 // === debug ===
 
 // PROJECT.md §14 trap #1: chunk-boundary bugs. A global wireframe pass makes seams,
@@ -951,10 +920,10 @@ function frame(now: number): void {
     day: worldTime.day,
     hour: worldTime.hour,
   });
-  syncWaterFx();
-  clouds.setVisible(waterFx === 'air');
+  cameraView.syncWater(Boolean(sim.viewed()?.headInWater));
+  clouds.setVisible(cameraView.mood === 'air');
   const skySample = sampleSky(worldTime.dayPhase);
-  sky.apply(skySample, waterFx, camera);
+  sky.apply(skySample, cameraView.mood, camera);
   chunkMaterials.setDayness(skySample.dayness);
   entityRenderer.setBrightness(LIGHT_AMBIENT + (1 - LIGHT_AMBIENT) * skySample.dayness);
   clouds.update(camera.position.x, camera.position.z, camera.position.y, worldTime.time, skySample.worldDim);
