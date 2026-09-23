@@ -174,6 +174,7 @@ src/
   startup/          URL options, multiplayer sessions, saved-world and replay restoration
   simulation/       fixed-step frame timing, multiplayer tick order, replay progression
   input/            keyboard/mouse controls, pointer lock, block and possession targeting
+  diagnostics/      multiplayer smoke-test actions and browser reports
   rendering/        camera/water view, target outline, chunk remeshing, entity rigs and name tags
   ui/
     hotbar.ts         inventory state, independent of the browser

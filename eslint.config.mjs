@@ -12,6 +12,7 @@ export const complexityFiles = [
   'src/streaming/**/*.ts',
   'src/persistence/**/*.ts',
   'src/input/**/*.ts',
+  'src/diagnostics/**/*.ts',
 ];
 
 export default [
