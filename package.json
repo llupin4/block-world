@@ -3,7 +3,11 @@
   "private": true,
   "version": "0.1.0",
   "type": "module",
+  "engines": {
+    "node": "^20.19.0 || ^22.13.0 || >=24"
+  },
   "scripts": {
+    "lint:complexity": "eslint src --max-warnings 0",
     "format": "prettier --write",
     "format:check": "prettier --check",
     "dev": "vite",
@@ -24,6 +28,9 @@
   "devDependencies": {
     "@playwright/test": "^1.63.0",
     "@types/three": "^0.166.0",
+    "@typescript-eslint/parser": "8.70.1",
+    "eslint": "10.11.0",
+    "eslint-plugin-sonarjs": "4.2.1",
     "fake-indexeddb": "^6.2.5",
     "prettier": "3.9.8",
     "typescript": "^5.5.4",

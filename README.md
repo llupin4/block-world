@@ -21,7 +21,7 @@ Preview here [https://llupin4.github.io/block-world/](https://llupin4.github.io/
 
 ## Requirements
 
-- Node.js 18+ and npm
+- Node.js 20.19+, 22.13+, or 24+ and npm (ESLint 10 requirement; CI uses Node 22)
 - A WebGL-capable browser (Chrome, Firefox, Edge, Safari)
 - Multiplayer (`?host` / `?join`) requires a **secure context**: `http://localhost` or `https`. A raw WSL/LAN IP over `http` does not expose `crypto.subtle`, which Trystero needs for room keys.
 
@@ -171,7 +171,9 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for readability and formatting convention
 src/
   main.ts            boot, scene setup, input, render loop, lobby/debug entry points
   block-atlas.ts     deterministic block textures shared by rendering and inventory icons
-  game-menus.ts      overlay DOM, multiplayer menu, and recordings list
+  game-menus.ts      menu assembly and overlay coordination
+  multiplayer-menu.ts host/join form behavior
+  replay-list.ts     recordings list rendering and navigation
   overlays.ts        exclusive panel state and pointer-lock transitions
   world.ts           chunk storage + block get/set
   terrain.ts         seeded terrain generation
