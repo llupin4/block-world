@@ -8,6 +8,7 @@ export const complexityFiles = [
   'src/startup/**/*.ts',
   'src/rendering/**/*.ts',
   'src/replay/**/*.ts',
+  'src/simulation/**/*.ts',
 ];
 
 export default [

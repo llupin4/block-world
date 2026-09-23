@@ -27,7 +27,8 @@ import { LIGHT_AMBIENT, LIGHT_TICK_BUDGET } from './light';
 import { LightClient } from './light-transport';
 import { Persistence, applyRecord, type WorldMeta, type PersistSource } from './persistence';
 import { IndexedDBChunkStore } from './idb-store';
-import { viewedAt, type Replay } from './replay';
+import type { Replay } from './replay';
+import { FrameStepper } from './simulation/frame-stepper';
 import { RecordingSession } from './replay/recording-session';
 import { LoopbackHub } from './net/transport';
 import { HostSession } from './net/host';
@@ -721,46 +722,24 @@ function setWireframe(on: boolean): void {
 
 // === loop ===
 
-const STEP = 1 / 60;
 const WATER_STRIDE = 30;  // substep ticks per water pulse (ADR 0011): 30 × (1/60 s) = 0.5 sim s — water takes one "tick" per pulse, so placement and drain visibly take time (was a floating-point dt accumulator that could miss the 0.5 s boundary by a frame; measured in the deterministic 10 s replay: 19 pulses instead of 20)
 const WATER_PULSE = 1000; // cell updates budgeted per pulse: big enough that a cut-off body's re-stabilization cascade (level wave + drain) finishes within a pulse or two, so a stopped flow settles in ~1 s instead of crawling for many seconds (and visibly re-expanding before it drains); smaller pulses made that crawl read as "flow that keeps moving"
 
 const governor = new ViewRadiusGovernor(); // adaptive single-player view radius (spec 2026-09-17)
 
-let last = performance.now();
-let acc = 0;
+const frameStepper = new FrameStepper(performance.now());
 
 function frame(now: number): void {
   const frameT0 = performance.now(); // the view-radius governor's load signal (whole-frame main-thread work)
   const profT0 = profMode ? performance.now() : 0; // the rig measures the whole frame's main-thread work
-  let dt = (now - last) / 1000;
-  last = now;
-  if (dt > 0.1) dt = 0.1; // clamp after tab-switch/hitch
-  acc += dt;
-  const tickBefore = worldTime.tick; // ADR 0011: the water pulse strides the tick lattice; capture pre-substep tick for the frame-end crossing check
-  human.heldBlock = hotbar.block; // sync the held block for intents (per frame, before the substeps)
-  while (acc >= STEP) {
-    acc -= STEP;
-    if (playback && playback.paused) continue; // a paused replay holds the world (the substep is consumed but nothing advances)
-    if (mpSession) {
-      for (const c of mpClients) c.tick(worldTime.tick); // the clients send intents (?mp bots; lobby: the own body)
-      mpHub?.pump(worldTime.tick); // deliver the in-page loopback (a no-op for a real transport, mpHub null)
-      if (mpHost) { // a local authoritative host (?mp=host / ?mp=client headless host / ?host lobby)
-        mpHost.worldTime.tick = worldTime.tick; // sync the host's tick to the frame tick (a no-op in host mode, where the host's worldTime IS the page's; in client mode the headless host's own tick would otherwise stay 0 and its `state` ticks would collapse the client's pose rings)
-        mpHost.tick(worldTime.tick); // the authoritative host applies the intents + broadcasts state/time
-      }
-      worldTime.advanceTick(); // the frame loop owns the tick (the host/client sessions don't advance it)
-    } else {
-      sim.tick(STEP, worldTime.tick); // the single-player sim heartbeat: intent -> applyIntent -> stepEntity
-      worldTime.advance(STEP);
-    }
-    if (playback) {
-      // Follow the user's recorded perspective: switch the viewed entity as they possessed others
-      // during recording (viewedAt resolves the current tick's perspective).
-      sim.setViewed(viewedAt(playback.replay, worldTime.tick));
-      if (worldTime.tick >= playback.replay.endTick) playback.paused = true; // reached the end of the session
-    }
-  }
+  const tickBefore = worldTime.tick;
+  human.heldBlock = hotbar.block;
+  const dt = frameStepper.advance(now, {
+    sim,
+    clock: worldTime,
+    multiplayer: mpSession ? { clients: mpClients, hub: mpHub, host: mpHost } : null,
+    playback,
+  });
   if (mpSession) {
     // The session's per-substep streaming supersedes the single-player's tickStreaming; the frame
     // consumes the last substep's result (light load/unload + deferred first mesh) once per frame.
