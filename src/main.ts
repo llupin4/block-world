@@ -6,6 +6,7 @@ import { TERRAIN_SEED } from './terrain';
 import * as streaming from './streaming';
 import { StreamEffects } from './streaming/stream-effects';
 import { ViewRadiusGovernor, targetChunks } from './view-radius';
+import { KeyboardControls, installKeyboardControls } from './input/keyboard-controls';
 import { Hotbar } from './ui/hotbar';
 import { InventoryView } from './ui/inventory-view';
 import { Hud } from './ui/hud';
@@ -377,32 +378,6 @@ if (startup.debug) {
 const keys = new Set<string>(); // shared with the human controller (it reads these to build its intent)
 const human = new HumanController(keys, 0, 0); // the player's controller: hardware state -> one Intent per substep
 
-window.addEventListener('keydown', (e) => {
-  // Typing in a text input (the MP menu's name/code fields) must not drive the game: the letters
-  // would land in `keys` (the typed characters move the player) and fire the toggle keys (typing
-  // "m" in the name would close the very menu being typed in; digits would pick hotbar slots).
-  if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) return;
-  keys.add(e.code);
-  if (e.repeat) return;
-  // The MP menu is a menu, not a game state: while it is open (and focus has left the inputs)
-  // only the overlay keys switch overlays — movement/entity toggles stay inert.
-  if (menus.isOpen('multiplayer') && !(e.code === 'KeyE' || e.code === 'KeyH' || e.code === 'KeyM' || e.code === 'KeyR')) return;
-  if (e.code === 'KeyF') human.toggleFly(); // fly toggle (a one-tick edge the sim consumes)
-  if (e.code === 'KeyN') human.toggleNoclip(); // noclip toggle
-  if (e.code === 'KeyR') {
-    if (recording.active) { stopRecording(); menus.openReplays(); } // stop + auto-open the list (the new recording is there)
-    else menus.toggle('replays'); // open/close the recordings list
-  }
-  if (e.code === 'KeyE') menus.toggle('palette'); // creative palette: open (unlock) / close (re-lock)
-  if (e.code === 'KeyH') menus.toggle('help'); // help overlay: same open (unlock) / close (re-lock)
-  if (e.code === 'KeyM') menus.toggle('multiplayer'); // multiplayer menu: host / join (single-player screen only)
-  if (e.code === 'KeyC') setWireframe(!wireframeOn); // wireframe (PROJECT.md §14: chunk-edge bugs)
-  if (e.code === 'KeyP') onPossess(); // possess the targeted entity, or toggle body<->ghost
-  const d = e.code.startsWith('Digit') ? e.code.slice(5) : e.code.startsWith('Numpad') ? e.code.slice(6) : '';
-  if (d >= '1' && d <= '9') { const s = Number(d) - 1; hotbar.select(s); human.select(s); } // 1-9 / numpad 1-9
-});
-window.addEventListener('keyup', (e) => keys.delete(e.code));
-
 // Click the canvas: close any open overlay (palette/help), otherwise pointer-lock (WASD + mouse steer; ESC releases).
 renderer.domElement.addEventListener('click', () => {
   menus.close();
@@ -577,16 +552,13 @@ const menus = createGameMenus({
 
 // The default hotbar select happens in startGame (a restored meta takes the slots instead).
 
-// Wheel cycles the hotbar (down = next slot); while an overlay is open the wheel is left alone.
-window.addEventListener(
-  'wheel',
-  (e) => {
-    if (menus.isOpen('palette') || menus.isOpen('help') || menus.isOpen('replays')) return; // an open overlay owns the wheel (and the mouse is free)
-    hotbar.cycle(e.deltaY > 0 ? 1 : -1);
-    human.select(hotbar.selected); // reported for replay; unwired in phase 1
-  },
-  { passive: true },
-);
+installKeyboardControls(window, new KeyboardControls({
+  keys, human, hotbar, menus,
+  isRecording: () => recording.active,
+  stopRecording,
+  toggleWireframe: () => setWireframe(!wireframeOn),
+  possess: onPossess,
+}));
 
 // === streaming ===
 
