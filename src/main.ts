@@ -18,8 +18,9 @@ import { ProfRig, meshVerts, PROF_WORST_KEY } from './prof-rig';
 import { ChunkRenderer } from './rendering/chunk-renderer';
 import { ChunkMaterials } from './rendering/chunk-materials';
 import { CameraView, AIR_FOV } from './rendering/camera-view';
-import { Sim, HumanController, eyeOf, lookDir, breakRayTarget, possessToggle, possessableCandidates, type ApplyHooks, type Controller, type EntityRecord } from './entity';
-import { raycastVoxel, pickEntity, REACH, type RayHit } from './raycast';
+import { Sim, HumanController, type ApplyHooks, type Controller, type EntityRecord } from './entity';
+import { findBlockTarget, possessFromView } from './input/targeting';
+import { TargetOutline } from './rendering/target-outline';
 import { spawnDeer } from './spawn';
 import { EntityRenderer } from './rendering/entity-renderer';
 import { WaterSim } from './water';
@@ -381,15 +382,7 @@ const human = new HumanController(keys, 0, 0); // the player's controller: hardw
 
 // === actions ===
 
-// T8: crosshair break (LMB) / place (RMB); the placed block comes from the selected hotbar slot (T11).
-
-// Targeting wireframe: box edges, 1.002 so it never z-fights the target face.
-const hitbox = new THREE.LineSegments(
-  new THREE.EdgesGeometry(new THREE.BoxGeometry(1.002, 1.002, 1.002)),
-  new THREE.LineBasicMaterial({ color: 0xffffff }),
-);
-hitbox.visible = false;
-scene.add(hitbox);
+const targetOutline = new TargetOutline(scene);
 
 // Rebuild the edited cell's chunk, plus — when the cell sits on a chunk face — the
 // touched neighbor, so faces on the shared border are regenerated (setBlock only
@@ -412,44 +405,8 @@ function remeshAround(wx: number, wy: number, wz: number): void {
   for (const [nx, ny, nz] of touch) if (world.hasChunk(nx, ny, nz)) rebuildChunkMesh(nx, ny, nz);
 }
 
-// The crosshair break cast (LMB targeting): identical math to the old camera cast, but from
-// the viewed entity's eye + look direction. A placed spring stops the ray (breakRayTarget).
-function castBreakFromViewed(): RayHit | null {
-  const ve = sim.viewed();
-  if (!ve) return null;
-  return raycastVoxel(world, eyeOf(ve), lookDir(ve.yaw, ve.pitch), REACH, breakRayTarget(world, simHooks));
-}
-
-// Per-frame actions: re-target the wireframe from the just-synced camera (called after syncCamera).
-// Shows the BREAK target (same cast as LMB): a spring lights up where you can break it. A closer
-// entity shadows the voxel (pickEntity before the voxel, exactly as onPossess does).
-function updateHitbox(): void {
-  if (!pointerControls.locked) { hitbox.visible = false; return; }
-  const ve = sim.viewed();
-  if (!ve) { hitbox.visible = false; return; }
-  const ent = pickEntity(eyeOf(ve), lookDir(ve.yaw, ve.pitch), sim.all().filter((x) => x.id !== ve.id), REACH);
-  if (ent) { hitbox.visible = false; return; } // a closer entity shadows the voxel
-  const hit = castBreakFromViewed();
-  if (!hit) { hitbox.visible = false; return; }
-  hitbox.position.set(hit.x + 0.5, hit.y + 0.5, hit.z + 0.5);
-  hitbox.visible = true;
-}
-
-// Possession (P): if the crosshair is on another entity within reach, drive it; otherwise toggle
-// between the home body and the single spectator ghost.
 function onPossess(): void {
-  const ve = sim.viewed();
-  if (!ve) return;
-  // Possession candidates are owned by the entity layer (spec 2026-09-08): no ghost, no other
-  // player entities, and no entity already driven by this page's human controller.
-  const candidates = possessableCandidates(sim, human);
-  const hit = pickEntity(eyeOf(ve), lookDir(ve.yaw, ve.pitch), candidates, REACH);
-  // P exits possession first when the human is already out of its home body; otherwise it
-  // possesses the targeted entity (or toggles body<->ghost when nothing is targeted).
-  possessToggle(sim, human, hit ? candidates[hit.index].id : null);
-  // Log the new perspective for replay: the user's view switches to whatever is now viewed, so the
-  // playback follows what they actually saw (a possessed deer, not always the player body).
-  recording.recordViewed();
+  if (possessFromView(sim, human)) recording.recordViewed();
 }
 
 function startRecording(): void {
@@ -521,7 +478,7 @@ const pointerControls = new PointerControls({
   keys,
   human,
   closeMenus: () => menus.close(),
-  onUnlock: () => { hitbox.visible = false; },
+  onUnlock: () => targetOutline.update(null),
 });
 
 // === streaming ===
@@ -641,7 +598,7 @@ function frame(now: number): void {
   profDrainMs = profMode ? performance.now() - profDrainT0 : 0;
   if (mpSession instanceof ClientSession) mpSession.syncPoses(); // interpolate the entities' poses at renderTick (the own body's position)
   syncCamera();
-  updateHitbox();
+  targetOutline.update(pointerControls.locked ? findBlockTarget(world, sim, simHooks) : null);
   entityRenderer.update(sim.all(), sim.viewedId, dt);
   const viewed = sim.viewed();
   hud.update({
