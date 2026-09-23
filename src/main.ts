@@ -6,6 +6,7 @@ import { TERRAIN_SEED, TerrainGen, generateChunkTerrain } from './terrain';
 import * as streaming from './streaming';
 import { ViewRadiusGovernor, targetChunks } from './view-radius';
 import { Hotbar } from './ui';
+import { createGameMenus } from './game-menus';
 import { meshChunk, meshChunkRange, probeMeshChunk, type ChunkMesh, type LightSampler } from './chunk-mesher';
 import { SliceScheduler, decideBands, PROBE_VERTS, SLICE_COUNT } from './mesh-slices';
 import { ProfRig, meshVerts, PROF_WORST_KEY } from './prof-rig';
@@ -803,16 +804,16 @@ window.addEventListener('keydown', (e) => {
   if (e.repeat) return;
   // The MP menu is a menu, not a game state: while it is open (and focus has left the inputs)
   // only the overlay keys switch overlays — movement/entity toggles stay inert.
-  if (mpMenuOpen && !(e.code === 'KeyE' || e.code === 'KeyH' || e.code === 'KeyM' || e.code === 'KeyR')) return;
+  if (menus.isOpen('multiplayer') && !(e.code === 'KeyE' || e.code === 'KeyH' || e.code === 'KeyM' || e.code === 'KeyR')) return;
   if (e.code === 'KeyF') human.toggleFly(); // fly toggle (a one-tick edge the sim consumes)
   if (e.code === 'KeyN') human.toggleNoclip(); // noclip toggle
   if (e.code === 'KeyR') {
-    if (recording) { stopRecording(); openReplays(); } // stop + auto-open the list (the new recording is there)
-    else toggleReplays(); // open/close the recordings list
+    if (recording) { stopRecording(); menus.openReplays(); } // stop + auto-open the list (the new recording is there)
+    else menus.toggle('replays'); // open/close the recordings list
   }
-  if (e.code === 'KeyE') togglePalette(); // creative palette: open (unlock) / close (re-lock)
-  if (e.code === 'KeyH') toggleHelp(); // help overlay: same open (unlock) / close (re-lock)
-  if (e.code === 'KeyM') toggleMpMenu(); // multiplayer menu: host / join (single-player screen only)
+  if (e.code === 'KeyE') menus.toggle('palette'); // creative palette: open (unlock) / close (re-lock)
+  if (e.code === 'KeyH') menus.toggle('help'); // help overlay: same open (unlock) / close (re-lock)
+  if (e.code === 'KeyM') menus.toggle('multiplayer'); // multiplayer menu: host / join (single-player screen only)
   if (e.code === 'KeyC') setWireframe(!wireframeOn); // wireframe (PROJECT.md §14: chunk-edge bugs)
   if (e.code === 'KeyP') onPossess(); // possess the targeted entity, or toggle body<->ghost
   const d = e.code.startsWith('Digit') ? e.code.slice(5) : e.code.startsWith('Numpad') ? e.code.slice(6) : '';
@@ -822,11 +823,7 @@ window.addEventListener('keyup', (e) => keys.delete(e.code));
 
 // Click the canvas: close any open overlay (palette/help), otherwise pointer-lock (WASD + mouse steer; ESC releases).
 renderer.domElement.addEventListener('click', () => {
-  if (paletteOpen) closePalette();
-  else if (helpOpen) closeHelp();
-  else if (replaysOpen) closeReplays();
-  else if (mpMenuOpen) closeMpMenu();
-  else lockPointer();
+  menus.close();
 });
 
 const crosshair = document.getElementById('crosshair')!;
@@ -1061,220 +1058,22 @@ hotbar.onSlotChange = (i) => {
   refreshPaletteSel(hotbar.block); // hotbar.block is the selected slot's block — same source both callbacks
 };
 
-let paletteOpen = false;
-let helpOpen = false;
-let replaysOpen = false;
-let mpMenuOpen = false;
-const helpEl = document.getElementById('help')!;
-const helpHintEl = document.getElementById('help-hint')!;
-const replaysEl = document.getElementById('replays')!;
-const replaysListEl = document.getElementById('replays-list')!;
-const replaysRecordEl = document.getElementById('replays-record')!;
-const mpMenuEl = document.getElementById('mp-menu')!;
-const mpNameEl = document.getElementById('mp-name') as HTMLInputElement;
-const mpCodeEl = document.getElementById('mp-code') as HTMLInputElement;
-const mpErrorEl = document.getElementById('mp-error')!;
-
-// Browsers enforce a ~1 s re-lock cooldown after ESC; a rejected request is benign
-// (the cooldown is the only realistic failure), so swallow it rather than throw.
-function lockPointer(): void {
-  const r = renderer.domElement.requestPointerLock() as unknown;
-  if (r instanceof Promise) r.catch(() => {}); // Safari rejects without a user gesture
-}
-
-// Invariant: at most one overlay (palette/help/replays/mp-menu) is open. The badge advertises help and is
-// visible only when nothing is open.
-function syncOverlays(): void {
-  helpHintEl.classList.toggle('hidden', paletteOpen || helpOpen || replaysOpen || mpMenuOpen);
-}
-
-function closePalette(): void {
-  paletteEl.classList.add('hidden');
-  paletteOpen = false;
-  syncOverlays();
-  lockPointer();
-}
-
-// Opening an overlay closes the other WITHOUT re-locking, so a swap never flickers
-// (the single exitPointerLock below is the only lock call of the toggle).
-function openPalette(): void {
-  if (helpOpen) {
-    helpOpen = false;
-    helpEl.classList.add('hidden');
-  }
-  if (replaysOpen) {
-    replaysOpen = false;
-    replaysEl.classList.add('hidden');
-  }
-  if (mpMenuOpen) {
-    mpMenuOpen = false;
-    mpMenuEl.classList.add('hidden');
-  }
-  paletteOpen = true;
-  paletteEl.classList.remove('hidden');
-  syncOverlays();
-  document.exitPointerLock(); // crosshair + hitbox hide via the existing pointerlockchange handler
-}
-
-function closeHelp(): void {
-  helpEl.classList.add('hidden');
-  helpOpen = false;
-  syncOverlays();
-  lockPointer();
-}
-
-function openHelp(): void {
-  if (paletteOpen) {
-    paletteOpen = false;
-    paletteEl.classList.add('hidden');
-  }
-  if (replaysOpen) {
-    replaysOpen = false;
-    replaysEl.classList.add('hidden');
-  }
-  if (mpMenuOpen) {
-    mpMenuOpen = false;
-    mpMenuEl.classList.add('hidden');
-  }
-  helpOpen = true;
-  helpEl.classList.remove('hidden');
-  syncOverlays();
-  document.exitPointerLock();
-}
-
-function togglePalette(): void {
-  if (paletteOpen) closePalette();
-  else openPalette();
-}
-
-function toggleHelp(): void {
-  if (helpOpen) closeHelp();
-  else openHelp();
-}
-
-function closeMpMenu(): void {
-  mpMenuEl.classList.add('hidden');
-  mpMenuOpen = false;
-  syncOverlays();
-  lockPointer();
-}
-
-function openMpMenu(): void {
-  if (paletteOpen) { paletteOpen = false; paletteEl.classList.add('hidden'); }
-  if (helpOpen) { helpOpen = false; helpEl.classList.add('hidden'); }
-  if (replaysOpen) { replaysOpen = false; replaysEl.classList.add('hidden'); }
-  mpMenuOpen = true;
-  mpMenuEl.classList.remove('hidden');
-  mpNameEl.value = localStorage.getItem('bw.name') ?? ''; // remember the typed name across visits
-  mpErrorEl.classList.add('hidden');
-  syncOverlays();
-  document.exitPointerLock();
-  mpNameEl.focus();
-}
-
-// The M menu is a single-player-screen affordance: while a session (?mp / ?host / ?join) or a
-// replay is running the boot branch already ran — no-op.
-function toggleMpMenu(): void {
-  if (mpMenuOpen) { closeMpMenu(); return; }
-  if (mpSession || playback) return;
-  openMpMenu();
-}
-
-// Host/Join reload into ?host&name=… / ?join=<code>&name=… (the code is normalized to the code
-// alphabet's lowercase; the name goes in the URL — sanitizeName at boot handles blank → random).
-document.getElementById('mp-host')!.addEventListener('click', () => {
-  location.href = `?host&name=${encodeURIComponent(mpNameEl.value)}`;
+const menus = createGameMenus({
+  document,
+  lockPointer() {
+    // Browsers can reject re-locking during the cooldown after Escape.
+    const request = renderer.domElement.requestPointerLock() as unknown;
+    if (request instanceof Promise) request.catch(() => {});
+  },
+  unlockPointer: () => document.exitPointerLock(),
+  canOpenMultiplayer: () => !mpSession && !playback,
+  rememberedName: () => localStorage.getItem('bw.name') ?? '',
+  currentUrl: () => location.href,
+  navigate: (url) => { location.href = url; },
+  listReplays: () => persist.listReplays(),
+  startRecording,
+  stepSeconds: 1 / 60,
 });
-document.getElementById('mp-join')!.addEventListener('click', () => {
-  const code = mpCodeEl.value.trim().toLowerCase();
-  if (code === '') { mpErrorEl.textContent = 'paste the room code the host shows'; mpErrorEl.classList.remove('hidden'); return; }
-  location.href = `?join=${encodeURIComponent(code)}&name=${encodeURIComponent(mpNameEl.value)}`;
-});
-
-// The recordings list (R): a centered panel of the saved recordings (newest first) + a
-// "record new" button. Opening it fetches the list from the replay store and closes the
-// other overlays. A row click reloads the page with ?replay=<key> (a full-page load of that session).
-function openReplays(): void {
-  if (paletteOpen) {
-    paletteOpen = false;
-    paletteEl.classList.add('hidden');
-  }
-  if (helpOpen) {
-    helpOpen = false;
-    helpEl.classList.add('hidden');
-  }
-  if (mpMenuOpen) {
-    mpMenuOpen = false;
-    mpMenuEl.classList.add('hidden');
-  }
-  replaysOpen = true;
-  replaysEl.classList.remove('hidden');
-  syncOverlays();
-  document.exitPointerLock();
-  refreshReplayList(); // (re)load the recordings (async; renders into the panel when resolved)
-}
-
-function closeReplays(): void {
-  replaysEl.classList.add('hidden');
-  replaysOpen = false;
-  syncOverlays();
-  lockPointer();
-}
-
-function toggleReplays(): void {
-  if (replaysOpen) closeReplays();
-  else openReplays();
-}
-
-// Fetch the saved recordings and render them (newest first). Called on open and after a save.
-function refreshReplayList(): void {
-  persist.listReplays().then((replays) => {
-    if (!replaysOpen) return; // closed while the fetch was in flight — don't render into a hidden panel
-    buildReplayList(replays);
-  });
-}
-
-// Render the recordings list: one row per recording (date, length, start tick). An empty store
-// shows a hint. Each row is a full-page load of its session (?replay=<key>).
-function buildReplayList(replays: Replay[]): void {
-  replaysListEl.replaceChildren();
-  if (replays.length === 0) {
-    const empty = document.createElement('div');
-    empty.className = 'empty';
-    empty.textContent = 'no recordings yet — press R, then record something';
-    replaysListEl.append(empty);
-    return;
-  }
-  const sorted = [...replays].sort((a, b) => (b.recordedAt ?? 0) - (a.recordedAt ?? 0)); // newest first
-  for (const r of sorted) {
-    const key = `${r.seed}:replay:${r.startTick}`;
-    const row = document.createElement('div');
-    row.className = 'row';
-    const when = document.createElement('span');
-    when.className = 'when';
-    when.textContent = r.recordedAt ? new Date(r.recordedAt).toLocaleString() : '—';
-    const len = document.createElement('span');
-    len.className = 'len';
-    len.textContent = `${((r.endTick - r.startTick) * STEP).toFixed(1)} s`;
-    const tick = document.createElement('span');
-    tick.className = 'tick';
-    tick.textContent = `#${r.startTick}`;
-    row.append(when, len, tick);
-    row.addEventListener('click', () => {
-      const url = new URL(location.href);
-      url.searchParams.set('replay', key);
-      location.href = url.toString(); // full-page load of the session
-    });
-    replaysListEl.append(row);
-  }
-}
-
-replaysRecordEl.addEventListener('click', () => {
-  startRecording(); // begin a recording (the list closes; the new recording appears on stop)
-  closeReplays();
-});
-
-helpHintEl.addEventListener('click', () => { if (!helpOpen) openHelp(); });
 
 // The default hotbar select happens in startGame (a restored meta takes the slots instead).
 
@@ -1282,7 +1081,7 @@ helpHintEl.addEventListener('click', () => { if (!helpOpen) openHelp(); });
 window.addEventListener(
   'wheel',
   (e) => {
-    if (paletteOpen || helpOpen || replaysOpen) return; // an open overlay owns the wheel (and the mouse is free)
+    if (menus.isOpen('palette') || menus.isOpen('help') || menus.isOpen('replays')) return; // an open overlay owns the wheel (and the mouse is free)
     hotbar.cycle(e.deltaY > 0 ? 1 : -1);
     human.select(hotbar.selected); // reported for replay; unwired in phase 1
   },

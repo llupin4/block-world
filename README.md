@@ -171,6 +171,8 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for readability and formatting convention
 src/
   main.ts            boot, scene setup, input, render loop, lobby/debug entry points
   block-atlas.ts     deterministic block textures shared by rendering and inventory icons
+  game-menus.ts      overlay DOM, multiplayer menu, and recordings list
+  overlays.ts        exclusive panel state and pointer-lock transitions
   world.ts           chunk storage + block get/set
   terrain.ts         seeded terrain generation
   blocks.ts          block registry (solid/transparent/face tiles)
