@@ -25,9 +25,10 @@ import { sampleSky, createSky } from './sky';
 import { createClouds } from './clouds';
 import { LIGHT_AMBIENT, LIGHT_TICK_BUDGET } from './light';
 import { LightClient } from './light-transport';
-import { Persistence, applyRecord, snapshotChunk, type WorldMeta, type PersistSource } from './persistence';
+import { Persistence, applyRecord, type WorldMeta, type PersistSource } from './persistence';
 import { IndexedDBChunkStore } from './idb-store';
-import { Recorder, viewedAt, type Replay, type ReplaySnapshot } from './replay';
+import { viewedAt, type Replay } from './replay';
+import { RecordingSession } from './replay/recording-session';
 import { LoopbackHub } from './net/transport';
 import { HostSession } from './net/host';
 import { ClientSession } from './net/client';
@@ -156,13 +157,7 @@ const noopPersist: PersistSource = {
   dropPersisted: () => undefined,
 };
 
-// === Replay recording + playback (phase 3, ADR 0017) ===
-// The record: the sim's intent/spawn/despawn hooks feed a Recorder (delta-coded), which ends in
-// a Replay (snapshot + intent log) saved to the `replays` IDB store under `seed:replay:startTick`.
-// The playback: a fresh world restored from the snapshot, driven tick-by-tick by a
-// ReplayController feeding recorded intents back into the sim (deterministic — no human input).
-let recorder: Recorder | null = null;
-let recording = false;
+const recording = new RecordingSession((key, replay) => persist.saveReplay(key, replay));
 let playback: { replay: Replay; paused: boolean } | null = null;
 let replayControllerFor: ((r: EntityRecord) => Controller) | null = null;
 // Cold-restore in-flight keys (ADR 0014): one fetchRecord per key at a time. streaming
@@ -411,7 +406,7 @@ window.addEventListener('keydown', (e) => {
   if (e.code === 'KeyF') human.toggleFly(); // fly toggle (a one-tick edge the sim consumes)
   if (e.code === 'KeyN') human.toggleNoclip(); // noclip toggle
   if (e.code === 'KeyR') {
-    if (recording) { stopRecording(); menus.openReplays(); } // stop + auto-open the list (the new recording is there)
+    if (recording.active) { stopRecording(); menus.openReplays(); } // stop + auto-open the list (the new recording is there)
     else menus.toggle('replays'); // open/close the recordings list
   }
   if (e.code === 'KeyE') menus.toggle('palette'); // creative palette: open (unlock) / close (re-lock)
@@ -541,61 +536,19 @@ function onPossess(): void {
   possessToggle(sim, human, hit ? candidates[hit.index].id : null);
   // Log the new perspective for replay: the user's view switches to whatever is now viewed, so the
   // playback follows what they actually saw (a possessed deer, not always the player body).
-  if (recording && recorder) recorder.onViewed(worldTime.tick, sim.viewedId);
+  recording.recordViewed();
 }
-
-// === replay recording (phase 3, ADR 0017) ===
-// R toggles a recording: the sim's intent/spawn/despawn hooks feed a delta-coded Recorder, and on
-// stop the current world is snapshotted (chunk arrays + meta) into a Replay saved to the `replays`
-// IDB store under `seed:replay:startTick`. The snapshot is the initial state; the intent log is
-// the delta (deterministic — replaying it into a restored snapshot reproduces the session).
-function snapshotState(): ReplaySnapshot {
-  return {
-    chunks: [...world.allChunks()].map((c) => snapshotChunk(c)),
-    meta: {
-      v: 2, seed: TERRAIN_SEED, entities: sim.all().map((e) => sim.toRecord(e)), viewedEntityId: sim.viewedId,
-      time: worldTime.snapshot(),
-      hotbar: { slots: [...hotbar.slots], selected: hotbar.selected },
-      simPrng: sim.rng.state(),
-    },
-  };
-}
-
-let recordStartTick = 0;
-let recordStartPrng = 0;
-let recordStartSnapshot: ReplaySnapshot | null = null;
 
 function startRecording(): void {
-  // The snapshot is the INITIAL state (record start) — the replay restores it, then plays back
-  // the intent log (record start -> stop) deterministically. Capture the tick + PRNG + snapshot NOW.
-  recordStartTick = worldTime.tick;
-  recordStartPrng = sim.rng.state();
-  recordStartSnapshot = snapshotState();
-  const rec = new Recorder(recordStartTick);
-  rec.attach(sim); // wire the sim's onIntent/onSpawn/onDespawn to the Recorder
-  recorder = rec;
-  recording = true;
-  playback = null; // a recording is a live session, not a playback
-  console.log(`[replay] recording from tick ${recordStartTick} (R to stop)`);
+  recording.start({ seed: TERRAIN_SEED, world, sim, clock: worldTime, hotbar });
+  playback = null;
+  console.log(`[replay] recording from tick ${worldTime.tick} (R to stop)`);
 }
 
 function stopRecording(): void {
-  if (!recorder || !recording || !recordStartSnapshot) return;
-  const replay: Replay = {
-    seed: TERRAIN_SEED,
-    startTick: recordStartTick,
-    endTick: worldTime.tick,
-    simPrng: recordStartPrng, // the PRNG at record start (restored before replaying)
-    events: recorder.events,
-    intents: recorder.intents, // delta-coded: an entity with no entry at a tick repeats its previous intent
-    viewed: recorder.viewed,   // the user's perspective over time (possession changes)
-    recordedAt: Date.now(),    // wall-clock save time (for the recordings list)
-    snapshot: recordStartSnapshot, // the initial state (record start)
-  };
-  const key = `${TERRAIN_SEED}:replay:${replay.startTick}`;
-  persist.saveReplay(key, replay);
-  sim.onIntent = sim.onSpawn = sim.onDespawn = undefined; // detach the Recorder
-  recorder = null; recording = false; recordStartSnapshot = null;
+  const saved = recording.stop();
+  if (!saved) return;
+  const { key, replay } = saved;
   console.log(`[replay] saved ${key} — ${replay.intents.length} intents, ${replay.events.length} events (replay with ?replay=${key})`);
 }
 
@@ -914,7 +867,7 @@ function frame(now: number): void {
   hud.update({
     viewedKind: viewed?.kind.id ?? null,
     canEdit: Boolean(viewed?.kind.canEdit),
-    recording,
+    recording: recording.active,
     playback: playback ? { paused: playback.paused, endTick: playback.replay.endTick } : null,
     tick: worldTime.tick,
     day: worldTime.day,

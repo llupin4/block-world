@@ -198,6 +198,7 @@ src/
   light.ts / light-transport.ts / light-worker.ts  dynamic lighting pipeline
   persistence.ts / idb-store.ts  IndexedDB chunk persistence
   replay.ts          recording + replay controllers
+  replay/            recording lifecycle, initial snapshots, and saving
   net/               multiplayer transport, HostSession, ClientSession, Trystero lobby
 index.html           app shell + DOM overlays
 PROJECT.md           the original POC design doc (stack, algorithms, known traps)
