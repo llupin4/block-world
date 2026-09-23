@@ -1,4 +1,5 @@
 import * as THREE from 'three';
+import { createBlockAtlas } from './block-atlas';
 import { Block, BLOCKS, isOpaque, PLACEABLE, iconPosition, torchMeta, doorMeta, doorOpen, doorAxis, doorSide, isDoor, doorPlacementFromView } from './blocks';
 import { World, chunkKey, chunkOf, CHUNK_SIZE, WORLD_Y_MAX, WORLD_Y_MIN } from './world';
 import { TERRAIN_SEED, TerrainGen, generateChunkTerrain } from './terrain';
@@ -22,13 +23,11 @@ import { LightClient } from './light-transport';
 import { Persistence, applyRecord, snapshotChunk, type WorldMeta, type PersistSource } from './persistence';
 import { IndexedDBChunkStore } from './idb-store';
 import { Recorder, ReplayController, parseReplayParam, viewedAt, type Replay, type ReplaySnapshot } from './replay';
-// Multiplayer (B1): the in-page LoopbackHub + the HostSession/ClientSession the render path drives.
 import { LoopbackHub } from './net/transport';
 import { HostSession } from './net/host';
 import { ClientSession } from './net/client';
 import { sanitizeName } from './net/name';
 import { ScriptController, type ScriptStep } from './entity';
-// Multiplayer (B2): the real-network Transport (trystero) + the ?host/?join lobby.
 import { TrysteroTransport, webCryptoUnavailableMessage } from './net/trystero';
 
 // === boot ===
@@ -57,10 +56,6 @@ app.append(renderer.domElement);
 // === scene ===
 
 const scene = new THREE.Scene();
-// T12: two "moods" — air vs water (submergence). The sky now paints both: the
-// air mood carries the time-of-day gradient sky (src/sky.ts), the water mood a
-// time-tinted deep blue (night underwater is darker). The mood still owns the
-// FOV squeeze and which fog/background objects are active.
 const BG_WATER = new THREE.Color(0x0a2a55);
 const FOG_AIR = new THREE.FogExp2(0xcfe8ff, 0.004);
 const FOG_WATER = new THREE.FogExp2(0x0a2a55, 0.35);
@@ -68,7 +63,6 @@ renderer.setClearColor(0x101a33); // fallback clear (night horizon): the sky dom
 const camera = new THREE.PerspectiveCamera(70, 1, 0.1, 512);
 const FOV_AIR = 70; // must equal the perspective camera fov above
 const FOV_WATER = 62;
-// SPAWN is computed in world-state, after the terrain exists (scan of a measured column).
 
 function onResize() {
   camera.aspect = window.innerWidth / window.innerHeight;
@@ -78,150 +72,15 @@ function onResize() {
 window.addEventListener('resize', onResize);
 onResize();
 
-// === textures ===
+const { texture: atlas, iconUrl: atlasURL } = createBlockAtlas(document.createElement('canvas'));
 
-// 256x256 canvas atlas: 14 tiles, all in the top row (cols 0..13, row 0).
-const atlasCanvas = document.createElement('canvas');
-atlasCanvas.width = 256;
-atlasCanvas.height = 256;
-const actx = atlasCanvas.getContext('2d')!;
-
-function prng(seed: number): () => number {
-  let a = seed >>> 0;
-  return () => {
-    a = (a + 0x6d2b79f5) | 0;
-    let t = Math.imul(a ^ (a >>> 15), 1 | a);
-    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
-    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
-  };
-}
-
-function px(g: CanvasRenderingContext2D, x: number, y: number, c: readonly [number, number, number]) {
-  g.fillStyle = `rgb(${c[0] | 0},${c[1] | 0},${c[2] | 0})`;
-  g.fillRect(x, y, 1, 1);
-}
-
-function speck(g: CanvasRenderingContext2D, base: readonly [number, number, number], amt: number, rnd: () => number) {
-  for (let y = 0; y < 16; y++)
-    for (let x = 0; x < 16; x++) {
-      const d = (rnd() - 0.5) * 2 * amt;
-      px(g, x, y, [base[0] + d, base[1] + d, base[2] + d]);
-    }
-}
-
-type TilePainter = (g: CanvasRenderingContext2D, rnd: () => number) => void;
-
-// One painter per face-tile id (index = tile from blocks.ts BLOCKS[b].faces), all deterministic.
-const TILES: TilePainter[] = [
-  (g, r) => speck(g, [92, 158, 66], 24, r), // 0 grassTop
-  (g, r) => {                                // 1 grassSide (dirt with a 3px grass lip)
-    speck(g, [120, 86, 52], 16, r);
-    g.save();
-    g.beginPath();
-    g.rect(0, 0, 16, 3);
-    g.clip();
-    speck(g, [92, 158, 66], 18, r);
-    g.restore();
-  },
-  (g, r) => speck(g, [120, 86, 52], 18, r),  // 2 dirt
-  (g, r) => {                                 // 3 stone
-    speck(g, [112, 112, 118], 14, r);
-    g.fillStyle = 'rgba(58,58,64,.85)';
-    for (let i = 0; i < 4; i++) g.fillRect((r() * 14) | 0, (r() * 16) | 0, 2 + ((r() * 3) | 0), 1);
-  },
-  (g, r) => speck(g, [216, 204, 152], 14, r), // 4 sand
-  (g, r) => {                                 // 5 water
-    speck(g, [48, 104, 196], 12, r);
-    g.fillStyle = 'rgba(130,185,255,.55)';
-    for (let i = 0; i < 5; i++) g.fillRect((r() * 13) | 0, (r() * 16) | 0, 3, 1);
-  },
-  (g, r) => {                                 // 6 woodSide (vertical strips)
-    for (let x = 0; x < 16; x++) {
-      const base: readonly [number, number, number] = x % 4 < 2 ? [112, 78, 44] : [98, 68, 40];
-      for (let y = 0; y < 16; y++) {
-        const d = (r() - 0.5) * 14;
-        px(g, x, y, [base[0] + d, base[1] + d, base[2] + d]);
-      }
-    }
-  },
-  (g, r) => {                                 // 7 woodTop (concentric squares)
-    for (let y = 0; y < 16; y++)
-      for (let x = 0; x < 16; x++) {
-        const d = Math.max(Math.abs(x - 7.5), Math.abs(y - 7.5));
-        const base: readonly [number, number, number] = d % 3 < 1.5 ? [152, 112, 64] : [114, 82, 48];
-        const j = (r() - 0.5) * 10;
-        px(g, x, y, [base[0] + j, base[1] + j, base[2] + j]);
-      }
-  },
-  (g, r) => speck(g, [54, 118, 46], 30, r),  // 8 leaves
-  (g) => {                                    // 9 glass (frame + highlight)
-    g.fillStyle = 'rgb(196,232,250)';
-    g.fillRect(0, 0, 16, 16);
-    g.fillStyle = 'rgba(255,255,255,.95)';
-    g.fillRect(0, 0, 16, 1);
-    g.fillRect(0, 15, 16, 1);
-    g.fillRect(0, 0, 1, 16);
-    g.fillRect(15, 0, 1, 16);
-    g.fillStyle = 'rgba(255,255,255,.55)';
-    g.fillRect(3, 3, 2, 6);
-  },
-  (g, r) => {                                 // 10 planks (4px horizontal boards)
-    for (let y = 0; y < 16; y++) {
-      const base: readonly [number, number, number] = y % 4 === 3 ? [70, 48, 28] : [150, 108, 62];
-      for (let x = 0; x < 16; x++) {
-        const d = (r() - 0.5) * 14;
-        px(g, x, y, [base[0] + d, base[1] + d, base[2] + d]);
-      }
-    }
-  },
-  (g, r) => {                                 // 11 torchStem (whole-tile wood: the post stretches the tile in-world, so every pixel must read as wood)
-    for (let y = 0; y < 16; y++)
-      for (let x = 0; x < 16; x++) {
-        const base: readonly [number, number, number] = x < 2 || x > 13 ? [74, 50, 28] : [112, 78, 44];
-        const d = (r() - 0.5) * 14;
-        px(g, x, y, [base[0] + d, base[1] + d, base[2] + d]);
-      }
-  },
-  (g) => {                                     // 12 torchFlame
-    g.fillStyle = 'rgb(255,150,40)';
-    g.fillRect(3, 4, 10, 10);
-    g.fillStyle = 'rgb(255,214,80)';
-    g.fillRect(5, 6, 6, 7);
-    g.fillStyle = 'rgb(255,246,205)';
-    g.fillRect(7, 8, 2, 4);
-  },
-  (g, r) => {                                  // 13 door (plank panel, darker frame, latch)
-    speck(g, [150, 108, 62], 10, r);
-    g.fillStyle = 'rgba(70,48,28,.9)';
-    g.fillRect(0, 0, 16, 2);
-    g.fillRect(0, 14, 16, 2);
-    g.fillRect(0, 0, 2, 16);
-    g.fillRect(14, 0, 2, 16);
-    g.fillRect(7, 3, 2, 10);
-    g.fillStyle = 'rgb(220,200,120)';
-    g.fillRect(11, 8, 2, 2);
-  },
-];
-
-for (let t = 0; t < TILES.length; t++) {
-  actx.save();
-  actx.translate((t % 16) * 16, ((t / 16) | 0) * 16);
-  TILES[t](actx, prng(0x5eed + t * 0x9e3779b9));
-  actx.restore();
-}
-
-const atlas = new THREE.CanvasTexture(atlasCanvas); // flipY defaults true: canvas row 0 -> v≈1
-atlas.magFilter = THREE.NearestFilter; // pixel look; no mip bleed across tiles
-atlas.minFilter = THREE.NearestFilter;
-atlas.generateMipmaps = false;
-
-// No lights (spec): MeshBasicMaterial + vertex colors carry the baked face-shade/AO.
+// Face shading, ambient occlusion, and lighting are baked into vertex attributes.
 const matOpaque = new THREE.MeshBasicMaterial({ map: atlas, vertexColors: true });
 const matTrans = new THREE.MeshBasicMaterial({
   map: atlas,
   vertexColors: true,
   transparent: true,
-  opacity: 0.85, // shared with water (no separate leaf material): leaves read denser; if water should differ later, leaves need their own material (see PROJECT.md)
+  opacity: 0.85,
   depthWrite: false,
   side: THREE.DoubleSide, // lets water be seen from under-side/side as well
 });
@@ -1148,7 +1007,6 @@ function stopRecording(): void {
 // the atlas crop of the block it holds.
 const PALETTE_BLOCKS = [...PLACEABLE];
 const hotbar = new Hotbar(PALETTE_BLOCKS);
-const atlasURL = atlasCanvas.toDataURL();
 
 // Crop the block's top-row tile into a `px`-sized icon: full atlas scaled 16·px wide, shifted
 // via iconPosition (same tile as the mesh top face). Nearest keeps it crisp.

@@ -24,7 +24,7 @@ export interface BlockDef {
   kind: BlockKind;
   light: number;         // block-light emission, 0..15 (0 = emits nothing; torch 14). Read by src/light.ts at seed time.
   opacity: number;       // extra light attenuation paid when light EXITS this cell: 0 air-like, 1 glass, 2 leaves/water, 15 nothing passes. Doors are meta-dependent via lightOpacity() (closed = 15, open = 0).
-  /** tile indices, order [+X, -X, +Y, -Y, +Z, -Z]; see the atlas layout in main.ts. faces[2] doubles as the UI icon tile */
+  /** Tile indices in TILE_NAMES order; faces [+X, -X, +Y, -Y, +Z, -Z]. +Y is the UI icon. */
   faces: [number, number, number, number, number, number];
 }
 

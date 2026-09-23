@@ -165,9 +165,12 @@ npx playwright test tests/e2e/mp-2tab.spec.ts
 
 ## Project layout
 
+See [CONTRIBUTING.md](CONTRIBUTING.md) for readability and formatting conventions.
+
 ```
 src/
   main.ts            boot, scene setup, input, render loop, lobby/debug entry points
+  block-atlas.ts     deterministic block textures shared by rendering and inventory icons
   world.ts           chunk storage + block get/set
   terrain.ts         seeded terrain generation
   blocks.ts          block registry (solid/transparent/face tiles)
