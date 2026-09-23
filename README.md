@@ -171,10 +171,13 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for readability and formatting convention
 src/
   main.ts            boot, scene setup, input, render loop, lobby/debug entry points
   block-atlas.ts     deterministic block textures shared by rendering and inventory icons
-  game-menus.ts      menu assembly and overlay coordination
-  multiplayer-menu.ts host/join form behavior
-  replay-list.ts     recordings list rendering and navigation
-  overlays.ts        exclusive panel state and pointer-lock transitions
+  ui/
+    hotbar.ts         inventory state, independent of the browser
+    inventory-view.ts hotbar icons, palette rows, and selection highlighting
+    game-menus.ts     menu assembly and overlay coordination
+    multiplayer-menu.ts host/join form behavior
+    replay-list.ts    recordings list rendering and navigation
+    overlays.ts       exclusive panel state and pointer-lock transitions
   world.ts           chunk storage + block get/set
   terrain.ts         seeded terrain generation
   blocks.ts          block registry (solid/transparent/face tiles)
@@ -191,7 +194,6 @@ src/
   light.ts / light-transport.ts / light-worker.ts  dynamic lighting pipeline
   persistence.ts / idb-store.ts  IndexedDB chunk persistence
   replay.ts          recording + replay controllers
-  ui.ts              hotbar + palette state
   net/               multiplayer transport, HostSession, ClientSession, Trystero lobby
 index.html           app shell + DOM overlays
 PROJECT.md           the original POC design doc (stack, algorithms, known traps)

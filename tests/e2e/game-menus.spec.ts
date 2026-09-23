@@ -5,7 +5,7 @@ test('menus coordinate replay loading, navigation, recording, and multiplayer el
 }) => {
   await page.goto('http://localhost:4173');
   const result = await page.evaluate(async () => {
-    const moduleUrl = '/src/game-menus.ts';
+    const moduleUrl = '/src/ui/game-menus.ts';
     const { createGameMenus } = await import(moduleUrl);
     const document = window.document.implementation.createHTMLDocument();
     document.body.innerHTML = `

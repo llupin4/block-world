@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { Block } from '../blocks';
-import { Hotbar } from '../ui';
+import { Hotbar } from '../ui/hotbar';
 
 describe('A — Hotbar construction', () => {
   it('keeps a full nine-slot default list as-is', () => {

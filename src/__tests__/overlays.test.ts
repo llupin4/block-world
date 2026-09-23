@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { Overlays } from '../overlays';
+import { Overlays } from '../ui/overlays';
 
 function setup() {
   const effects = {

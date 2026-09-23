@@ -1,4 +1,4 @@
-import type { Replay } from './replay';
+import type { Replay } from '../replay';
 
 interface ReplayListOptions {
   stepSeconds: number;

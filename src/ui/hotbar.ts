@@ -1,8 +1,8 @@
-import { Block } from './blocks';
+import { Block } from '../blocks';
 
 export const SLOTS = 9;
 
-// Data-only: no DOM here (main.ts owns the DOM side), which keeps this node-testable.
+// InventoryView owns DOM rendering; this model stays independent of the browser.
 export class Hotbar {
   slots: number[];
   selected = 0;

@@ -15,7 +15,12 @@ The POC needed a way to choose which block to place without leaving first-person
 
 ## Decision
 
-### Hotbar (`src/ui.ts`)
+### Hotbar (`src/ui/hotbar.ts`)
+
+The 2026-09 cleanup moved the model to `src/ui/hotbar.ts`, inventory DOM rendering
+to `src/ui/inventory-view.ts`, and overlay coordination to `src/ui/game-menus.ts`
+and `src/ui/overlays.ts`. References below to DOM code in `main.ts` describe the
+original implementation.
 
 `Hotbar` is **data-only**: nine slot values, the current selection index, and two optional change callbacks (`onSelectChange`, `onSlotChange`). All DOM lives in `main.ts`, so the class stays node-testable (zero `document` references). Construction pads short default lists with their first slot, trims long ones to nine, and falls back to stone slots when empty. `select(i)` wraps both directions (`((i % 9) + 9) % 9`) and no-ops a repeat select (key mashing / held wheel); `cycle(dir)` moves one slot by sign only; `setSlot(i, b)` writes a slot (wrapping the index). `get block()` returns the selected slot's block — the value RMB placement reads (ADR 0004 — Player & interaction). T8's single-block `selectedBlock` shortcut was retired in favour of `hotbar.block`; the default selection is Planks, preserving the original "RMB places planks" behaviour.
 

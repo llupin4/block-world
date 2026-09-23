@@ -1,4 +1,4 @@
-import type { Replay } from './replay';
+import type { Replay } from '../replay';
 import { Overlays, type Overlay } from './overlays';
 import { MultiplayerMenu } from './multiplayer-menu';
 import { renderReplayList } from './replay-list';

@@ -1,12 +1,13 @@
 import * as THREE from 'three';
 import { createBlockAtlas } from './block-atlas';
-import { Block, BLOCKS, isOpaque, PLACEABLE, iconPosition, torchMeta, doorMeta, doorOpen, doorAxis, doorSide, isDoor, doorPlacementFromView } from './blocks';
+import { Block, isOpaque, PLACEABLE, torchMeta, doorMeta, doorOpen, doorAxis, doorSide, isDoor, doorPlacementFromView } from './blocks';
 import { World, chunkKey, chunkOf, CHUNK_SIZE, WORLD_Y_MAX, WORLD_Y_MIN } from './world';
 import { TERRAIN_SEED, TerrainGen, generateChunkTerrain } from './terrain';
 import * as streaming from './streaming';
 import { ViewRadiusGovernor, targetChunks } from './view-radius';
-import { Hotbar } from './ui';
-import { createGameMenus } from './game-menus';
+import { Hotbar } from './ui/hotbar';
+import { InventoryView } from './ui/inventory-view';
+import { createGameMenus } from './ui/game-menus';
 import { meshChunk, meshChunkRange, probeMeshChunk, type ChunkMesh, type LightSampler } from './chunk-mesher';
 import { SliceScheduler, decideBands, PROBE_VERTS, SLICE_COUNT } from './mesh-slices';
 import { ProfRig, meshVerts, PROF_WORST_KEY } from './prof-rig';
@@ -569,10 +570,6 @@ async function startGame(meta: WorldMeta | null): Promise<void> {
     if (meta.hotbar?.slots?.length === 9) {
       for (let i = 0; i < 9; i++) hotbar.setSlot(i, meta.hotbar.slots[i]); // fires onSlotChange → icons refresh
       hotbar.select(meta.hotbar.selected ?? 0);
-      // select() is a no-op when the selection is already at its default (0): refresh the
-      // .sel borders directly so a restored selection of 0 still lights the slot.
-      hotbarSlotEls.forEach((el, j) => el.classList.toggle('sel', j === hotbar.selected));
-      refreshPaletteSel(hotbar.block);
     }
   } else {
     // Fresh world: the body runs the human controller but idles when left (baseController), and
@@ -581,7 +578,7 @@ async function startGame(meta: WorldMeta | null): Promise<void> {
     sim.setViewed(p.id);
     sim.homeId = p.id;
     sim.ghostId = sim.spawn({ x: SPAWN.x, y: SPAWN.y + 4, z: SPAWN.z }, new IdleController(), { kindId: 'spectator', baseController: new IdleController() }).id;
-    hotbar.select(PALETTE_BLOCKS.indexOf(Block.Planks)); // default: planks, as T8's selectedBlock was
+    hotbar.select(PLACEABLE.indexOf(Block.Planks)); // default: planks, as T8's selectedBlock was
   }
   // The human controller's look is the source of truth (stepEntity adopts it each tick): sync it
   // to the entity's current look so the first tick does not clobber the spawn/restore facing.
@@ -663,7 +660,7 @@ function syncEntityRigs(dt: number): void {
 function syncHud(): void {
   const ve = sim.viewed();
   kindEl.textContent = ve ? `viewing: ${ve.kind.id}` : '';
-  hotbarEl.classList.toggle('hidden', !ve || !ve.kind.canEdit);
+  inventory.setVisible(Boolean(ve?.kind.canEdit));
   // === replay scrub HUD (phase 3, ADR 0017) ===
   if (recording) {
     scrubEl.classList.remove('hidden');
@@ -998,65 +995,16 @@ function stopRecording(): void {
 
 // === ui ===
 
-// T11: hotbar (bottom, display-only) + palette (right strip, click targets). The nine hotbar
-// `.slot` divs are pre-placed in index.html; the palette rows (icon + name) are generated below
-// — one per PALETTE_BLOCKS entry — so the strip grows with the registry. Each is painted with
-// the atlas crop of the block it holds.
-const PALETTE_BLOCKS = [...PLACEABLE];
-const hotbar = new Hotbar(PALETTE_BLOCKS);
-
-// Crop the block's top-row tile into a `px`-sized icon: full atlas scaled 16·px wide, shifted
-// via iconPosition (same tile as the mesh top face). Nearest keeps it crisp.
-function placeIcon(el: HTMLElement, b: number, px: number): void {
-  el.style.backgroundImage = `url(${atlasURL})`;
-  el.style.backgroundSize = `${px * 16}px ${px * 16}px`;
-  el.style.backgroundPosition = iconPosition(b, px);
-  el.title = BLOCKS[b].name; // real names (was: the numeric block id)
-}
-
-const hotbarEl = document.getElementById('hotbar')!;
-const paletteEl = document.getElementById('palette')!;
-const hotbarSlotEls = Array.from(hotbarEl.children) as HTMLElement[];
-
-// The palette is a generated scrolling list: one .slot row per PLACEABLE entry
-// (icon + name), so it grows with the registry. index.html holds no static rows.
-const paletteSlotEls: HTMLElement[] = PALETTE_BLOCKS.map((b) => {
-  const el = document.createElement('div');
-  el.className = 'slot';
-  const icon = document.createElement('div');
-  icon.className = 'icon';
-  placeIcon(icon, b, 40); // the icon div is 40px square (no border of its own)
-  const name = document.createElement('span');
-  name.className = 'name';
-  name.textContent = BLOCKS[b].name;
-  el.append(icon, name);
-  el.addEventListener('click', () => hotbar.setSlot(hotbar.selected, b)); // the arrow reads the *current* selection
-  paletteEl.append(el);
-  return el;
-});
-// Rows holding the selected slot's block highlight (several rows can match one block).
-const refreshPaletteSel = (b: number): void => {
-  paletteSlotEls.forEach((el, j) => el.classList.toggle('sel', PALETTE_BLOCKS[j] === b));
-};
-
-hotbarSlotEls.forEach((el, i) => placeIcon(el, hotbar.slots[i], 40)); // 44px box minus 2px border each side
-hotbarEl.classList.remove('hidden');
-// Select-key keycap on each slot (1-9); palette rows are clicked, so they stay unnumbered.
-hotbarSlotEls.forEach((el, i) => {
-  const num = document.createElement('span');
-  num.className = 'num';
-  num.textContent = String(i + 1);
-  el.append(num);
-});
-
-hotbar.onSelectChange = (i) => {
-  hotbarSlotEls.forEach((el, j) => el.classList.toggle('sel', j === i));
-  refreshPaletteSel(hotbar.block);
-};
-hotbar.onSlotChange = (i) => {
-  placeIcon(hotbarSlotEls[i], hotbar.slots[i], 40); // the palette wrote into a slot
-  refreshPaletteSel(hotbar.block); // hotbar.block is the selected slot's block — same source both callbacks
-};
+const hotbar = new Hotbar(PLACEABLE);
+const inventory = new InventoryView(
+  {
+    hotbar: document.getElementById('hotbar')!,
+    palette: document.getElementById('palette')!,
+  },
+  hotbar,
+  PLACEABLE,
+  atlasURL,
+);
 
 const menus = createGameMenus({
   document,

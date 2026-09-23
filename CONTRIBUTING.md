@@ -13,6 +13,9 @@ separate changes when a full reformat would obscure a functional change.
   explanations in `docs/adr/` and link them where needed.
 - Extract modules by responsibility, rather than targeting an arbitrary line count.
   Avoid introducing a shared global context just to move functions between files.
+- Group related features in folders such as `src/ui/` and `src/net/`. Keep shared
+  domain/rendering modules outside UI; UI receives game actions through callbacks.
+  Import the specific module directly instead of adding re-export-only index files.
 - Preserve simulation order, seeded output, persistence formats, and performance budgets
   during readability refactors. Keep behavior changes separate.
 
@@ -24,9 +27,10 @@ function using `sonarjs/cognitive-complexity`. CI runs the same command for pull
 requests and pushes to `main`. This measures control flow and nesting, not coverage
 or CRAP.
 
-The gate initially covers the five cleaned-up modules listed in `complexityFiles`
+The gate covers the cleaned-up paths listed in `complexityFiles`
 in `eslint.config.mjs`. Add modules there as they are refactored; keep the threshold
-at 15. Tests and legacy modules are outside this initial scope.
+at 15. All modules under `src/ui/` are included automatically. Tests and legacy
+modules are outside this initial scope.
 
 Code Complexity Metrics and SonarJS scores may differ. Compare the same revision
 and function before treating the editor score as identical to the CI result.
