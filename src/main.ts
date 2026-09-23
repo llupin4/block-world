@@ -6,6 +6,7 @@ import { TERRAIN_SEED } from './terrain';
 import * as streaming from './streaming';
 import { StreamEffects } from './streaming/stream-effects';
 import { ViewRadiusGovernor, targetChunks } from './view-radius';
+import { PointerControls } from './input/pointer-controls';
 import { KeyboardControls, installKeyboardControls } from './input/keyboard-controls';
 import { Hotbar } from './ui/hotbar';
 import { InventoryView } from './ui/inventory-view';
@@ -378,23 +379,6 @@ if (startup.debug) {
 const keys = new Set<string>(); // shared with the human controller (it reads these to build its intent)
 const human = new HumanController(keys, 0, 0); // the player's controller: hardware state -> one Intent per substep
 
-// Click the canvas: close any open overlay (palette/help), otherwise pointer-lock (WASD + mouse steer; ESC releases).
-renderer.domElement.addEventListener('click', () => {
-  menus.close();
-});
-
-const crosshair = document.getElementById('crosshair')!;
-document.addEventListener('pointerlockchange', () => {
-  const locked = document.pointerLockElement === renderer.domElement;
-  crosshair.style.display = locked ? 'block' : 'none';
-  if (!locked) keys.clear(); // never drift on stuck keys after ESC
-});
-
-document.addEventListener('mousemove', (e) => {
-  if (document.pointerLockElement !== renderer.domElement) return;
-  human.mouse(e.movementX, e.movementY); // the controller owns yaw/pitch + the pitch clamp
-});
-
 // === actions ===
 
 // T8: crosshair break (LMB) / place (RMB); the placed block comes from the selected hotbar slot (T11).
@@ -406,29 +390,6 @@ const hitbox = new THREE.LineSegments(
 );
 hitbox.visible = false;
 scene.add(hitbox);
-
-// Attach the action handlers only while the pointer is locked, so the click that
-// requests the lock (and any later UI click) can never mutate the world.
-let pointerLocked = false;
-document.addEventListener('pointerlockchange', () => {
-  pointerLocked = document.pointerLockElement === renderer.domElement;
-  if (pointerLocked) {
-    document.addEventListener('mousedown', onMouseDown);
-    document.addEventListener('contextmenu', onContextMenu);
-  } else {
-    document.removeEventListener('mousedown', onMouseDown);
-    document.removeEventListener('contextmenu', onContextMenu);
-    hitbox.visible = false;
-  }
-});
-// RMB must suppress the browser menu, which would also drop the pointer lock.
-function onContextMenu(e: Event): void {
-  e.preventDefault();
-}
-
-// The break/place/door/torch raycast (spring targeting, door pairing, torch faces) now lives
-// in entity.ts (applyIntent): it runs from the VIEWED entity's eye, not the camera. main.ts
-// keeps only the crosshair (updateHitbox) and the two-line input edge-setter (onMouseDown).
 
 // Rebuild the edited cell's chunk, plus — when the cell sits on a chunk face — the
 // touched neighbor, so faces on the shared border are regenerated (setBlock only
@@ -451,13 +412,6 @@ function remeshAround(wx: number, wy: number, wz: number): void {
   for (const [nx, ny, nz] of touch) if (world.hasChunk(nx, ny, nz)) rebuildChunkMesh(nx, ny, nz);
 }
 
-// The input edge-setter: LMB/RMB just record an edge on the human controller; the sim's
-// substep loop (sim.tick -> applyIntent) performs the actual break/place from the viewed eye.
-function onMouseDown(e: MouseEvent): void {
-  if (e.button === 0) human.primary();
-  else if (e.button === 2) human.secondary();
-}
-
 // The crosshair break cast (LMB targeting): identical math to the old camera cast, but from
 // the viewed entity's eye + look direction. A placed spring stops the ray (breakRayTarget).
 function castBreakFromViewed(): RayHit | null {
@@ -470,7 +424,7 @@ function castBreakFromViewed(): RayHit | null {
 // Shows the BREAK target (same cast as LMB): a spring lights up where you can break it. A closer
 // entity shadows the voxel (pickEntity before the voxel, exactly as onPossess does).
 function updateHitbox(): void {
-  if (!pointerLocked) { hitbox.visible = false; return; }
+  if (!pointerControls.locked) { hitbox.visible = false; return; }
   const ve = sim.viewed();
   if (!ve) { hitbox.visible = false; return; }
   const ent = pickEntity(eyeOf(ve), lookDir(ve.yaw, ve.pitch), sim.all().filter((x) => x.id !== ve.id), REACH);
@@ -559,6 +513,16 @@ installKeyboardControls(window, new KeyboardControls({
   toggleWireframe: () => setWireframe(!wireframeOn),
   possess: onPossess,
 }));
+
+const pointerControls = new PointerControls({
+  document,
+  canvas: renderer.domElement,
+  crosshair: document.getElementById('crosshair')!,
+  keys,
+  human,
+  closeMenus: () => menus.close(),
+  onUnlock: () => { hitbox.visible = false; },
+});
 
 // === streaming ===
 
