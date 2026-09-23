@@ -171,6 +171,7 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for readability and formatting convention
 src/
   main.ts            boot, scene setup, input, render loop, lobby/debug entry points
   block-atlas.ts     deterministic block textures shared by rendering and inventory icons
+  startup/          URL options and loopback session assembly
   ui/
     hotbar.ts         inventory state, independent of the browser
     inventory-view.ts hotbar icons, palette rows, and selection highlighting

@@ -24,12 +24,13 @@ import { LIGHT_AMBIENT, LIGHT_TICK_BUDGET } from './light';
 import { LightClient } from './light-transport';
 import { Persistence, applyRecord, snapshotChunk, type WorldMeta, type PersistSource } from './persistence';
 import { IndexedDBChunkStore } from './idb-store';
-import { Recorder, ReplayController, parseReplayParam, viewedAt, type Replay, type ReplaySnapshot } from './replay';
+import { Recorder, ReplayController, viewedAt, type Replay, type ReplaySnapshot } from './replay';
 import { LoopbackHub } from './net/transport';
 import { HostSession } from './net/host';
 import { ClientSession } from './net/client';
 import { sanitizeName } from './net/name';
-import { ScriptController, type ScriptStep } from './entity';
+import { parseStartupOptions } from './startup/options';
+import { createLoopbackSession } from './startup/loopback-session';
 import { TrysteroTransport, webCryptoUnavailableMessage } from './net/trystero';
 
 // === boot ===
@@ -111,40 +112,11 @@ addLightShader(matOpaque);
 addLightShader(matTrans);
 
 // === sky ===
-// World time is world state: advanced in the fixed substep loop below, then
-// sampled per frame for the sky (src/sky.ts) and clouds (src/clouds.ts).
-// ?phase=<0..1> dev-only: seeds the day phase (e.g. ?phase=0.5 = deep night) so
-// headless/visual verification reaches any time of day without a 120 s real-time wait.
-const phaseParam = new URLSearchParams(location.search).get('phase');
-const startPhase = phaseParam !== null && phaseParam !== '' && Number.isFinite(+phaseParam) ? +phaseParam : 0;
-// ?prof=remesh dev-only: the deterministic profiling rig (ADR 0013). Pins the player, tags the worst
-// chunk's remesh events, and emits a PROF-RESULT JSON report (window.__profResult) that the
-// Playwright harness (tests/e2e/remesh-prof.spec.ts) waits for. &norender skips
-// renderer.render (the SwiftShader fallback; the report records which mode ran).
-const profMode = new URLSearchParams(location.search).get('prof') === 'remesh';
-const profNoRender = profMode && new URLSearchParams(location.search).has('norender');
-// ?mp=host|client (B1): drive the render path with a HostSession / ClientSession over an in-page
-// LoopbackHub. ?mp wins over ?replay/?prof (mutually exclusive; the replay/prof boot branches are
-// skipped). ?phase/?dbg still apply. ?mp=host&bots=N (default 2); ?mp=client&bots=N (default 1).
-const mpMode = new URLSearchParams(location.search).get('mp'); // 'host' | 'client' | null
-const mpActive = mpMode === 'host' || mpMode === 'client';
-const mpBots = mpActive
-  ? Math.max(1, parseInt(new URLSearchParams(location.search).get('bots') ?? (mpMode === 'host' ? '2' : '1'), 10) || (mpMode === 'host' ? 2 : 1))
-  : 0;
-// ?mp=client&delay=N (dev): delay the in-page host→client links by N ticks, so Phase C's own-body
-// prediction is VISIBLE (the body moves immediately on your intent, then snaps to the host's pose
-// once the delayed `state`/`cells` arrive). No real network — it exercises the full predict/reconcile
-// loop in-page. 0 (the default) is the immediate in-page loopback.
-const mpDelay = mpActive
-  ? Math.max(0, parseInt(new URLSearchParams(location.search).get('delay') ?? '0', 10) || 0)
-  : 0;
-// ?host / ?join=<code> (B2): the real lobby over a TrysteroTransport (a real network, not the ?mp
-// in-page LoopbackHub). ?host starts a session and shows the room code (an optional ?host=<code>
-// fixes it, so the e2e can pass the same code to both tabs); ?join=<code> joins. The lobby wins
-// over ?mp/?replay/?prof (they are mutually exclusive; only one boot branch runs).
-const lobbyHost = new URLSearchParams(location.search).has('host'); // ?host (presence, with or without a code)
-const lobbyJoinCode = new URLSearchParams(location.search).get('join'); // ?join=<code>
-const lobbyActive = lobbyHost || lobbyJoinCode !== null;
+const startup = parseStartupOptions(location.search);
+const {
+  startPhase, profMode, profNoRender, mpMode, mpActive, mpBots,
+  lobbyHost, lobbyJoinCode, lobbyActive,
+} = startup;
 const APP_ID = 'block-world'; // the trystero namespace (a shared constant both sides must match on)
 let worldTime = new WorldTime(startPhase); // let: the B1 boot reassigns it to the session's clock
 const sky = createSky(scene, FOG_AIR, FOG_WATER, BG_WATER);
@@ -347,10 +319,10 @@ async function startGame(meta: WorldMeta | null): Promise<void> {
     }
     // The display name (?host&name= / ?join=code&name=): typed (non-empty param) names are
     // remembered for the M menu; an empty param gets a random name (not remembered).
-    const nameParam = new URLSearchParams(location.search).get('name') ?? '';
+    const nameParam = startup.name;
     const name = sanitizeName(nameParam);
     if (nameParam.trim() !== '') localStorage.setItem('bw.name', name);
-    const code = lobbyHost ? (new URLSearchParams(location.search).get('host') || genRoomCode()) : (lobbyJoinCode as string);
+    const code = lobbyHost ? (startup.hostCode || genRoomCode()) : (lobbyJoinCode as string);
     const tr = new TrysteroTransport(APP_ID, code);
     let session: HostSession | ClientSession;
     if (lobbyHost) {
@@ -382,72 +354,35 @@ async function startGame(meta: WorldMeta | null): Promise<void> {
     requestAnimationFrame(frame);
     return;
   }
-  // === multiplayer (B1) ===
-  // ?mp wins over ?replay/?prof. The session is created + the module globals are reassigned to the
-  // session's objects so the whole render path (light, re-mesh, syncCamera, syncEntityRigs) runs
-  // unchanged against the session's world/sim. The light worker is recreated for the session's
-  // world + worldTime. The in-page LoopbackHub is pumped per substep (the frame loop).
-  if (mpActive) {
-    // ?mp=client&delay=N: delay the authoritative host's outgoing links (host→client `state`/`cells`)
-    // so the client's own-body prediction is visible (it moves on your intent, then reconciles when
-    // the delayed host word arrives). The host's id is 'host' (?mp=host) or 'headless' (?mp=client).
-    const hub = new LoopbackHub({ delay: (from) => (from === 'host' || from === 'headless') ? mpDelay : 0 });
-    let session: HostSession | ClientSession;
-    if (mpMode === 'host') {
-      // The host renders its authoritative world + the bot clients' remote players (their rigs
-      // appear + move as their intents are applied by the host's sim).
-      session = new HostSession(hub.connect('host'), TERRAIN_SEED, { withOwnPlayer: true, persist, hooks: simHooks });
-      const host = session as HostSession;
-      mpHost = host; // the authoritative session
-      const botSteps: ScriptStep[] = [
-        { op: 'walkTo', x: 8, z: 48, timeout: 120 },
-        { op: 'walkTo', x: 12, z: 44, timeout: 120 },
-        { op: 'walkTo', x: 6, z: 50, timeout: 120 },
-        { op: 'wait', ticks: 60 },
-      ];
-      for (let i = 0; i < mpBots; i++) {
-        const c = new ClientSession(hub.connect(`bot${i}`), `bot${i}`, new ScriptController(botSteps, true));
-        c.setLightEdit(() => { /* the bot clients are remote (no page light); no-op */ });
-        mpClients.push(c); // the bots send intents each substep (the frame loop ticks them)
-      }
-      world = host.world; sim = host.sim; waterSim = host.waterSim; worldTime = host.worldTime;
-    } else {
-      // The client renders its pristine-terrain world + host-fed cells + the other players'
-      // interpolated rigs + its own body. The in-page headless host is simulation-only (never
-      // meshed/lit — it is not the frame loop's world). waterSim stays the page's (the frame loop
-      // + consumeStream skip water work for the client via the mode check — it has no WaterSim).
-      const headless = new HostSession(hub.connect('headless'), TERRAIN_SEED, { withOwnPlayer: false });
-      mpHost = headless; // the authoritative session (simulation-only — never meshed/lit)
-      const otherSteps: ScriptStep[] = [
-        { op: 'walkTo', x: 8, z: 48, timeout: 120 },
-        { op: 'walkTo', x: 12, z: 44, timeout: 120 },
-        { op: 'wait', ticks: 60 },
-      ];
-      for (let i = 0; i < mpBots; i++) {
-        const t = hub.connect(`other${i}`);
-        const c = new ClientSession(t, `other${i}`, new ScriptController(otherSteps, true));
-        c.setLightEdit(() => { /* the other players are remote (no page light); no-op */ });
-        mpClients.push(c); // the other players send intents each substep (the frame loop ticks them)
-        mpOtherTransports.push({ transport: t, name: `other${i}` });
-      }
-      session = new ClientSession(hub.connect('me'), 'me', human); // the client's own body is driven by the page's HumanController (immediate look + movement)
-      const client = session as ClientSession;
-      mpClients.push(client); // the page's own body sends intents too
-      client.setLightEdit((x, y, z) => { lightSim?.edit(x, y, z); }); // the client's light tracks the host's edits
-      client.onPeerLeave((id) => { // the headless host leaves → "host left" + stop driving (static view of the last-received world)
-        if (id !== 'headless') return;
+  if (mpMode === 'host' || mpMode === 'client') {
+    const runtime = createLoopbackSession({
+      mode: mpMode,
+      bots: mpBots,
+      delay: startup.mpDelay,
+      seed: TERRAIN_SEED,
+      controller: human,
+      persist,
+      hooks: simHooks,
+      lightEdit: (x, y, z) => lightSim.edit(x, y, z),
+      hostLeft: () => {
         mpSession = null;
-        const el = document.createElement('div');
-        el.style.cssText = 'position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);color:#fff;font:600 24px sans-serif;z-index:9999;pointer-events:none;text-shadow:0 0 8px #000';
-        el.textContent = 'host left';
-        document.body.appendChild(el);
-      });
-      world = client.world; sim = client.sim; worldTime = client.worldTime;
-    }
-    lightSim = new LightClient(world, worldTime); // the page's light worker runs on the session's world
+        const message = document.createElement('div');
+        message.style.cssText = 'position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);color:#fff;font:600 24px sans-serif;z-index:9999;pointer-events:none;text-shadow:0 0 8px #000';
+        message.textContent = 'host left';
+        document.body.appendChild(message);
+      },
+    });
+    mpSession = runtime.session;
+    mpHost = runtime.host;
+    mpClients = runtime.clients;
+    mpOtherTransports = runtime.otherTransports;
+    mpHub = runtime.hub;
+    world = runtime.session.world;
+    sim = runtime.session.sim;
+    worldTime = runtime.session.worldTime;
+    if (runtime.session instanceof HostSession) waterSim = runtime.session.waterSim;
+    lightSim = new LightClient(world, worldTime);
     window.__lightDebug = lightSim;
-    mpSession = session;
-    mpHub = hub;
     syncCamera();
     requestAnimationFrame(frame);
     return;
@@ -456,7 +391,7 @@ async function startGame(meta: WorldMeta | null): Promise<void> {
   // ?replay=<key> loads a saved session: a fresh world restored from the snapshot, driven
   // tick-by-tick by a ReplayController (deterministic — no human input). The boot-spawned
   // player id 1 would shadow the snapshot's entity id 1, so skip the normal spawn/restore.
-  const replayKey = parseReplayParam(location.search);
+  const replayKey = startup.replayKey;
   if (replayKey) {
     const replay = await persist.loadReplay(replayKey); // await (startGame is async) so the frame loop starts AFTER the load — no race with an empty sim
     if (replay) {
@@ -783,7 +718,7 @@ function syncCamera(): void {
 
 // ?dbg dev-only: exposes the render triple for headless pixel verification (readPixels
 // after a forced render). Never used outside that rig.
-if (new URLSearchParams(location.search).has('dbg')) {
+if (startup.debug) {
   (window as unknown as Record<string, unknown>).__bw = { renderer, scene, camera };
 }
 

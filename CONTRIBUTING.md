@@ -29,7 +29,7 @@ or CRAP.
 
 The gate covers the cleaned-up paths listed in `complexityFiles`
 in `eslint.config.mjs`. Add modules there as they are refactored; keep the threshold
-at 15. All modules under `src/ui/` are included automatically. Tests and legacy
+at 15. All modules under `src/ui/` and `src/startup/` are included automatically. Tests and legacy
 modules are outside this initial scope.
 
 Code Complexity Metrics and SonarJS scores may differ. Compare the same revision
