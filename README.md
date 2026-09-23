@@ -173,7 +173,7 @@ src/
   block-atlas.ts     deterministic block textures shared by rendering and inventory icons
   startup/          URL options, multiplayer sessions, saved-world and replay restoration
   simulation/       fixed-step frame timing, multiplayer tick order, replay progression
-  rendering/        camera/water view, chunk materials and meshes, entity rigs, animation, name tags
+  rendering/        camera/water view, chunk materials, budgeted remeshing, entity rigs and name tags
   ui/
     hotbar.ts         inventory state, independent of the browser
     inventory-view.ts hotbar icons, palette rows, and selection highlighting

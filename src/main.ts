@@ -9,8 +9,8 @@ import { Hotbar } from './ui/hotbar';
 import { InventoryView } from './ui/inventory-view';
 import { Hud } from './ui/hud';
 import { createGameMenus } from './ui/game-menus';
-import { meshChunk, meshChunkRange, probeMeshChunk, type ChunkMesh, type LightSampler } from './chunk-mesher';
-import { SliceScheduler, decideBands, PROBE_VERTS, SLICE_COUNT } from './mesh-slices';
+import { meshChunk, type ChunkMesh, type LightSampler } from './chunk-mesher';
+import { ChunkRemesher } from './rendering/chunk-remesher';
 import { ProfRig, meshVerts, PROF_WORST_KEY } from './prof-rig';
 import { ChunkRenderer } from './rendering/chunk-renderer';
 import { ChunkMaterials } from './rendering/chunk-materials';
@@ -313,28 +313,13 @@ const entityRenderer = new EntityRenderer(scene);
 
 const chunkRenderer = new ChunkRenderer(scene, chunkMaterials.opaque, chunkMaterials.transparent);
 
-// Budgeted re-mesh of the light/water TOUCHED chunks. A cave's light convergence marks many
-// chunks in one frame (up to ~7+); re-meshing all of them is a ~20ms spike (a re-mesh is a full
-// rebuildChunkMesh, ~2-5ms each). Instead, this frame's sim.touched + lightSim.touched are merged
-// into pendingRebuild and re-meshed CLOSEST-FIRST, up to REBUILD_BUDGET per frame; the rest carry
-// one frame. That is safe because the light is a LOWER BOUND (the frontier relaxes inward) and the
-// water settles converge, so a briefly-stale mesh self-corrects as the pending set drains — the
-// visible (near) chunks are always re-meshed first. The streaming's own 1 load + 1 remesh join
-// this same budgeted set (ADR 0012: their first/fresh mesh waits one frame for the worker's
-// light fields).
-const REBUILD_BUDGET = 3; // light/water-touched chunks re-meshed per frame
-const pendingRebuild = new Set<string>(); // chunk keys awaiting a rebuildChunkMesh (carries across frames)
-const deferredFirstMesh = new Set<string>(); // streamed-chunk keys whose FIRST/fresh mesh waits one frame for the worker's light fields (ADR 0012: replies are macrotasks — a load-frame drain would mesh from still-zero light) — moved into pendingRebuild at the frame end
+const deferredFirstMesh = new Set<string>(); // streamed-chunk keys whose FIRST/fresh mesh waits one frame for the worker's light fields (ADR 0012: replies are macrotasks — a load-frame drain would mesh from still-zero light) — moved into the remesh queue at the frame end
 const deerPendingMesh = new Set<string>(); // generated-column keys whose deer spawn is deferred until the column's mesh is built (swapChunkMesh): a deer runs its wander AI from spawn, so spawning at generation put it in a not-yet-meshed column (visible with no ground)
 
-const scheduler = new SliceScheduler(); // heavy-chunk slice plans (ADR 0013): at most one in flight
 const lightSampler: LightSampler = (x, y, z) => world.getLight(x, y, z);
-
-/** (dx^2+dz^2) dominates x/z; |cy-pcy| breaks ties — mirrors streaming.score so the nearest chunk re-meshes first. */
-function rebuildScore(c: [number, number, number], pcx: number, pcy: number, pcz: number): number {
-  const dx = c[0] - pcx, dz = c[2] - pcz;
-  return (dx * dx + dz * dz) * 100 + Math.abs(c[1] - pcy);
-}
+const chunkRemesher = new ChunkRemesher(swapChunkMesh, (key, stage, mesh) => {
+  if (key === PROF_WORST_KEY) profRig?.noteRemesh(stage, meshVerts(mesh));
+});
 
 /** Scene side of a finished mesh: dispose the old entry, build geometries, swap, clear dirty.
  * Shared by the sync edit path, the probe-complete drain path, and the slice-merge path. */
@@ -352,7 +337,7 @@ function swapChunkMesh(cx: number, cy: number, cz: number, mesh: ChunkMesh): voi
 /** Synchronous edit-remesh (setBlock / door toggle path). Still one-shot for heavy chunks —
  * documented residual, belongs to TODO items 2/3 (worker offload / adaptive budget). */
 function rebuildChunkMesh(cx: number, cy: number, cz: number): void {
-  scheduler.cancel(chunkKey(cx, cy, cz)); // a sync edit supersedes any in-flight split — a finished split must never clobber it
+  chunkRemesher.cancelSlice(chunkKey(cx, cy, cz)); // a sync edit supersedes any in-flight split — a finished split must never clobber it
   swapChunkMesh(cx, cy, cz, meshChunk(world, cx, cy, cz, lightSampler));
 }
 // (T8 remeshes around edits via remeshAround; T10's streaming drives loads/remeshes via
@@ -360,7 +345,7 @@ function rebuildChunkMesh(cx: number, cy: number, cz: number): void {
 
 /** T10: scene side of an unload — update() has already removed the chunk from the world. */
 function removeChunkMesh(cx: number, cy: number, cz: number): void {
-  scheduler.cancel(chunkKey(cx, cy, cz)); // an in-flight split of a vanished chunk is discarded (partial buffers are CPU-only)
+  chunkRemesher.cancelSlice(chunkKey(cx, cy, cz)); // an in-flight split of a vanished chunk is discarded (partial buffers are CPU-only)
   const key = chunkKey(cx, cy, cz);
   chunkRenderer.remove(key);
   deerPendingMesh.delete(key); // the column is gone before its mesh was built: don't spawn its deer
@@ -612,7 +597,7 @@ window.addEventListener(
 // meshes). The stream is a pure function of the player position, so one call per frame is enough —
 // and it enforces the §9 ≤1 load + ≤1 remesh/frame budget (calling it per substep let the frame
 // clamp multiply the budget by the substep count, up to ~12 chunks/frame). The loaded/remeshed
-// chunks' first/fresh mesh goes through the frame-end budgeted re-mesh below (REBUILD_BUDGET) —
+// chunks' first/fresh mesh goes through the frame-end budgeted re-mesh below —
 // ADR 0012 defers it one frame so the mesh reads the worker's settled light; the light/water
 // touched carry the same way.
 function tickStreaming(): void {
@@ -635,7 +620,7 @@ function consumeStream(r: streaming.StreamingUpdate, persist: PersistSource, isC
   for (const c of r.unloaded) {
     removeChunkMesh(c.cx, c.cy, c.cz);
     lightSim.unload(c.cx, c.cy, c.cz); // the worker re-seeds the surviving seams (the darkness wave)
-    pendingRebuild.delete(chunkKey(c.cx, c.cy, c.cz)); // don't re-mesh a chunk we just unloaded
+    chunkRemesher.remove(chunkKey(c.cx, c.cy, c.cz)); // don't re-mesh a chunk we just unloaded
     deferredFirstMesh.delete(chunkKey(c.cx, c.cy, c.cz)); // it may still be waiting for its first mesh
     if (!isClient) for (const d of sim.entitiesInChunk(c.cx, c.cy, c.cz)) // the deer leaving with the chunk persist via the entity-ride; restore on walk-back (host)
       if (d.kind.id === 'deer' || d.kind.id === 'dolt') sim.despawn(d.id);
@@ -758,7 +743,7 @@ function frame(now: number): void {
     const wc = world.getChunk(2, 1, 0);
     const wp = profRig.beginFrame({
       worstLoaded: wc !== undefined,
-      worstSettled: wc !== undefined && !pendingRebuild.has(PROF_WORST_KEY) && !scheduler.has(PROF_WORST_KEY),
+      worstSettled: wc !== undefined && !chunkRemesher.has(PROF_WORST_KEY),
     }).waypoint;
     const vep = sim.viewed(); // the rig pins the VIEWED entity (frame-end write, same as today)
     if (vep) { vep.pos.x = wp.x; vep.pos.y = wp.y; vep.pos.z = wp.z; vep.vel = { x: 0, y: 0, z: 0 }; }
@@ -769,74 +754,20 @@ function frame(now: number): void {
   if (!(mpSession instanceof ClientSession) && tickCrossed(tickBefore, worldTime.tick, WATER_STRIDE)) waterSim.tick(WATER_PULSE);
   // Merge this frame's water + light touched chunks into the pending re-mesh set (both sims keep
   // their exact sim.touched contract: consumed and cleared exactly once per frame here).
-  for (const key of waterSim.touched) pendingRebuild.add(key);
+  for (const key of waterSim.touched) chunkRemesher.request(key);
   waterSim.touched.clear();
-  for (const key of lightSim.touched) pendingRebuild.add(key);
+  for (const key of lightSim.touched) chunkRemesher.request(key);
   lightSim.touched.clear();
-  // First/fresh meshes of this frame's streamed chunks enter pendingRebuild only now — they were
+  // First/fresh meshes of this frame's streamed chunks enter the remesh queue only now — they were
   // loaded this frame or an earlier one, so their first worker reply has already landed (or the
   // chunk settled to all-zero light, which the move still meshes, correctly dark).
-  deferredFirstMesh.forEach((key) => pendingRebuild.add(key));
+  deferredFirstMesh.forEach((key) => chunkRemesher.request(key));
   deferredFirstMesh.clear();
-  // Re-mesh closest to the player first (light/water is a self-correcting lower bound, so a
-  // briefly-stale mesh is fine — ADR 0012). A frame that runs a heavy-chunk slice — or starts
-  // one (the probe already spent the frame's budget) — is RESERVED for it: a slice is ≤ ~7 ms
-  // at the worst-case density, and the other budget slots would risk the 16.7 ms budget; the
-  // skipped rebuilds carry one more frame. A probe-complete mesh is ≤ PROBE_VERTS verts =
-  // ≤ 16.7 ms by construction, so it flows through the ordinary budget.
-  const profDrainT0 = profMode ? performance.now() : 0; // the rig attributes the drain's share of the frame
-  const vp = sim.viewed(); // re-mesh closest to the VIEWED entity first; ?? origin if the sim is (still) empty
-  const pcx = chunkOf(vp?.pos.x ?? 0), pcy = chunkOf(vp?.pos.y ?? 0), pcz = chunkOf(vp?.pos.z ?? 0);
-  const inFlight = scheduler.inFlightKey();
-  if (inFlight) {
-    const [cx, cy, cz] = inFlight.split(',').map(Number) as [number, number, number];
-    if (world.hasChunk(cx, cy, cz)) {
-      const band = scheduler.advance(inFlight)!;
-      const sliceMesh = meshChunkRange(world, cx, cy, cz, lightSampler, band[0], band[1]);
-      scheduler.store(inFlight, sliceMesh);
-      const merged = scheduler.finish(inFlight);
-      if (merged) {
-        swapChunkMesh(cx, cy, cz, merged); // the old mesh was kept the whole split — swap at merge only
-        if (inFlight === PROF_WORST_KEY) profRig?.noteRemesh('merge', meshVerts(merged));
-        // The pending entry was deleted when the plan started; if it is back here, light/water
-        // touched the chunk during the split (or streaming marked it dirty) — its slices saw
-        // mixed per-frame light states, so the entry stays and the next frame re-meshes
-        // (the self-correcting contract). No entry → the chunk is done.
-      } else if (inFlight === PROF_WORST_KEY) {
-        profRig?.noteRemesh('slice', meshVerts(sliceMesh));
-      }
-      // Non-final frames: nothing to delete — the entry was already gone at start, and the
-      // pre-check finds the plan via the scheduler, not via pendingRebuild.
-    } else {
-      scheduler.cancel(inFlight); // unloaded between frames
-      pendingRebuild.delete(inFlight);
-    }
-  } else if (pendingRebuild.size) {
-    const list = [...pendingRebuild].map((k) => k.split(',').map(Number) as [number, number, number]);
-    list.sort((a, b) => rebuildScore(a, pcx, pcy, pcz) - rebuildScore(b, pcx, pcy, pcz));
-    for (const [cx, cy, cz] of list.slice(0, REBUILD_BUDGET)) {
-      const key = `${cx},${cy},${cz}`;
-      if (!world.hasChunk(cx, cy, cz)) {
-        pendingRebuild.delete(key);
-        continue;
-      }
-      const probe = probeMeshChunk(world, cx, cy, cz, lightSampler, PROBE_VERTS);
-      pendingRebuild.delete(key);
-      if (probe.complete) {
-        swapChunkMesh(cx, cy, cz, probe.mesh); // the probe IS the full mesh — today's behavior
-        if (key === PROF_WORST_KEY) profRig?.noteRemesh('probe-complete', meshVerts(probe.mesh));
-      } else {
-        // Heavy: the probe's partial buffer is discarded; start the slice plan and run band 0
-        // this frame (the probe already spent the frame's budget — the frame is reserved).
-        scheduler.start(key, decideBands(world.getChunk(cx, cy, cz)!, SLICE_COUNT));
-        const [y0, y1] = scheduler.advance(key)!;
-        const slice0 = meshChunkRange(world, cx, cy, cz, lightSampler, y0, y1);
-        scheduler.store(key, slice0);
-        if (key === PROF_WORST_KEY) profRig?.noteRemesh('plan', meshVerts(slice0));
-        break;
-      }
-    }
-  }
+  const profDrainT0 = profMode ? performance.now() : 0;
+  const vp = sim.viewed();
+  chunkRemesher.drain(world, lightSampler, [
+    chunkOf(vp?.pos.x ?? 0), chunkOf(vp?.pos.y ?? 0), chunkOf(vp?.pos.z ?? 0),
+  ]);
   profDrainMs = profMode ? performance.now() - profDrainT0 : 0;
   if (mpSession instanceof ClientSession) mpSession.syncPoses(); // interpolate the entities' poses at renderTick (the own body's position)
   syncCamera();
