@@ -42,6 +42,7 @@ import { HostSession } from './net/host';
 import { ClientSession } from './net/client';
 import { sanitizeName } from './net/name';
 import { parseStartupOptions } from './startup/options';
+import { bootGame } from './startup/boot';
 import { createLoopbackSession } from './startup/loopback-session';
 import type { SessionRuntime } from './startup/session-runtime';
 import { initializeSinglePlayer } from './startup/single-player';
@@ -162,9 +163,6 @@ const multiplayerProbe = new MultiplayerProbe(mpActive ? mpMode as 'host' | 'cli
 
 // === startup ===
 
-// Start once; a stalled persistence boot falls back after 5 s and late metadata is ignored.
-let booted = false;
-
 function useMultiplayerRuntime(runtime: SessionRuntime): void {
   mpSession = runtime.session;
   mpHost = runtime.host;
@@ -181,9 +179,6 @@ function useMultiplayerRuntime(runtime: SessionRuntime): void {
 }
 
 async function startGame(meta: WorldMeta | null): Promise<void> {
-  if (booted) return;
-  booted = true;
-
   // Lobby URLs take precedence over loopback, replay, and profiling.
   if (lobbyActive) {
     const webCryptoError = webCryptoUnavailableMessage();
@@ -277,11 +272,14 @@ async function startGame(meta: WorldMeta | null): Promise<void> {
   syncCamera();
   requestAnimationFrame(frame);
 }
-const startFatal = (err: unknown): void => { console.error(err); showFatalOverlay('Boot failed', String(err instanceof Error ? err.message : err)); };
-const bootGate = window.setTimeout(() => { console.log('[persistence] boot gate: IDB stalled past 5 s — starting a fresh world (any late meta is dropped)'); void startGame(null).catch(startFatal); }, 5000);
-void persist.boot().then((meta) => {
-  window.clearTimeout(bootGate);
-  void startGame(meta).catch(startFatal);
+void bootGame({
+  load: () => persist.boot(),
+  start: startGame,
+  onTimeout: () => console.log('[persistence] boot gate: IDB stalled past 5 s — starting a fresh world (any late meta is dropped)'),
+  onError: (error) => {
+    console.error(error);
+    showFatalOverlay('Boot failed', String(error instanceof Error ? error.message : error));
+  },
 });
 
 const entityRenderer = new EntityRenderer(scene);

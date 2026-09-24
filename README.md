@@ -171,7 +171,7 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for readability and formatting convention
 src/
   main.ts            boot, scene setup, input, render loop, lobby/debug entry points
   block-atlas.ts     deterministic block textures shared by rendering and inventory icons
-  startup/          URL options, shared multiplayer runtime, saved-world and replay restoration
+  startup/          Boot coordination, URL options, multiplayer runtime, saved-world and replay restoration
   simulation/       fixed-step timing, multiplayer ticks, replay progression, natural mob population
   input/            keyboard/mouse controls, pointer lock, block and possession targeting
   diagnostics/      multiplayer smoke-test actions and browser reports
