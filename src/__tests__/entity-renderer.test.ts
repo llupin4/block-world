@@ -3,6 +3,7 @@ import { Group, Mesh, MeshBasicMaterial, Scene, Sprite, Texture } from 'three';
 import { Sim, IdleController } from '../entity';
 import { World } from '../world';
 import { EntityRenderer } from '../rendering/entity-renderer';
+import { hasMeshedGround } from '../rendering/entity-visibility';
 
 function setup() {
   const scene = new Scene();
@@ -13,6 +14,35 @@ function setup() {
 }
 
 describe('entity renderer', () => {
+  it.each(['player', 'deer'])(
+    'culls %s bodies and name tags without removing simulation entities or recreating rigs',
+    (kindId) => {
+      const { scene, sim, renderer } = setup();
+      const entity = sim.spawn({ x: -0.5, y: 16, z: 0.5 }, new IdleController(), { kindId });
+      entity.name = 'Hidden player';
+      const meshes = new Set<string>();
+      const visible = (e: typeof entity) => hasMeshedGround(e, (key) => meshes.has(key));
+      renderer.update(sim.all(), -1, 0, visible);
+      const body = scene.children.find((child) => child instanceof Group)!;
+      const tag = scene.children.find((child) => child instanceof Sprite)!;
+      expect(body.visible).toBe(false);
+      expect(tag.visible).toBe(false);
+      expect(sim.all()).toHaveLength(1);
+      meshes.add('-1,0,0');
+      renderer.update(sim.all(), -1, 0, visible);
+      expect(body.visible).toBe(true);
+      expect(tag.visible).toBe(true);
+      expect(renderer.rigCount).toBe(1);
+      entity.pos.x = 16.5;
+      renderer.update(sim.all(), -1, 0, visible);
+      expect(body.visible).toBe(false);
+      meshes.add('1,0,0');
+      renderer.update(sim.all(), entity.id, 0, visible);
+      expect(body.visible).toBe(false);
+      expect(tag.visible).toBe(false);
+      renderer.dispose();
+    },
+  );
   it('tracks pose and animation, hides the viewed body, and skips spectators', () => {
     const { scene, sim, renderer } = setup();
     const player = sim.spawn({ x: 1, y: 2, z: 3 }, new IdleController());

@@ -2,7 +2,7 @@ import { Block, PLACEABLE, isOpaque } from '../blocks';
 import { IdleController, type Sim, type HumanController, type Vec3 } from '../entity';
 import { applyRecord, type PersistSource, type WorldMeta } from '../persistence';
 import { TerrainGen, generateChunkTerrain } from '../terrain';
-import { markNeighborsDirty } from '../streaming';
+import { markNeighborsDirty, type Coord } from '../streaming';
 import type { WaterSim } from '../water';
 import type { WorldTime } from '../time';
 import type { Hotbar } from '../ui/hotbar';
@@ -21,8 +21,9 @@ interface SinglePlayerOptions {
   chunkReady(cx: number, cy: number, cz: number): void;
 }
 
-async function loadSpawnColumn(options: SinglePlayerOptions): Promise<void> {
+async function loadSpawnColumn(options: SinglePlayerOptions): Promise<Coord[]> {
   const { world, sim, water, persist } = options;
+  const generated: Coord[] = [];
   for (let cy = 0; cy <= 4; cy++) {
     const record = persist.syncRecord(0, cy, 2) ?? (await persist.fetchRecord(0, cy, 2));
     if (record) {
@@ -31,10 +32,12 @@ async function loadSpawnColumn(options: SinglePlayerOptions): Promise<void> {
       water.restore(world.getChunk(0, cy, 2)!);
     } else {
       generateChunkTerrain(world, new TerrainGen(options.seed), 0, cy, 2);
+      generated.push({ cx: 0, cy, cz: 2 });
     }
     // Lighting and first meshes must see the restored water state.
     options.chunkReady(0, cy, 2);
   }
+  return generated;
 }
 
 function spawnPlayer(sim: Sim, human: HumanController, spawn: Vec3): number {
@@ -71,8 +74,8 @@ function restoreHotbar(hotbar: Hotbar, meta: WorldMeta): void {
 export async function initializeSinglePlayer(
   options: SinglePlayerOptions,
   meta: WorldMeta | null,
-): Promise<void> {
-  await loadSpawnColumn(options);
+): Promise<Coord[]> {
+  const generated = await loadSpawnColumn(options);
   const { sim, human, clock, hotbar } = options;
   let groundY = 79;
   while (groundY >= 0 && !isOpaque(options.world.getBlock(6, groundY, 46))) groundY--;
@@ -90,4 +93,5 @@ export async function initializeSinglePlayer(
     }).id;
     hotbar.select(PLACEABLE.indexOf(Block.Planks));
   }
+  return generated;
 }

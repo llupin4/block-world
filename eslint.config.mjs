@@ -13,6 +13,7 @@ export const complexityFiles = [
   'src/persistence/**/*.ts',
   'src/input/**/*.ts',
   'src/diagnostics/**/*.ts',
+  'src/net/entity-state.ts',
 ];
 
 export default [

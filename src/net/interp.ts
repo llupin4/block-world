@@ -39,10 +39,10 @@ const lerp = (a: number, b: number, t: number): number => a + (b - a) * t;
 
 /** The interpolated pose at `renderTick`. Picks the bracketing pair (s0.tick <= renderTick <=
  * s1.tick) in the tick-ordered samples and lerps. If the gap between the bracketing pair exceeds
- * NET_STATE_STRIDE (a jitter gap), there is no valid bracketing pair → hold the pose before
+ * maxGap (default: player state stride), there is no valid bracketing pair → hold the pose before
  * renderTick (s0). If renderTick is before the first or after the last, hold that end. Yaw
  * lerps by shortest arc. */
-export function interpose(samples: readonly PoseSample[], renderTick: number): PoseSample {
+export function interpose(samples: readonly PoseSample[], renderTick: number, maxGap = NET_STATE_STRIDE): PoseSample {
   if (samples.length === 0) return { tick: renderTick, x: 0, y: 0, z: 0, yaw: 0, pitch: 0 };
   if (samples.length === 1) return samples[0]!;
   // renderTick before the first sample → hold the first.
@@ -58,7 +58,7 @@ export function interpose(samples: readonly PoseSample[], renderTick: number): P
       if (s1.tick === s0.tick) return s1; // duplicate ticks (shouldn't happen; be safe)
       // A gap wider than the broadcast stride means no valid bracketing pair → hold the pose
       // before renderTick (jitter on the wire; the loopback is tight, WebRTC is not).
-      if (s1.tick - s0.tick > NET_STATE_STRIDE) return s0;
+      if (s1.tick - s0.tick > maxGap) return s0;
       const t = (renderTick - s0.tick) / (s1.tick - s0.tick);
       return { tick: renderTick, x: lerp(s0.x, s1.x, t), y: lerp(s0.y, s1.y, t), z: lerp(s0.z, s1.z, t), yaw: lerpAngle(s0.yaw, s1.yaw, t), pitch: lerp(s0.pitch, s1.pitch, t) };
     }

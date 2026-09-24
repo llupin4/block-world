@@ -17,10 +17,11 @@ function setup() {
     sim,
     world,
     rigCount: 2,
+    hasRig: vi.fn(() => false),
     meshedChunks: 5,
     otherTransports: [
-      { transport: { disconnect: vi.fn() } },
-      { transport: { disconnect: vi.fn() } },
+      { name: 'other', transport: { disconnect: vi.fn() } },
+      { name: 'peer', transport: { disconnect: vi.fn() } },
     ],
   };
   return { frame, remote };
@@ -79,7 +80,7 @@ describe('MultiplayerProbe', () => {
       headlessHostMeshedChunks: 0,
       leaveRigRemoved: true,
     });
-    frame.rigCount = 3;
+    frame.hasRig.mockReturnValue(true);
     expect(probe.update(frame, false)).toMatchObject({ leaveRigRemoved: false });
   });
 

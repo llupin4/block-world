@@ -39,8 +39,8 @@ export function rollDeerSpawns(
  * coords (deterministic per chunk). Each deer runs its OWN MobController (the wander AI, drawing
  * from the sim PRNG) as both its live and base controller — so it wanders from the start, persists
  * with controllerKind 'mob' (a restore reattaches the AI), and un-possessing resumes its wander.
- * Idempotent per column: a remesh re-roll (r.rebuilt includes dirty chunks, not just fresh ones)
- * must not double-spawn a column that is already populated.
+ * The population coordinator calls this for freshly generated, fully loaded columns.
+ * The existing column cap also prevents duplicate population of restored entities at startup.
  */
 export function spawnDeer(world: World, sim: Sim, cx: number, cz: number, count = 2): void {
   const inColumn = sim.all().filter((e) => e.kind.id === 'deer' && chunkOf(e.pos.x) === cx && chunkOf(e.pos.z) === cz);

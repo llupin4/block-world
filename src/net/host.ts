@@ -1,4 +1,6 @@
 import { World, chunkKey, chunkOf } from '../world';
+import { MobPopulation } from '../simulation/mob-population';
+import { entityState, shouldSendEntity } from './entity-state';
 import { WaterSim } from '../water';
 import { Sim, IdleController, type Controller, type Entity, type EntityRecord, type ApplyHooks } from '../entity';
 import { Persistence, snapshotChunk, InMemoryChunkStore, type ChunkRecord, type WorldMeta } from '../persistence';
@@ -48,6 +50,7 @@ export class HostSession {
   private peers = new Map<string, Peer>();
   private pendingCells = new Map<string, Map<number, CellWrite>>();
   private syncedSettled = new Set<string>(); // chunk keys whose settled record has been pushed to loaded peers
+  private readonly population = new MobPopulation();
 
   constructor(transport: Transport, seed: number, opts: HostOpts = {}) {
     this.transport = transport;
@@ -88,6 +91,10 @@ export class HostSession {
     this.sim.onDespawn = (e: Entity) => { this.broadcast({ type: 'despawn', tick: this.worldTime.tick, id: e.id }); };
     this.transport.onMessage((from, msg) => this.onMessage(from, msg));
     this.transport.onPeerLeave((id) => this.onPeerLeave(id));
+    this.population.update(this.world, this.sim, {
+      generated: Array.from({ length: CY_MAX - CY_MIN + 1 }, (_, i) => ({ cx: 0, cy: CY_MIN + i, cz: 2 })),
+      unloaded: [],
+    });
   }
 
   private isOpaque(b: number): boolean {
@@ -249,15 +256,16 @@ export class HostSession {
     return ring;
   }
 
-  private broadcastState(): void {
+  private broadcastState(tick: number): void {
     const ring = this.unionRing(); // the union data ring (2D x/z columns)
     for (const [id, p] of this.peers) {
       const e = this.sim.entities.get(p.entityId);
       if (!e) continue;
       const list: NetEntity[] = [];
       for (const ent of this.sim.all()) {
+        if (!shouldSendEntity(ent, tick)) continue;
         if (!ring.has(colKey(chunkOf(ent.pos.x), chunkOf(ent.pos.z)))) continue; // 2D x/z cull (union ring)
-        list.push({ id: ent.id, kindId: ent.kind.id, name: ent.name, x: ent.pos.x, y: ent.pos.y, z: ent.pos.z, yaw: ent.yaw, pitch: ent.pitch, vx: ent.vel.x, vy: ent.vel.y, vz: ent.vel.z, flags: (ent.inWater ? 1 : 0) | (ent.onGround ? 2 : 0) });
+        list.push(entityState(ent));
       }
       this.transport.send(id, { type: 'state', tick: this.worldTime.tick, entities: list });
     }
@@ -282,11 +290,12 @@ export class HostSession {
       // the client's mesher then emits internal top faces at the 7→0 height seam ("extra faces
       // in sections") instead of one continuous block.
       for (const c of r.rebuilt) this.waterSim.settle(c.cx, c.cy, c.cz);
+      this.population.update(this.world, this.sim, r);
       for (const c of r.unloaded) this.syncedSettled.delete(chunkKey(c.cx, c.cy, c.cz));
     } else {
       this.lastStream = null;
     }
-    if (tick % NET_STATE_STRIDE === 0) this.broadcastState();
+    if (tick % NET_STATE_STRIDE === 0) this.broadcastState(tick);
     if (tick % TIME_STRIDE === 0) this.broadcast({ type: 'time', tick: this.worldTime.tick, worldTime: this.worldTime.snapshot() });
     this.pushSettledChunks();
   }

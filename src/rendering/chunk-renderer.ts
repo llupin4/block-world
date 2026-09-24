@@ -20,6 +20,10 @@ export class ChunkRenderer {
     return this.chunks.size;
   }
 
+  has(key: string): boolean {
+    return this.chunks.has(key);
+  }
+
   replace(key: string, mesh: ChunkMesh): void {
     this.remove(key);
     const objects = {

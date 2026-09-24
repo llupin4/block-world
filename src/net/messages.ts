@@ -9,6 +9,7 @@ export const PROTOCOL_VERSION = 2;
 // Net pacing (the host's stride-based broadcasts + the client's remote ring). Pinned by the
 // session spec (phase A); the loopback harness measures latency, not these.
 export const NET_STATE_STRIDE = 3; // broadcast `state` every 3 substeps (~20 Hz @ 60 Hz sim)
+export const NET_MOB_STATE_STRIDE = 12; // 5 Hz mob poses; clients interpolate at this cadence
 export const CELLS_FULL_THRESHOLD = 512; // a cell batch over this sends a full chunkRec instead of `cells`
 export const NET_REMOTE_RADIUS = 1; // the host keeps each remote's ring at this radius (VIEW_RADIUS − 1)
 export const TIME_STRIDE = 60; // broadcast `time` every 60 substeps (once per sim second)

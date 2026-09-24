@@ -16,7 +16,6 @@ interface StreamContext {
   removeMesh(cx: number, cy: number, cz: number): void;
   removeRemesh(key: string): void;
   deferredMeshes: Set<string>;
-  pendingSpawns: Set<string>;
   saveMeta: (() => void) | null;
   controllerFor(record: EntityRecord): Controller;
 }
@@ -40,10 +39,6 @@ function unload(c: Coord, context: StreamContext): void {
   context.light.unload(c.cx, c.cy, c.cz);
   context.removeRemesh(key);
   context.deferredMeshes.delete(key);
-  if (!context.water) return;
-  for (const entity of context.sim.entitiesInChunk(c.cx, c.cy, c.cz)) {
-    if (entity.kind.id === 'deer' || entity.kind.id === 'dolt') context.sim.despawn(entity.id);
-  }
 }
 
 export class StreamEffects {
@@ -55,9 +50,6 @@ export class StreamEffects {
     for (const c of update.rebuilt) {
       context.water?.settle(c.cx, c.cy, c.cz);
       loadLight(c, update.meshable, context);
-    }
-    if (context.water) {
-      for (const c of update.generated) context.pendingSpawns.add(chunkKey(c.cx, c.cy, c.cz));
     }
     for (const c of update.restored) restoreWaterAndLight(c, update.meshable, context);
     return Promise.all(update.pending.map((c) => this.fetch(c, update.meshable, context))).then(

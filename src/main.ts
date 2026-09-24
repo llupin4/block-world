@@ -22,7 +22,8 @@ import { CameraView, AIR_FOV } from './rendering/camera-view';
 import { Sim, HumanController, type ApplyHooks, type Controller, type EntityRecord } from './entity';
 import { findBlockTarget, possessFromView } from './input/targeting';
 import { TargetOutline } from './rendering/target-outline';
-import { spawnDeer } from './spawn';
+import { MobPopulation } from './simulation/mob-population';
+import { hasMeshedGround } from './rendering/entity-visibility';
 import { EntityRenderer } from './rendering/entity-renderer';
 import { WaterSim } from './water';
 import { WorldTime, tickCrossed } from './time';
@@ -146,6 +147,7 @@ const recording = new RecordingSession((key, replay) => persist.saveReplay(key, 
 let playback: { replay: Replay; paused: boolean } | null = null;
 let replayControllerFor: ((r: EntityRecord) => Controller) | null = null;
 const streamEffects = new StreamEffects();
+const population = new MobPopulation();
 
 // === multiplayer ===
 
@@ -264,10 +266,11 @@ async function startGame(meta: WorldMeta | null): Promise<void> {
     }
     console.warn(`[replay] not found: ${replayKey} — starting a fresh world instead`);
   }
-  await initializeSinglePlayer({
+  const generated = await initializeSinglePlayer({
     world, sim, water: waterSim, clock: worldTime, human, hotbar,
     persist, seed: TERRAIN_SEED, chunkReady,
   }, meta);
+  population.update(world, sim, { generated, unloaded: [] });
 
   // Preserve restored facing before the human controller supplies its first intent.
   { const ve = sim.viewed(); if (ve) human.setLook(ve.yaw, ve.pitch); }
@@ -289,9 +292,8 @@ const entityRenderer = new EntityRenderer(scene);
 
 const chunkRenderer = new ChunkRenderer(scene, chunkMaterials.opaque, chunkMaterials.transparent);
 
-// Streamed meshes wait for worker lighting; deer wait until their ground mesh is visible.
+// Streamed meshes wait for worker lighting.
 const deferredFirstMesh = new Set<string>();
-const deerPendingMesh = new Set<string>();
 
 const lightSampler: LightSampler = (x, y, z) => world.getLight(x, y, z);
 const chunkRemesher = new ChunkRemesher(swapChunkMesh, (key, stage, mesh) => {
@@ -303,10 +305,6 @@ function swapChunkMesh(cx: number, cy: number, cz: number, mesh: ChunkMesh): voi
   chunkRenderer.replace(key, mesh);
   const ch = world.getChunk(cx, cy, cz);
   if (ch) ch.dirty = false;
-  if (deerPendingMesh.has(key)) {
-    deerPendingMesh.delete(key);
-    spawnDeer(world, sim, cx, cz);
-  }
 }
 
 function rebuildChunkMesh(cx: number, cy: number, cz: number): void {
@@ -319,7 +317,6 @@ function removeChunkMesh(cx: number, cy: number, cz: number): void {
   chunkRemesher.cancelSlice(chunkKey(cx, cy, cz));
   const key = chunkKey(cx, cy, cz);
   chunkRenderer.remove(key);
-  deerPendingMesh.delete(key);
 }
 
 // === camera ===
@@ -451,6 +448,7 @@ function tickStreaming(): void {
   if (!ve) return;
   const pcx = chunkOf(ve.pos.x), pcz = chunkOf(ve.pos.z), pcy = chunkOf(ve.pos.y);
   const r = streaming.update(world, pcx, pcz, pcy, playback ? noopPersist : persist, sim);
+  population.update(world, sim, { generated: playback ? [] : r.generated, unloaded: r.unloaded });
   consumeStream(r, playback ? noopPersist : persist, false);
 }
 
@@ -464,7 +462,6 @@ function consumeStream(update: streaming.StreamingUpdate, source: PersistSource,
     removeMesh: removeChunkMesh,
     removeRemesh: (key) => chunkRemesher.remove(key),
     deferredMeshes: deferredFirstMesh,
-    pendingSpawns: deerPendingMesh,
     saveMeta: !playback && !isClient ? () => savePoints.saveMeta(source as Persistence) : null,
     controllerFor: streamControllerFor,
   }).catch((error) => console.error('[streaming] restore failed', error));
@@ -545,7 +542,8 @@ function frame(now: number): void {
   if (mpSession instanceof ClientSession) mpSession.syncPoses();
   syncCamera();
   targetOutline.update(pointerControls.locked ? findBlockTarget(world, sim, simHooks) : null);
-  entityRenderer.update(sim.all(), sim.viewedId, dt);
+  entityRenderer.update(sim.all(), sim.viewedId, dt, (entity) =>
+    hasMeshedGround(entity, (key) => chunkRenderer.has(key)));
   const viewed = sim.viewed();
   hud.update({
     viewedKind: viewed?.kind.id ?? null,
@@ -577,6 +575,7 @@ function frame(now: number): void {
     sim,
     world,
     rigCount: entityRenderer.rigCount,
+    hasRig: (id) => entityRenderer.hasRig(id),
     meshedChunks: chunkRenderer.chunkCount,
     otherTransports: mpOtherTransports,
   }, (window as unknown as Record<string, unknown>).__mpResult !== undefined);

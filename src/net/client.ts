@@ -9,6 +9,7 @@ import { intentEqual } from '../replay';
 import { type Transport } from './transport';
 import { WorldTime } from '../time';
 import { PoseRing, interpose } from './interp';
+import { NET_MOB_STATE_STRIDE } from './messages';
 
 // The fixed sim step (matches the host): the client's `tick(t)` is one 60 Hz substep (the frame
 // loop in the browser, the harness in node), so prediction + reconciliation advance by this dt.
@@ -272,7 +273,9 @@ export class ClientSession {
       if (id === this.entityId) continue; // the own body is predicted + reconciled, never interpolated
       const ent = this.sim.entities.get(id);
       if (!ent) continue;
-      const p = interpose(ring.samples, renderTick);
+      const p = ent.kind.id === 'player'
+        ? interpose(ring.samples, renderTick)
+        : interpose(ring.samples, this.worldTime.tick - NET_MOB_STATE_STRIDE, NET_MOB_STATE_STRIDE);
       ent.pos = { x: p.x, y: p.y, z: p.z }; ent.yaw = p.yaw; ent.pitch = p.pitch;
     }
     // The own body's display pose (Phase C follow-up): ease out a large reconciliation snap over

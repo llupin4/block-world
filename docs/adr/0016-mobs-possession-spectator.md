@@ -126,3 +126,22 @@ verb agree.
 - **Phase 3 (replay) is unblocked.** Every random is sim-owned and tick-ordered, and the
   `baseController`/`homeId`/`ghostId` bookkeeping means a replay can re-derive possession and
   deer behavior exactly.
+
+## Update: population and visual readiness (2026-09-23)
+
+`MobPopulation` now owns natural population independently of rendering. Single-player and
+authoritative hosts populate fully loaded, freshly generated columns; deer remain the initial
+population policy. Repeated updates do not top up a populated column. Restored or mixed
+restored/generated columns are not repopulated, and replay playback uses recorded spawn events.
+Players and spectators retain their separate startup/join lifecycles.
+
+Entity rigs and name tags are hidden while the chunk immediately beneath their feet has no
+installed mesh. This applies to players and mobs and does not pause AI or remove entities.
+Headless hosts therefore populate and simulate terrain without any mesh dependency.
+
+With mobs now present on headless hosts, full-rate entity replication exceeded the existing
+60 KB/s/client stress budget. Player state remains full-precision at 20 Hz; mob pose state is
+sent at 5 Hz with scalar values rounded to 0.001. Clients interpolate mobs with a 12-tick
+delay and gap tolerance. Spawn/despawn messages remain immediate, and omitted state entries
+retain their entities. The eight-client stress case measures roughly 56 KB/s/client with
+these settings, without raising its budget.

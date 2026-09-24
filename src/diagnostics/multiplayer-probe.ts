@@ -8,8 +8,9 @@ interface ProbeFrame {
   sim: Pick<Sim, 'all' | 'viewed' | 'viewedId'>;
   world: Pick<World, 'setBlock' | 'getBlock'>;
   rigCount: number;
+  hasRig(id: number): boolean;
   meshedChunks: number;
-  otherTransports: readonly { transport: { disconnect(): void } }[];
+  otherTransports: readonly { name: string; transport: { disconnect(): void } }[];
 }
 
 function roundedPosition(position: Entity['pos']) {
@@ -27,6 +28,7 @@ function playerReport(entity: Entity) {
 export class MultiplayerProbe {
   private readonly firstPositions = new Map<number, { x: number; z: number }>();
   private leaveFired = false;
+  private departedEntityId: number | null = null;
 
   constructor(
     private readonly loopbackMode: 'host' | 'client' | null,
@@ -57,6 +59,9 @@ export class MultiplayerProbe {
     if (!peer) return;
     // Frames may skip over tick 250; fire once on the first eligible frame.
     this.leaveFired = true;
+    this.departedEntityId =
+      frame.sim.all().find((entity) => entity.kind.id === 'player' && entity.name === peer.name)
+        ?.id ?? null;
     peer.transport.disconnect();
   }
 
@@ -93,7 +98,8 @@ export class MultiplayerProbe {
       clientMeshedChunks: frame.meshedChunks,
       headlessHostMeshedChunks: 0,
       leaveRigRemoved:
-        frame.otherTransports.length > 1 ? frame.rigCount < frame.otherTransports.length + 1 : true,
+        frame.otherTransports.length <= 1 ||
+        (this.departedEntityId !== null && !frame.hasRig(this.departedEntityId)),
     };
   }
 }

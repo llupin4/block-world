@@ -39,12 +39,21 @@ export class EntityRenderer {
     return this.rigs.size;
   }
 
-  update(entities: readonly Entity[], viewedId: number, dt: number): void {
+  hasRig(id: number): boolean {
+    return this.rigs.has(id);
+  }
+
+  update(
+    entities: readonly Entity[],
+    viewedId: number,
+    dt: number,
+    isVisible: (entity: Entity) => boolean = () => true,
+  ): void {
     const seen = new Set<number>();
     for (const entity of entities) {
       seen.add(entity.id);
       if (!entity.kind.collides) continue;
-      this.updateEntity(entity, viewedId, dt);
+      this.updateEntity(entity, entity.id !== viewedId && isVisible(entity), dt);
     }
     for (const id of this.rigs.keys()) {
       if (!seen.has(id)) this.removeEntity(id);
@@ -68,7 +77,7 @@ export class EntityRenderer {
     return material;
   }
 
-  private updateEntity(entity: Entity, viewedId: number, dt: number): void {
+  private updateEntity(entity: Entity, visible: boolean, dt: number): void {
     let rendered = this.rigs.get(entity.id);
     if (!rendered) {
       const rig = buildEntityRig(entity.kind, this.materialFor(entity.kind.id));
@@ -79,11 +88,11 @@ export class EntityRenderer {
     }
     advanceRigAnim(rendered.animation, entity, dt, LEG_RATE[entity.kind.id] ?? 4);
     updateEntityRig(rendered.rig, entity, rendered.animation);
-    rendered.rig.root.visible = entity.id !== viewedId;
-    if (entity.name) this.updateNameTag(entity, entity.name, viewedId);
+    rendered.rig.root.visible = visible;
+    if (entity.name) this.updateNameTag(entity, entity.name, visible);
   }
 
-  private updateNameTag(entity: Entity, name: string, viewedId: number): void {
+  private updateNameTag(entity: Entity, name: string, visible: boolean): void {
     let tag = this.nameTags.get(entity.id);
     if (!tag) {
       let texture = this.nameTextures.get(name);
@@ -97,7 +106,7 @@ export class EntityRenderer {
       this.nameTags.set(entity.id, tag);
     }
     tag.position.set(entity.pos.x, entity.pos.y + 1.8, entity.pos.z);
-    tag.visible = entity.id !== viewedId;
+    tag.visible = visible;
   }
 
   private removeEntity(id: number): void {

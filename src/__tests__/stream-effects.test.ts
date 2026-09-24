@@ -39,7 +39,6 @@ function setup() {
     removeMesh: vi.fn(),
     removeRemesh: vi.fn(),
     deferredMeshes: new Set<string>(),
-    pendingSpawns: new Set<string>(),
     saveMeta: vi.fn(),
     controllerFor: () => new IdleController(),
   };
@@ -64,10 +63,9 @@ describe('StreamEffects', () => {
     );
     expect(order).toEqual(['water', 'light', 'water']);
     expect(context.deferredMeshes).toEqual(new Set(['0,0,0']));
-    expect(context.pendingSpawns).toEqual(new Set(['0,0,0', '4,0,0']));
   });
 
-  it('restores warm water state without settling and skips water/spawns for clients', async () => {
+  it('restores warm water state without settling and skips water for clients', async () => {
     const { context, effects } = setup();
     const chunk = context.world.ensureChunk(0, 0, 0);
     await effects.consume(update({ restored: [origin] }), context);
@@ -81,22 +79,21 @@ describe('StreamEffects', () => {
     });
     expect(context.water.restore).not.toHaveBeenCalled();
     expect(context.water.settle).not.toHaveBeenCalled();
-    expect(context.pendingSpawns.size).toBe(0);
   });
 
-  it('unloads meshes and resident mobs before saving host metadata', async () => {
+  it('unloads visuals and saves metadata without owning mob lifecycle', async () => {
     const { context, effects } = setup();
     const deer = context.sim.spawn({ x: 1, y: 2, z: 1 }, new IdleController(), { kindId: 'deer' });
     context.deferredMeshes.add('0,0,0');
     context.saveMeta.mockImplementation(() =>
-      expect(context.sim.all().map((e) => e.id)).not.toContain(deer.id),
+      expect(context.sim.all().map((e) => e.id)).toContain(deer.id),
     );
     await effects.consume(update({ unloaded: [origin] }), context);
     expect(context.removeMesh).toHaveBeenCalledWith(0, 0, 0);
     expect(context.light.unload).toHaveBeenCalledWith(0, 0, 0);
     expect(context.removeRemesh).toHaveBeenCalledWith('0,0,0');
     expect(context.deferredMeshes.size).toBe(0);
-    expect(context.sim.all()).toHaveLength(1);
+    expect(context.sim.all()).toHaveLength(2);
     expect(context.saveMeta).toHaveBeenCalledTimes(1);
   });
 
