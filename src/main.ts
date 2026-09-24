@@ -2,7 +2,7 @@ import * as THREE from 'three';
 import { MultiplayerProbe } from './diagnostics/multiplayer-probe';
 import { createBlockAtlas } from './block-atlas';
 import { Block, PLACEABLE, torchMeta, doorMeta, doorOpen, doorAxis, doorSide, isDoor, doorPlacementFromView } from './blocks';
-import { World, chunkKey, chunkOf, CHUNK_SIZE, WORLD_Y_MAX, WORLD_Y_MIN } from './world';
+import { World, chunkKey, chunkOf, WORLD_Y_MAX, WORLD_Y_MIN } from './world';
 import { TERRAIN_SEED } from './terrain';
 import * as streaming from './streaming';
 import { StreamEffects } from './streaming/stream-effects';
@@ -15,6 +15,7 @@ import { Hud } from './ui/hud';
 import { createGameMenus } from './ui/game-menus';
 import { meshChunk, type ChunkMesh, type LightSampler } from './chunk-mesher';
 import { ChunkRemesher } from './rendering/chunk-remesher';
+import { rebuildEditedChunks, queueMeshUpdates } from './rendering/mesh-invalidation';
 import { ProfRig, meshVerts, PROF_WORST_KEY } from './prof-rig';
 import { ChunkRenderer } from './rendering/chunk-renderer';
 import { ChunkMaterials } from './rendering/chunk-materials';
@@ -119,7 +120,10 @@ window.__lightDebug = lightSim;
 
 // Only player-placed springs are targetable water.
 const simHooks: ApplyHooks = {
-  onEdit: (x, y, z) => { remeshAround(x, y, z); lightSim.edit(x, y, z); },
+  onEdit: (x, y, z) => {
+    rebuildEditedChunks(world, [x, y, z], rebuildChunkMesh);
+    lightSim.edit(x, y, z);
+  },
   waterEdit: (x, y, z, block) => { waterSim.edit(x, y, z, block); },
   springTarget: (x, y, z) => waterSim.cellState(x, y, z).p === 1,
 };
@@ -342,25 +346,6 @@ const human = new HumanController(keys, 0, 0);
 
 const targetOutline = new TargetOutline(scene);
 
-// Border edits also invalidate the neighboring chunk's exposed faces.
-function remeshAround(wx: number, wy: number, wz: number): void {
-  const cx = chunkOf(wx);
-  const cy = chunkOf(wy);
-  const cz = chunkOf(wz);
-  rebuildChunkMesh(cx, cy, cz);
-  const lx = wx - cx * CHUNK_SIZE;
-  const ly = wy - cy * CHUNK_SIZE;
-  const lz = wz - cz * CHUNK_SIZE;
-  const touch: [number, number, number][] = [];
-  if (lx === 0) touch.push([cx - 1, cy, cz]);
-  if (lx === CHUNK_SIZE - 1) touch.push([cx + 1, cy, cz]);
-  if (lz === 0) touch.push([cx, cy, cz - 1]);
-  if (lz === CHUNK_SIZE - 1) touch.push([cx, cy, cz + 1]);
-  if (ly === 0) touch.push([cx, cy - 1, cz]);
-  if (ly === CHUNK_SIZE - 1) touch.push([cx, cy + 1, cz]);
-  for (const [nx, ny, nz] of touch) if (world.hasChunk(nx, ny, nz)) rebuildChunkMesh(nx, ny, nz);
-}
-
 function onPossess(): void {
   if (possessFromView(sim, human)) recording.recordViewed();
 }
@@ -522,14 +507,7 @@ function frame(now: number): void {
   // Clients receive water updates from the host; only authoritative worlds simulate water.
   if (!(mpSession instanceof ClientSession) && tickCrossed(tickBefore, worldTime.tick, WATER_STRIDE)) waterSim.tick(WATER_PULSE);
 
-  // Consume each touched set exactly once per frame.
-  for (const key of waterSim.touched) chunkRemesher.request(key);
-  waterSim.touched.clear();
-  for (const key of lightSim.touched) chunkRemesher.request(key);
-  lightSim.touched.clear();
-
-  deferredFirstMesh.forEach((key) => chunkRemesher.request(key));
-  deferredFirstMesh.clear();
+  queueMeshUpdates(chunkRemesher, waterSim.touched, lightSim.touched, deferredFirstMesh);
   const profDrainT0 = profMode ? performance.now() : 0;
   const vp = sim.viewed();
   chunkRemesher.drain(world, lightSampler, [
