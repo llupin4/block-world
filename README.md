@@ -191,7 +191,7 @@ src/
   chunk-mesher.ts    face-culled geometry builder with baked AO
   mesh-slices.ts     heavy remesh slice scheduling
   streaming.ts       load/remesh/unload ring around the player
-  streaming/         chunk lifecycle effects and asynchronous saved-chunk restoration
+  streaming/         visual chunk effects and shared warm/cold entity restoration
   player.ts          legacy AABB collision + fly/noclip controller
   entity.ts          entity/sim/possession model (player, deer, ghost, host/client hooks)
   raycast.ts         DDA voxel raycast (targeting)

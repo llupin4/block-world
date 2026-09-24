@@ -132,7 +132,7 @@ describe('StreamEffects', () => {
     expect(context.light.load).not.toHaveBeenCalled();
   });
 
-  it('skips fetched chunks outside the captured view range', async () => {
+  it('skips fetched chunks outside the current view range', async () => {
     const { context, effects } = setup();
     context.sim.viewed()!.pos.x = 1000;
     await effects.consume(update({ pending: [origin] }), context);

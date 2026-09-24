@@ -1,5 +1,8 @@
 import { World, chunkKey, chunkOf } from '../world';
 import { MobPopulation } from '../simulation/mob-population';
+import { ChunkRestoration } from '../streaming/chunk-restoration';
+import { restoredController } from '../startup/restore-entities';
+import { markNeighborsDirty } from '../streaming';
 import { entityState, shouldSendEntity } from './entity-state';
 import { WaterSim } from '../water';
 import { Sim, IdleController, type Controller, type Entity, type EntityRecord, type ApplyHooks } from '../entity';
@@ -51,6 +54,7 @@ export class HostSession {
   private pendingCells = new Map<string, Map<number, CellWrite>>();
   private syncedSettled = new Set<string>(); // chunk keys whose settled record has been pushed to loaded peers
   private readonly population = new MobPopulation();
+  private readonly restoration = new ChunkRestoration();
 
   constructor(transport: Transport, seed: number, opts: HostOpts = {}) {
     this.transport = transport;
@@ -291,6 +295,21 @@ export class HostSession {
       // in sections") instead of one continuous block.
       for (const c of r.rebuilt) this.waterSim.settle(c.cx, c.cy, c.cz);
       this.population.update(this.world, this.sim, r);
+      for (const c of r.restored) this.waterSim.restore(this.world.getChunk(c.cx, c.cy, c.cz)!);
+      void this.restoration.restore(r, {
+        world: this.world,
+        sim: this.sim,
+        persist: this.persist,
+        controllerFor: (record) => restoredController(this.world, this.sim, record),
+        wanted: (c) => this.anchors().some(a => Math.abs(c.cx - a.cx) <= a.radius && Math.abs(c.cz - a.cz) <= a.radius),
+        restored: (c) => {
+          const chunk = this.world.getChunk(c.cx, c.cy, c.cz)!;
+          this.waterSim.restore(chunk);
+          chunk.dirty = true;
+          const anchor = this.anchors()[0];
+          if (anchor) markNeighborsDirty(this.world, c.cx, c.cy, c.cz, anchor.cx, anchor.cz);
+        },
+      }).catch(error => console.error('[host] restore failed', error));
       for (const c of r.unloaded) this.syncedSettled.delete(chunkKey(c.cx, c.cy, c.cz));
     } else {
       this.lastStream = null;

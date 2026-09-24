@@ -453,7 +453,9 @@ function tickStreaming(): void {
 }
 
 function consumeStream(update: streaming.StreamingUpdate, source: PersistSource, isClient: boolean): void {
-  void streamEffects.consume(update, {
+  // Hosts restore records per simulation tick, including when no renderer exists.
+  const visualUpdate = mpSession instanceof HostSession ? { ...update, pending: [] } : update;
+  void streamEffects.consume(visualUpdate, {
     world,
     sim,
     persist: source,

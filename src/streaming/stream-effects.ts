@@ -1,5 +1,6 @@
 import type { Sim, Controller, EntityRecord } from '../entity';
-import { applyRecord, type PersistSource } from '../persistence';
+import type { PersistSource } from '../persistence';
+import { ChunkRestoration } from './chunk-restoration';
 import { inRange, markNeighborsDirty, type Coord, type StreamingUpdate } from '../streaming';
 import type { WaterSim } from '../water';
 import { chunkKey, chunkOf, type World } from '../world';
@@ -42,7 +43,7 @@ function unload(c: Coord, context: StreamContext): void {
 }
 
 export class StreamEffects {
-  private readonly restoring = new Set<string>();
+  private readonly restoration = new ChunkRestoration();
 
   consume(update: StreamingUpdate, context: StreamContext): Promise<void> {
     for (const c of update.unloaded) unload(c, context);
@@ -52,32 +53,24 @@ export class StreamEffects {
       loadLight(c, update.meshable, context);
     }
     for (const c of update.restored) restoreWaterAndLight(c, update.meshable, context);
-    return Promise.all(update.pending.map((c) => this.fetch(c, update.meshable, context))).then(
-      () => {},
-    );
-  }
-
-  private async fetch(c: Coord, meshable: Set<string>, context: StreamContext): Promise<void> {
-    const key = chunkKey(c.cx, c.cy, c.cz);
-    if (this.restoring.has(key)) return;
-    this.restoring.add(key);
-    const viewed = context.sim.viewed();
-    const cx = viewed ? chunkOf(viewed.pos.x) : 0;
-    const cz = viewed ? chunkOf(viewed.pos.z) : 0;
-    try {
-      const record = await context.persist.fetchRecord(c.cx, c.cy, c.cz);
-      if (!record) {
-        context.persist.dropPersisted(c.cx, c.cy, c.cz);
-        return;
-      }
-      if (!viewed || !inRange(c.cx, c.cz, cx, cz)) return;
-      if (context.world.hasChunk(c.cx, c.cy, c.cz)) return;
-      applyRecord(context.world, record, context.sim, context.controllerFor);
-      markNeighborsDirty(context.world, c.cx, c.cy, c.cz, cx, cz);
-      restoreWaterAndLight(c, meshable, context);
-    } finally {
-      // A failed fetch must not permanently prevent a later streaming update from retrying.
-      this.restoring.delete(key);
-    }
+    return this.restoration.restore(update, {
+      ...context,
+      wanted: (c) => {
+        const viewed = context.sim.viewed();
+        return !!viewed && inRange(c.cx, c.cz, chunkOf(viewed.pos.x), chunkOf(viewed.pos.z));
+      },
+      restored: (c) => {
+        const viewed = context.sim.viewed()!;
+        markNeighborsDirty(
+          context.world,
+          c.cx,
+          c.cy,
+          c.cz,
+          chunkOf(viewed.pos.x),
+          chunkOf(viewed.pos.z),
+        );
+        restoreWaterAndLight(c, update.meshable, context);
+      },
+    });
   }
 }

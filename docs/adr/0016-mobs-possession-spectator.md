@@ -145,3 +145,8 @@ sent at 5 Hz with scalar values rounded to 0.001. Clients interpolate mobs with 
 delay and gap tolerance. Spawn/despawn messages remain immediate, and omitted state entries
 retain their entities. The eight-client stress case measures roughly 56 KB/s/client with
 these settings, without raising its budget.
+
+Warm and cold record restoration now share `ChunkRestoration`: both restore saved entities
+with their original IDs and controllers. Hosts run it per simulation tick for the full union
+of peer interests, independently of render frames. Cold replies recheck current interest
+before applying; visual effects remain the renderer's responsibility.
