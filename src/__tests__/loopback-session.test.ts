@@ -34,6 +34,9 @@ describe('loopback startup', () => {
     const runtime = createLoopbackSession(config);
     expect(runtime.session).toBe(runtime.clients[2]);
     expect(runtime.session).not.toBe(runtime.host);
+    expect(runtime.session.world).not.toBe(runtime.host.world);
+    expect(runtime.session.sim).not.toBe(runtime.host.sim);
+    expect(runtime.session.worldTime).not.toBe(runtime.host.worldTime);
     expect(runtime.clients[2].controller).toBe(config.controller);
     expect([...runtime.hub.transports.keys()]).toEqual(['headless', 'other0', 'other1', 'me']);
     runtime.otherTransports[0].transport.disconnect();

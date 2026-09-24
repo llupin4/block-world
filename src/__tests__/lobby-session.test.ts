@@ -33,11 +33,18 @@ describe('lobby startup', () => {
     });
     hub.pump(0);
     expect(host.host).toBe(host.session);
+    expect(host.hub).toBeNull();
+    expect(host.otherTransports).toEqual([]);
     expect(host.clients).toEqual([]);
     expect(host.session.persist).toBe(persist);
     expect(host.session.sim.viewed()?.controller).toBe(controller);
     expect(host.session.sim.viewed()?.name).toBe('Host');
     expect(client.host).toBeNull();
+    expect(client.hub).toBeNull();
+    expect(client.otherTransports).toEqual([]);
+    expect(client.session.world).not.toBe(host.session.world);
+    expect(client.session.sim).not.toBe(host.session.sim);
+    expect(client.session.worldTime).not.toBe(host.session.worldTime);
     expect(client.clients).toEqual([client.session]);
     expect(client.clients[0].controller).toBe(controller);
     expect(client.clients[0].hostId).toBe('host');

@@ -43,6 +43,7 @@ import { ClientSession } from './net/client';
 import { sanitizeName } from './net/name';
 import { parseStartupOptions } from './startup/options';
 import { createLoopbackSession } from './startup/loopback-session';
+import type { SessionRuntime } from './startup/session-runtime';
 import { initializeSinglePlayer } from './startup/single-player';
 import { restoreReplay } from './startup/replay-session';
 import { restoredController } from './startup/restore-entities';
@@ -163,6 +164,22 @@ const multiplayerProbe = new MultiplayerProbe(mpActive ? mpMode as 'host' | 'cli
 
 // Start once; a stalled persistence boot falls back after 5 s and late metadata is ignored.
 let booted = false;
+
+function useMultiplayerRuntime(runtime: SessionRuntime): void {
+  mpSession = runtime.session;
+  mpHost = runtime.host;
+  mpClients = runtime.clients;
+  mpHub = runtime.hub;
+  mpOtherTransports = runtime.otherTransports;
+  world = runtime.session.world;
+  sim = runtime.session.sim;
+  worldTime = runtime.session.worldTime;
+  // A loopback client has a headless host, but renders the client's world.
+  if (runtime.session instanceof HostSession) waterSim = runtime.session.waterSim;
+  lightSim = new LightClient(world, worldTime);
+  window.__lightDebug = lightSim;
+}
+
 async function startGame(meta: WorldMeta | null): Promise<void> {
   if (booted) return;
   booted = true;
@@ -193,20 +210,11 @@ async function startGame(meta: WorldMeta | null): Promise<void> {
         showHostLeft(document);
       },
     });
-    mpSession = runtime.session;
-    mpHost = runtime.host;
-    mpClients = runtime.clients;
-    mpHub = null;
-    world = runtime.session.world;
-    sim = runtime.session.sim;
-    worldTime = runtime.session.worldTime;
+    useMultiplayerRuntime(runtime);
     if (runtime.host) {
-      waterSim = runtime.host.waterSim;
       const viewed = sim.viewed();
       if (viewed) human.setLook(viewed.yaw, viewed.pitch);
     }
-    lightSim = new LightClient(world, worldTime);
-    window.__lightDebug = lightSim;
     (window as unknown as Record<string, unknown>).__lobby = createLobbyView({
       document, code, isHost: lobbyHost, name, transport, session: runtime.session,
       copyCode: (value) => navigator.clipboard?.writeText(value),
@@ -232,17 +240,7 @@ async function startGame(meta: WorldMeta | null): Promise<void> {
         showHostLeft(document);
       },
     });
-    mpSession = runtime.session;
-    mpHost = runtime.host;
-    mpClients = runtime.clients;
-    mpOtherTransports = runtime.otherTransports;
-    mpHub = runtime.hub;
-    world = runtime.session.world;
-    sim = runtime.session.sim;
-    worldTime = runtime.session.worldTime;
-    if (runtime.session instanceof HostSession) waterSim = runtime.session.waterSim;
-    lightSim = new LightClient(world, worldTime);
-    window.__lightDebug = lightSim;
+    useMultiplayerRuntime(runtime);
     syncCamera();
     requestAnimationFrame(frame);
     return;

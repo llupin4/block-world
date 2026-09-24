@@ -3,6 +3,7 @@ import { ClientSession } from '../net/client';
 import type { Transport } from '../net/transport';
 import type { ApplyHooks, Controller } from '../entity';
 import type { Persistence } from '../persistence';
+import type { SessionRuntime } from './session-runtime';
 
 interface LobbySessionOptions {
   isHost: boolean;
@@ -16,7 +17,7 @@ interface LobbySessionOptions {
   hostLeft(client: ClientSession): void;
 }
 
-export function createLobbySession(options: LobbySessionOptions) {
+export function createLobbySession(options: LobbySessionOptions): SessionRuntime {
   if (options.isHost) {
     const host = new HostSession(options.transport, options.seed, {
       withOwnPlayer: true,
@@ -25,14 +26,14 @@ export function createLobbySession(options: LobbySessionOptions) {
       persist: options.persist,
       hooks: options.hooks,
     });
-    return { session: host, host, clients: [] as ClientSession[] };
+    return { session: host, host, clients: [], hub: null, otherTransports: [] };
   }
   const client = new ClientSession(options.transport, options.name, options.controller);
   client.setLightEdit(options.lightEdit);
   client.onPeerLeave((id) => {
     if (id === client.hostId) options.hostLeft(client);
   });
-  return { session: client, host: null, clients: [client] };
+  return { session: client, host: null, clients: [client], hub: null, otherTransports: [] };
 }
 
 export function generateRoomCode(random: () => number = Math.random): string {

@@ -2,7 +2,8 @@ import { ScriptController, type ScriptStep, type Controller, type ApplyHooks } f
 import type { Persistence } from '../persistence';
 import { HostSession } from '../net/host';
 import { ClientSession } from '../net/client';
-import { LoopbackHub, type Transport } from '../net/transport';
+import { LoopbackHub } from '../net/transport';
+import type { SessionRuntime } from './session-runtime';
 
 interface LoopbackOptions {
   mode: 'host' | 'client';
@@ -16,12 +17,9 @@ interface LoopbackOptions {
   hostLeft(): void;
 }
 
-export interface LoopbackSession {
-  session: HostSession | ClientSession;
+export interface LoopbackSession extends SessionRuntime {
   hub: LoopbackHub;
   host: HostSession;
-  clients: ClientSession[];
-  otherTransports: { transport: Transport; name: string }[];
 }
 
 const HOST_BOT_STEPS: ScriptStep[] = [
