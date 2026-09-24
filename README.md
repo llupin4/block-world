@@ -174,7 +174,7 @@ src/
   startup/          Boot coordination, URL options, multiplayer runtime, saved-world and replay restoration
   simulation/       fixed-step timing, multiplayer ticks, replay progression, natural mob population
   input/            keyboard/mouse controls, pointer lock, block and possession targeting
-  diagnostics/      multiplayer smoke-test actions and browser reports
+  diagnostics/      profiling orchestration, multiplayer smoke-test actions and browser reports
   rendering/        camera/water view, target outline, chunk remeshing, entity rigs and name tags
   ui/
     hotbar.ts         inventory state, independent of the browser

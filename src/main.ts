@@ -16,7 +16,7 @@ import { createGameMenus } from './ui/game-menus';
 import { meshChunk, type ChunkMesh, type LightSampler } from './chunk-mesher';
 import { ChunkRemesher } from './rendering/chunk-remesher';
 import { rebuildEditedChunks, queueMeshUpdates } from './rendering/mesh-invalidation';
-import { ProfRig, meshVerts, PROF_WORST_KEY } from './prof-rig';
+import { ProfilingSession } from './diagnostics/profiling-session';
 import { ChunkRenderer } from './rendering/chunk-renderer';
 import { ChunkMaterials } from './rendering/chunk-materials';
 import { CameraView, AIR_FOV } from './rendering/camera-view';
@@ -164,6 +164,7 @@ let mpHost: HostSession | null = null;
 let mpClients: ClientSession[] = [];
 let mpOtherTransports: { transport: { disconnect(): void }; name: string }[] = [];
 const multiplayerProbe = new MultiplayerProbe(mpActive ? mpMode as 'host' | 'client' : null, mpBots);
+const profiling = new ProfilingSession();
 
 // === startup ===
 
@@ -271,8 +272,11 @@ async function startGame(meta: WorldMeta | null): Promise<void> {
 
   // Preserve restored facing before the human controller supplies its first intent.
   { const ve = sim.viewed(); if (ve) human.setLook(ve.yaw, ve.pitch); }
-  if (profMode) { human.frozen = true; const ve = sim.viewed(); if (ve) ve.noclip = true; }
-  { const ve = sim.viewed(); profRig = profMode ? new ProfRig({ seed: TERRAIN_SEED, phase: meta ? worldTime.dayPhase : startPhase, render: !profNoRender, anchor: { x: ve?.pos.x ?? 0, y: ve?.pos.y ?? 0, z: ve?.pos.z ?? 0 } }) : null; }
+  if (profMode) profiling.start({
+    seed: TERRAIN_SEED,
+    phase: meta ? worldTime.dayPhase : startPhase,
+    render: !profNoRender,
+  }, human, sim.viewed());
   syncCamera();
   requestAnimationFrame(frame);
 }
@@ -297,7 +301,7 @@ const deferredFirstMesh = new Set<string>();
 
 const lightSampler: LightSampler = (x, y, z) => world.getLight(x, y, z);
 const chunkRemesher = new ChunkRemesher(swapChunkMesh, (key, stage, mesh) => {
-  if (key === PROF_WORST_KEY) profRig?.noteRemesh(stage, meshVerts(mesh));
+  profiling.noteRemesh(key, stage, mesh);
 });
 
 function swapChunkMesh(cx: number, cy: number, cz: number, mesh: ChunkMesh): void {
@@ -320,9 +324,6 @@ function removeChunkMesh(cx: number, cy: number, cz: number): void {
 }
 
 // === camera ===
-
-let profRig: ProfRig | null = null;
-let profDrainMs = 0;
 
 function syncCamera(): void {
   const client = mpSession instanceof ClientSession ? {
@@ -475,7 +476,7 @@ const frameStepper = new FrameStepper(performance.now());
 
 function frame(now: number): void {
   const frameT0 = performance.now();
-  const profT0 = profMode ? performance.now() : 0;
+  profiling.startFrame();
   const tickBefore = worldTime.tick;
   human.heldBlock = hotbar.block;
   const dt = frameStepper.advance(now, {
@@ -491,29 +492,19 @@ function frame(now: number): void {
   } else {
     tickStreaming();
   }
-  if (profRig) {
-
-    // lightSettled lives in the worker; the profiling rig uses remesh quiescence instead.
-    const wc = world.getChunk(2, 1, 0);
-    const wp = profRig.beginFrame({
-      worstLoaded: wc !== undefined,
-      worstSettled: wc !== undefined && !chunkRemesher.has(PROF_WORST_KEY),
-    }).waypoint;
-    const vep = sim.viewed();
-    if (vep) { vep.pos.x = wp.x; vep.pos.y = wp.y; vep.pos.z = wp.z; vep.vel = { x: 0, y: 0, z: 0 }; }
-  }
+  profiling.positionView(world, chunkRemesher, sim.viewed());
   lightSim.tick(LIGHT_TICK_BUDGET);
 
   // Clients receive water updates from the host; only authoritative worlds simulate water.
   if (!(mpSession instanceof ClientSession) && tickCrossed(tickBefore, worldTime.tick, WATER_STRIDE)) waterSim.tick(WATER_PULSE);
 
   queueMeshUpdates(chunkRemesher, waterSim.touched, lightSim.touched, deferredFirstMesh);
-  const profDrainT0 = profMode ? performance.now() : 0;
-  const vp = sim.viewed();
-  chunkRemesher.drain(world, lightSampler, [
-    chunkOf(vp?.pos.x ?? 0), chunkOf(vp?.pos.y ?? 0), chunkOf(vp?.pos.z ?? 0),
-  ]);
-  profDrainMs = profMode ? performance.now() - profDrainT0 : 0;
+  profiling.measureDrain(() => {
+    const vp = sim.viewed();
+    chunkRemesher.drain(world, lightSampler, [
+      chunkOf(vp?.pos.x ?? 0), chunkOf(vp?.pos.y ?? 0), chunkOf(vp?.pos.z ?? 0),
+    ]);
+  });
   // Interpolate client poses before positioning the camera and targeting.
   if (mpSession instanceof ClientSession) mpSession.syncPoses();
   syncCamera();
@@ -538,12 +529,10 @@ function frame(now: number): void {
   entityRenderer.setBrightness(LIGHT_AMBIENT + (1 - LIGHT_AMBIENT) * skySample.dayness);
   clouds.update(camera.position.x, camera.position.z, camera.position.y, worldTime.time, skySample.worldDim);
   if (!profNoRender) renderer.render(scene, camera);
-  if (profRig) {
-    const rep = profRig.noteFrame(performance.now() - profT0, profDrainMs);
-    if (rep) {
-      console.log('PROF-RESULT ' + JSON.stringify(rep));
-      (window as unknown as Record<string, unknown>).__profResult = rep;
-    }
+  const profReport = profiling.finishFrame();
+  if (profReport) {
+    console.log('PROF-RESULT ' + JSON.stringify(profReport));
+    (window as unknown as Record<string, unknown>).__profResult = profReport;
   }
   const report = multiplayerProbe.update({
     mode: mpSession ? (mpSession instanceof HostSession ? 'host' : 'client') : null,
